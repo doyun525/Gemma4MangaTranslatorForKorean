@@ -107,6 +107,7 @@ function buildOptionSummary(options = {}) {
     includeSoundEffects: shouldIncludeSoundEffects(options),
     ocrBboxProvider: resolveOcrBboxProvider(options),
     ocrDevice: resolveOcrDevice(options),
+    ocrEngine: options.ocrEngine ?? process.env.MANGA_TRANSLATOR_OCR_ENGINE ?? null,
     ocrRuntimeDir: resolveOcrRuntimeDir(options),
     launchMode: launchTarget.launchMode,
     hfHomeDir: resolveHfHomeDir(options),
@@ -1021,6 +1022,8 @@ const OVERLAY_PROMPT_SECTIONS = [
     "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese or English text, correctly read, correctly typed, and correctly translated.",
     "Use confidence below 0.72 when the crop is hard to read, partly clipped, possibly decorative, or the translation may be uncertain.",
     "The jp field stores the original source text even when the source language is English. If jp has multiple visible source lines, put every readable source line in jp. Continuation lines after jp: belong to jp until the ko: key.",
+    "The ko field MUST be Korean written in Hangul. Never write English, Chinese, romaji, pinyin, or source-language text in ko except unavoidable names, numbers, or short symbols.",
+    "If you are unsure, still write the best concise Korean translation in ko. Do not copy jp into ko and do not translate ko into English.",
     "Write ko as natural Korean for horizontal reading. Do not mirror source line breaks; use commas or short Korean phrases unless a real list or dialogue pause needs a line break.",
     "When the Korean translation would be too long for the bbox, insert natural Korean line breaks inside ko so it fits the same visual text area. Prefer 1-3 short lines for dialogue and captions.",
     "For OCR candidate records, use that candidate's x1, y1, x2, y2 rectangle as the available text box when deciding ko line breaks.",
@@ -1087,8 +1090,11 @@ const PROMPT_KO_BBOX_LINES_MULTIVIEW = buildOverlayPrompt();
 
 function buildSystemPrompt(options = {}) {
   const lines = [
+    "너는 만화 OCR 및 번역 엔진이다. 모든 번역 결과는 반드시 한국어 한글로 작성한다.",
+    "ko 필드에는 영어, 중국어, 일본어, 로마자, 병음을 쓰지 않는다. ko는 한국어 번역문이어야 한다.",
     "You are an OCR and manga-translation engine.",
     "Translate all Japanese and English source text into natural Korean.",
+    "Every ko field must be Korean Hangul. Never answer ko in English, Chinese, Japanese, romaji, or pinyin.",
     "Return only the machine-readable record format requested by the user prompt.",
     "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
     "Never merge separate speech bubbles, including touching or stacked balloon lobes."
@@ -1173,6 +1179,7 @@ function buildTaskSection(options = {}, imageVariants = []) {
   const textOnlyMode = !shouldSendInitialImages(options);
   return [
     "Task",
+    "중요: 모든 번역 결과는 반드시 한국어 한글로 작성한다. ko 필드에는 영어, 중국어, 일본어, 로마자, 병음을 쓰지 않는다.",
     textOnlyMode
       ? "You are given OCR candidate records from a manga page. No image is included in this request."
       : hasAssistImages
@@ -1188,6 +1195,7 @@ function buildTaskSection(options = {}, imageVariants = []) {
         ? "Image 1 is the coordinate-authority selected crop."
         : "Image 1 is the coordinate-authority full page.",
     "Detect every visible Japanese or English text group and translate it into concise Korean.",
+    "일본어/영어 원문을 모두 자연스러운 한국어로 번역한다. ko: 뒤에는 반드시 한글 한국어 문장만 쓴다.",
     shouldIncludeSoundEffects(options)
       ? "Include dialogue, narration captions, meaningful labels/signs, and sound-effect lettering."
       : "Translate dialogue, narration captions, and meaningful labels/signs only. Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX.",
@@ -1284,8 +1292,11 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
   if (!shouldSendInitialImages(options)) {
     return [
       "OCR text-only mode",
+      "중요: 이 요청은 OCR 텍스트를 한국어로 번역하는 작업이다. ko 필드는 반드시 한글 한국어여야 한다.",
       "No page image is included in this request. Use only the OCR candidate records below.",
       "Translate each candidate's ocrText into natural Korean and keep the exact candidate id and x1, y1, x2, y2.",
+      "Every ko value must contain Korean Hangul for translatable dialogue/caption text. Do not output English explanations or Chinese translations in ko.",
+      "ko에 영어 번역, 중국어 번역, 일본어 원문 복사, 로마자 표기를 쓰면 실패한 출력이다.",
       "Because the image is unavailable, do not invent missing text outside candidates.",
       "Use type solid for ocr_textbox, speech, bubble, caption, or dialogue labels. Use type nonsolid for ocr_textline, ocr_textgroup, handwriting, label, or uncertain labels.",
       shouldIncludeSoundEffects(options)
@@ -1300,10 +1311,13 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
 
   return [
     "OCR bbox candidates",
+    "중요: 각 후보의 OCR 텍스트를 한국어로 번역한다. ko 필드는 반드시 한글 한국어만 사용한다.",
     "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
     "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
     "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when solid-background and nonsolid-background candidates are close together.",
     "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
+    "For every translatable record, ko must be Korean Hangul. If the source text is Japanese, English, or mixed, translate it into Korean only.",
+    "ko에 영어, 중국어, 일본어, 로마자, 병음을 출력하지 않는다. 이름/숫자/짧은 기호를 제외하면 ko에는 한글이 포함되어야 한다.",
     shouldIncludeSoundEffects(options)
       ? `Required candidate ids: ${candidateIds.join(", ")}.`
       : `Required candidate ids for dialogue, captions, signs, labels, and UI text: ${candidateIds.join(", ")}. Skip candidates that are only SFX, background sound lettering, reaction lettering, or decorative effects.`,
@@ -1956,11 +1970,13 @@ function buildCropRetryPrompt(targets = [], options = {}) {
 
   return [
     "# Task",
+    "중요: 아래 crop 안의 일본어/영어 원문을 한국어 한글로 번역한다. ko 필드는 반드시 한국어여야 한다.",
     "You are directly OCR-reading and translating only the low-confidence manga crop images listed below.",
     "Image 1 is the full page for context only. Each following image is an expanded crop for exactly one target id.",
     "Do not detect new text, do not output extra ids, and do not change any bbox geometry.",
     "For each target, ignore any previous model OCR/translation. The crop image itself is the authority.",
     "Read all real Japanese or English text inside that crop for the same target id, then translate it naturally into Korean.",
+    "Every ko field must be Korean Hangul. Do not output English, Chinese, Japanese, romaji, or pinyin in ko.",
     shouldIncludeSoundEffects(options)
       ? "Sound-effect or reaction lettering may be translated only when the target itself is a real SFX item."
       : "If the target is sound-effect lettering, background sound lettering, reaction lettering, or decorative SFX, output type: reject, confidence: 1, jp: [non-text], ko: [non-text].",
@@ -2081,6 +2097,19 @@ function resolveConfiguredModelFile(options = {}) {
   return String(options.modelFile ?? process.env.LLAMA_ARG_HF_FILE ?? "").trim() || DEFAULT_HF_FILE;
 }
 
+function shouldUseChatmlTemplate(options = {}) {
+  const explicit = String(process.env.MANGA_TRANSLATOR_CHAT_TEMPLATE ?? "").trim().toLowerCase();
+  if (explicit === "chatml") {
+    return true;
+  }
+  if (explicit === "model" || explicit === "jinja") {
+    return false;
+  }
+
+  const modelId = `${resolveConfiguredModelRepo(options)} ${resolveConfiguredModelFile(options)}`.toLowerCase();
+  return modelId.includes("translategemma");
+}
+
 function resolveRequestModelName(options = {}) {
   if (isOpenAICodexProvider(options)) {
     return resolveConfiguredCodexModel(options);
@@ -2144,6 +2173,10 @@ function resolveOcrBboxProvider(options = {}) {
   const explicit = String(options.ocrBboxProvider ?? process.env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER ?? "").trim();
   if (explicit) {
     return explicit;
+  }
+  const engine = String(options.ocrEngine ?? process.env.MANGA_TRANSLATOR_OCR_ENGINE ?? "").trim();
+  if (engine === "paddleocr-v5" || engine === "paddleocr-vl") {
+    return engine;
   }
   if (isTruthy(process.env.MANGA_TRANSLATOR_DISABLE_OCR_BBOX)) {
     return "none";
@@ -2223,7 +2256,7 @@ async function collectOcrBboxHints(options = {}) {
   } catch (error) {
     const diagnostic = buildOcrBboxDiagnostic(provider, error);
     diagnostics.push(diagnostic);
-    if (provider === "paddleocr-vl" && isOcrGpuRequested(options)) {
+    if (isPaddleOcrProvider(provider) && isOcrGpuRequested(options)) {
       emitRuntimeProgress(options, "ocr_running", "Paddle OCR GPU 실행 실패", diagnostic.message);
       throw createOcrRuntimeError(
         "Paddle OCR GPU 실행에 실패했습니다. GPU 설정을 쓰려면 CUDA가 보이는 GPU Paddle 런타임이 필요합니다. CPU로 바꾸면 계속 진행할 수 있습니다.",
@@ -2305,7 +2338,7 @@ function buildOcrBboxDiagnostic(provider, error, extra = {}) {
 async function runOcrBboxCommand(options = {}, provider = "external-command") {
   await mkdir(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, "ocr-bbox-hints.json");
-  const runtime = provider === "paddleocr-vl" ? await ensurePaddleOcrRuntime(options) : null;
+  const runtime = isPaddleOcrProvider(provider) ? await ensurePaddleOcrRuntime(options) : null;
   const command = buildOcrBboxCommand(options, provider, outputPath, runtime);
   emitRuntimeProgress(options, "ocr_running", "Paddle OCR 모델 다운로드/위치 분석 중", `장치: ${resolveOcrDeviceLabel(options)}`);
   const { stdout, stderr } = await runShellCommand(command, {
@@ -2354,7 +2387,7 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
   const firstOptions = normalizedOptions[0] || {};
   const batchOptions = withoutPageProgressOptions(firstOptions);
   const provider = resolveOcrBboxProvider(firstOptions);
-  if (provider !== "paddleocr-vl") {
+  if (!isPaddleOcrProvider(provider)) {
     const results = [];
     for (const options of normalizedOptions) {
       results.push(await collectOcrBboxHints(options));
@@ -2737,6 +2770,10 @@ function resolveOcrInstallBatchProgressRanges(installBatches, startPercent, endP
     cursor = next;
     return range;
   });
+}
+
+function isPaddleOcrProvider(provider) {
+  return provider === "paddleocr-vl" || provider === "paddleocr-v5";
 }
 
 function resolvePipProgressBarMode() {
@@ -3229,10 +3266,10 @@ function buildOcrBboxCommand(options = {}, provider, outputPath, runtime = null)
     return renderCommandTemplate(template, replacements);
   }
 
-  if (provider === "paddleocr-vl") {
+  if (isPaddleOcrProvider(provider)) {
     const python = quoteCommandArg(resolveOcrRuntimePythonPath(runtime, options));
     const scriptPath = quoteCommandArg(path.join(__dirname, "paddleocr-vl-bboxes.py"));
-    return `${python} -u ${scriptPath} --image ${quoteCommandArg(image)} --output ${quoteCommandArg(outputPath)} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
+    return `${python} -u ${scriptPath} --provider ${quoteCommandArg(provider)} --image ${quoteCommandArg(image)} --output ${quoteCommandArg(outputPath)} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
   }
 
   throw new Error("OCR bbox provider requires MANGA_TRANSLATOR_OCR_BBOX_CMD.");
@@ -3242,7 +3279,7 @@ function buildOcrBboxBatchCommand(options = {}, batchPath, runtime = null, progr
   const python = quoteCommandArg(resolveOcrRuntimePythonPath(runtime, options));
   const scriptPath = quoteCommandArg(path.join(__dirname, "paddleocr-vl-bboxes.py"));
   const progressArg = progressPath ? ` --progress ${quoteCommandArg(progressPath)}` : "";
-  return `${python} -u ${scriptPath} --batch ${quoteCommandArg(batchPath)}${progressArg} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
+  return `${python} -u ${scriptPath} --provider ${quoteCommandArg(resolveOcrBboxProvider(options))} --batch ${quoteCommandArg(batchPath)}${progressArg} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
 }
 
 function resolveOcrRuntimePythonPath(runtime = null, options = {}) {
@@ -3484,6 +3521,9 @@ function normalizeOcrBboxHintPayload(payload, options = {}) {
       continue;
     }
     const ocrText = sanitizeOcrTextForPrompt(readOcrCandidateText(candidate));
+    if (!shouldIncludeSoundEffects(options) && isLikelySoundEffectOcrCandidate({ label, ocrText, box, originalWidth, originalHeight })) {
+      continue;
+    }
     hints.push({
       id: hints.length + 1,
       label: sanitizeHintLabel(label),
@@ -3494,6 +3534,70 @@ function normalizeOcrBboxHintPayload(payload, options = {}) {
   }
 
   return hints.slice(0, 80);
+}
+
+function isLikelySoundEffectOcrCandidate({ label, ocrText, box, originalWidth, originalHeight }) {
+  const normalizedLabel = sanitizeHintLabel(label);
+  const text = normalizeOcrTextValue(ocrText);
+  const compact = text.replace(/\s+/g, "");
+  const width = Math.max(1, Number(box?.x2) - Number(box?.x1));
+  const height = Math.max(1, Number(box?.y2) - Number(box?.y1));
+  const pageArea = Math.max(1, Number(originalWidth || 0) * Number(originalHeight || 0));
+  const areaRatio = (width * height) / pageArea;
+  const looseTextLabel = /(?:ocr_textline|ocr_textgroup|textline|textgroup|handwriting|label|unknown|text)/i.test(normalizedLabel);
+
+  if (!looseTextLabel) {
+    return false;
+  }
+  if (!compact) {
+    return false;
+  }
+  if (isMostlySymbolicOcrText(compact)) {
+    return true;
+  }
+  if (isKatakanaSoundEffectText(compact)) {
+    return true;
+  }
+  if (areaRatio > 0.012 && isShortKanaReactionText(compact)) {
+    return true;
+  }
+  return false;
+}
+
+function isMostlySymbolicOcrText(text) {
+  const stripped = text.replace(/[!?！？…。、,.・~〜ー―\-－\s]/g, "");
+  if (!stripped) {
+    return true;
+  }
+  if ([...stripped].length <= 2 && !/[A-Za-z0-9一-龯ぁ-ゖァ-ヺ]/u.test(stripped)) {
+    return true;
+  }
+  return false;
+}
+
+function isKatakanaSoundEffectText(text) {
+  const letters = [...text].filter((char) => /[A-Za-z0-9一-龯ぁ-ゖァ-ヺ]/u.test(char));
+  if (letters.length === 0 || letters.length > 14) {
+    return false;
+  }
+  const katakanaLike = letters.filter((char) => /[ァ-ヺー]/u.test(char)).length;
+  const hiraganaLike = letters.filter((char) => /[ぁ-ゖ]/u.test(char)).length;
+  const kanjiLike = letters.filter((char) => /[一-龯]/u.test(char)).length;
+  if (kanjiLike > 0) {
+    return false;
+  }
+  if (katakanaLike >= Math.max(2, letters.length * 0.65)) {
+    return true;
+  }
+  return letters.length <= 5 && katakanaLike + hiraganaLike === letters.length && /[ッっーァ-ヺ]/u.test(text);
+}
+
+function isShortKanaReactionText(text) {
+  const letters = [...text].filter((char) => /[ぁ-ゖァ-ヺー]/u.test(char));
+  if (letters.length === 0 || letters.length > 8) {
+    return false;
+  }
+  return letters.length / Math.max(1, [...text].length) > 0.6 && !/[一-龯A-Za-z0-9]/u.test(text);
 }
 
 function collectOcrBboxCandidates(payload) {
@@ -3766,7 +3870,15 @@ function buildLaunchArgs(options) {
   ];
 
   if (useBeellamaGemmaLaunch) {
-    args.push("--kv-unified", "--jinja", "--no-mmap", "--mlock", "--no-host");
+    args.push("--kv-unified");
+  }
+  if (shouldUseChatmlTemplate(options)) {
+    args.push("--no-jinja", "--chat-template", "chatml");
+  } else if (useBeellamaGemmaLaunch) {
+    args.push("--jinja");
+  }
+  if (useBeellamaGemmaLaunch) {
+    args.push("--no-mmap", "--mlock", "--no-host");
   }
   if (typeof options.threads === "number" && Number.isFinite(options.threads) && options.threads > 0) {
     args.push("--threads", String(Math.round(options.threads)));
@@ -4142,6 +4254,25 @@ async function requestTranslation(server, options) {
   };
 
   if (!response.ok) {
+    if (
+      isImageInputUnsupportedResponse(rawText) &&
+      shouldSendInitialImages(promptOptions) &&
+      ocrBboxResult.textEvidenceCount > 0
+    ) {
+      emitRuntimeProgress(
+        promptOptions,
+        "model_requesting",
+        "이미지 미지원 모델 감지",
+        "OCR 텍스트만 사용해 다시 번역합니다."
+      );
+      return requestTranslation(server, {
+        ...options,
+        label: `${options.label || "page"}-ocr-text-fallback`,
+        translationMode: "ocr-text",
+        promptOverrideText: undefined,
+        ocrBboxHints: ocrBboxResult.hints
+      });
+    }
     throw createDetailedError(`${resolveProviderDisplayName(promptOptions)} request failed (${response.status}).`, {
       requestSummary,
       status: response.status,
@@ -4178,6 +4309,10 @@ async function requestTranslation(server, options) {
     rawResponse: parsed,
     outputText
   };
+}
+
+function isImageInputUnsupportedResponse(rawText = "") {
+  return /image input is not supported|image input.*unsupported|images?.*not supported/i.test(String(rawText));
 }
 
 async function requestCropRetryTranslation(server, options, targets = []) {

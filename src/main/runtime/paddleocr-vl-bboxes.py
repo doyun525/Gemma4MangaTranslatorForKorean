@@ -43,18 +43,12 @@ def main() -> int:
     parser.add_argument("--batch", default=None, help="JSON batch manifest with image/output items.")
     parser.add_argument("--progress", default=None, help="Optional JSONL progress output path.")
     parser.add_argument("--pipeline-version", default="v1.5", choices=["v1", "v1.5"])
+    parser.add_argument("--provider", default="paddleocr-vl", choices=["paddleocr-vl", "paddleocr-v5"])
     parser.add_argument("--device", default=None, help="Optional Paddle device, e.g. gpu:0 or cpu.")
     args = parser.parse_args()
     if args.device:
       os.environ["MANGA_TRANSLATOR_PADDLEOCR_DEVICE"] = args.device
 
-    try:
-      from paddleocr import PaddleOCRVL
-    except Exception as exc:  # pragma: no cover - depends on optional local install.
-      raise RuntimeError(
-          "PaddleOCR-VL is not installed. Install paddleocr/paddlex and PaddlePaddle, "
-          "or provide MANGA_TRANSLATOR_OCR_BBOX_CMD."
-      ) from exc
     if Image is None:
       raise RuntimeError("Pillow is not installed, so image dimensions cannot be read.")
 
@@ -64,8 +58,8 @@ def main() -> int:
 
     ensure_requested_device(args.device)
 
-    pipeline = PaddleOCRVL(**build_pipeline_kwargs(args))
-    textline_detector = create_textline_detector()
+    pipeline = create_vl_pipeline(args) if args.provider == "paddleocr-vl" else None
+    textline_detector = create_textline_detector(required=args.provider == "paddleocr-v5")
     try:
       summaries = []
       total = len(batch_items)
@@ -85,6 +79,7 @@ def main() -> int:
             output_path=Path(item["output"]),
             pipeline=pipeline,
             textline_detector=textline_detector,
+            provider=args.provider,
         )
         summaries.append(summary)
         emit_progress(
@@ -98,9 +93,10 @@ def main() -> int:
             },
         )
     finally:
-      close = getattr(pipeline, "close", None)
-      if callable(close):
-        close()
+      if pipeline is not None:
+        close = getattr(pipeline, "close", None)
+        if callable(close):
+          close()
       close_textline_detector(textline_detector)
 
     print(json.dumps({"items": summaries, "count": len(summaries)}, ensure_ascii=False), flush=True)
@@ -155,47 +151,59 @@ def build_pipeline_kwargs(args: argparse.Namespace) -> dict:
     return pipeline_kwargs
 
 
-def write_page_bboxes(image_path: Path, output_path: Path, pipeline: object, textline_detector: object) -> dict:
+def create_vl_pipeline(args: argparse.Namespace) -> object:
+    try:
+      from paddleocr import PaddleOCRVL
+    except Exception as exc:  # pragma: no cover - depends on optional local install.
+      raise RuntimeError(
+          "PaddleOCR-VL is not installed. Install paddleocr/paddlex and PaddlePaddle, "
+          "or provide MANGA_TRANSLATOR_OCR_BBOX_CMD."
+      ) from exc
+    return PaddleOCRVL(**build_pipeline_kwargs(args))
+
+
+def write_page_bboxes(image_path: Path, output_path: Path, pipeline: object, textline_detector: object, provider: str) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with Image.open(image_path) as image:
       width, height = image.size
 
-    results = pipeline.predict(
-        str(image_path),
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_layout_detection=True,
-        use_chart_recognition=False,
-        use_seal_recognition=False,
-        use_ocr_for_image_block=False,
-        format_block_content=False,
-        merge_layout_blocks=False,
-    )
     items = []
-    for result in results:
-      for block in result.get("parsing_res_list", []) or []:
-        label = normalize_label(getattr(block, "label", None))
-        if label in IGNORED_LABELS:
-          continue
-        bbox = getattr(block, "bbox", None)
-        if not bbox or len(bbox) < 4:
-          continue
-        x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
-        if x2 <= x1 or y2 <= y1:
-          continue
-        item = {
-            "id": len(items) + 1,
-            "label": label or "text",
-            "x1": clamp(x1, 0, width),
-            "y1": clamp(y1, 0, height),
-            "x2": clamp(x2, 0, width),
-            "y2": clamp(y2, 0, height),
-        }
-        ocr_text = clean_ocr_text(extract_block_text(block))
-        if ocr_text:
-          item["ocrText"] = ocr_text
-        items.append(item)
+    if pipeline is not None:
+      results = pipeline.predict(
+          str(image_path),
+          use_doc_orientation_classify=False,
+          use_doc_unwarping=False,
+          use_layout_detection=True,
+          use_chart_recognition=False,
+          use_seal_recognition=False,
+          use_ocr_for_image_block=False,
+          format_block_content=False,
+          merge_layout_blocks=False,
+      )
+      for result in results:
+        for block in result.get("parsing_res_list", []) or []:
+          label = normalize_label(getattr(block, "label", None))
+          if label in IGNORED_LABELS:
+            continue
+          bbox = getattr(block, "bbox", None)
+          if not bbox or len(bbox) < 4:
+            continue
+          x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
+          if x2 <= x1 or y2 <= y1:
+            continue
+          item = {
+              "id": len(items) + 1,
+              "label": label or "text",
+              "x1": clamp(x1, 0, width),
+              "y1": clamp(y1, 0, height),
+              "x2": clamp(x2, 0, width),
+              "y2": clamp(y2, 0, height),
+          }
+          ocr_text = clean_ocr_text(extract_block_text(block))
+          if ocr_text:
+            item["ocrText"] = ocr_text
+          items.append(item)
 
     items.extend(
         collect_textline_candidates(
@@ -210,7 +218,7 @@ def write_page_bboxes(image_path: Path, output_path: Path, pipeline: object, tex
     renumber_items(items)
 
     payload = {
-        "source": "paddleocr-vl",
+        "source": provider,
         "coordinateSpace": "pixels",
         "width": width,
         "height": height,
@@ -254,7 +262,7 @@ def clamp(value: int, lower: int, upper: int) -> int:
     return max(lower, min(upper, value))
 
 
-def create_textline_detector() -> object:
+def create_textline_detector(required: bool = False) -> object:
     if os.environ.get("MANGA_TRANSLATOR_DISABLE_PADDLEOCR_LINES", "").lower() in {"1", "true", "yes", "on"}:
       return None
 
@@ -274,6 +282,8 @@ def create_textline_detector() -> object:
       return PaddleOCR(**ocr_kwargs)
     except Exception as exc:
       print(f"[paddleocr-vl-bboxes] textline detector unavailable: {exc}", file=sys.stderr)
+      if required:
+        raise RuntimeError("PP-OCRv5 textline detector is not available. Install paddleocr and PaddlePaddle.") from exc
       return None
 
 

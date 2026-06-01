@@ -83,7 +83,9 @@ logInfo("Application process starting", {
   dataRoot: appPaths.dataRoot,
   runtimeDir: appPaths.runtimeDir,
   llamaServerPath: appPaths.llamaServerPath,
+  pathScope: "default app paths; settings.storage.modelCacheDir is applied when building model options",
   hfHomeDir: appPaths.hfHomeDir ?? null,
+  hfHubCacheDir: appPaths.hfHubCacheDir ?? null,
   electronRunAsNode: process.env.ELECTRON_RUN_AS_NODE ?? null
 });
 
@@ -325,11 +327,17 @@ function registerIpc(): void {
     return result.filePaths[0];
   });
   ipcMain.handle("settings:test-model", async (event, settings: AppSettings, providedTestId?: string): Promise<ModelTestResult> => {
+    const savedSettings = await getAppSettings();
+    const effectiveSettings: AppSettings = {
+      ...settings,
+      storage: settings.storage ?? savedSettings.storage
+    };
+
     if (activeJob) {
       return {
         ok: false,
         message: "번역 작업 중에는 모델 테스트를 실행할 수 없습니다.",
-        launchMode: resolveSettingsLaunchMode(settings)
+        launchMode: resolveSettingsLaunchMode(effectiveSettings)
       };
     }
 
@@ -347,7 +355,7 @@ function registerIpc(): void {
         jobId: `settings-test-${testId}`,
         runDir: join(appPaths.dataRoot, "model-tests", testId),
         paths: appPaths,
-        settings
+        settings: effectiveSettings
       }),
       onProgress: (progress: Omit<ModelTestProgressEvent, "id">) => {
         sendProgress(progress);
@@ -419,7 +427,7 @@ function registerIpc(): void {
       return {
         ok: false,
         message: formatModelTestError(error),
-        launchMode: resolveSettingsLaunchMode(settings)
+        launchMode: resolveSettingsLaunchMode(effectiveSettings)
       };
     } finally {
       if (isOpenAIOAuthEndpoint(server)) {

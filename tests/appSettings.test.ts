@@ -13,6 +13,7 @@ import {
   DEFAULT_OCR_BBOX_EXPAND_X_RATIO,
   DEFAULT_OCR_BBOX_EXPAND_Y_RATIO,
   DEFAULT_OCR_DEVICE,
+  DEFAULT_OCR_ENGINE,
   DEFAULT_TEXT_OUTLINE_WIDTH_PX,
   DEFAULT_TRANSLATION_MODE,
   parseStoredAppSettings,
@@ -35,6 +36,7 @@ describe("app settings helpers", () => {
     expect(defaults.codex.reasoningEffort).toBe(DEFAULT_CODEX_REASONING_EFFORT);
     expect(defaults.codex.oauthPort).toBe(DEFAULT_CODEX_OAUTH_PORT);
     expect(defaults.ocr.device).toBe(DEFAULT_OCR_DEVICE);
+    expect(defaults.ocr.engine).toBe(DEFAULT_OCR_ENGINE);
     expect(defaults.translation.mode).toBe(DEFAULT_TRANSLATION_MODE);
     expect(defaults.translation.includeSoundEffects).toBe(DEFAULT_INCLUDE_SOUND_EFFECTS);
     expect(defaults.translation.ocrBboxExpandXRatio).toBe(DEFAULT_OCR_BBOX_EXPAND_X_RATIO);
@@ -67,6 +69,14 @@ describe("app settings helpers", () => {
         modelSource: "huggingface",
         modelRepo: "custom/repo",
         modelFile: "env-default.gguf",
+        customModelPresets: [
+          {
+            id: "custom-repo-env-default-gguf",
+            label: "repo / env-default",
+            modelRepo: "custom/repo",
+            modelFile: "env-default.gguf"
+          }
+        ],
         vramMode: defaults.gemma.vramMode
       },
       codex: defaults.codex,
@@ -113,7 +123,8 @@ describe("app settings helpers", () => {
         oauthPort: DEFAULT_CODEX_OAUTH_PORT
       },
       ocr: {
-        device: "gpu"
+        device: "gpu",
+        engine: DEFAULT_OCR_ENGINE
       },
       translation: {
         mode: "ocr-text-with-image-retry",
@@ -149,6 +160,7 @@ describe("app settings helpers", () => {
     expect(options.codexReasoningEffort).toBe(DEFAULT_CODEX_REASONING_EFFORT);
     expect(options.codexOauthPort).toBe(DEFAULT_CODEX_OAUTH_PORT);
     expect(options.ocrDevice).toBe("gpu");
+    expect(options.ocrEngine).toBe(DEFAULT_OCR_ENGINE);
     expect(options.translationMode).toBe("ocr-text-with-image-retry");
     expect(options.includeSoundEffects).toBe(false);
     expect(options.ocrBboxExpandXRatio).toBe(0.25);
@@ -251,6 +263,66 @@ describe("app settings helpers", () => {
     expect(options.draftModelFile).toBeTruthy();
   });
 
+  it("disables the default DFlash draft for custom full VRAM models", () => {
+    const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40 });
+    const options = buildBaseTranslationOptions({
+      jobId: "job-full-custom",
+      runDir: "C:/runs/job-full-custom",
+      paths: {
+        dataRoot: "C:/app-data",
+        toolsDir: "C:/tools",
+        llamaServerPath: "C:/tools/llama-server.exe",
+        hfHomeDir: "C:/hf-home",
+        hfHubCacheDir: "C:/hf-home/hub"
+      },
+      settings: {
+        ...defaults,
+        gemma: {
+          ...defaults.gemma,
+          modelRepo: "mradermacher/gemma-4-E4B-it-The-DECKARD-V2-Strong-HERETIC-UNCENSORED-Thinking-i1-GGUF",
+          modelFile: "gemma-4-E4B-it-The-DECKARD-V2-Strong-HERETIC-UNCENSORED-Thinking.i1-Q4_K_M.gguf",
+          vramMode: "full"
+        }
+      },
+      env: {}
+    });
+
+    expect(options.gemmaVramMode).toBe("full");
+    expect(options.useDraft).toBe(false);
+    expect(options.ctx).toBe(16384);
+    expect(options.batch).toBe(2048);
+    expect(options.ubatch).toBe(1536);
+  });
+
+  it("allows explicitly forcing DFlash draft through the environment", () => {
+    const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40 });
+    const options = buildBaseTranslationOptions({
+      jobId: "job-full-custom-forced",
+      runDir: "C:/runs/job-full-custom-forced",
+      paths: {
+        dataRoot: "C:/app-data",
+        toolsDir: "C:/tools",
+        llamaServerPath: "C:/tools/llama-server.exe",
+        hfHomeDir: "C:/hf-home",
+        hfHubCacheDir: "C:/hf-home/hub"
+      },
+      settings: {
+        ...defaults,
+        gemma: {
+          ...defaults.gemma,
+          modelRepo: "custom/repo",
+          modelFile: "custom.gguf",
+          vramMode: "full"
+        }
+      },
+      env: {
+        MANGA_TRANSLATOR_USE_DRAFT: "1"
+      }
+    });
+
+    expect(options.useDraft).toBe(true);
+  });
+
   it("keeps local model settings when the source is local", () => {
     const defaults = resolveDefaultAppSettings();
 
@@ -280,6 +352,64 @@ describe("app settings helpers", () => {
       translation: defaults.translation,
       maxTokens: defaults.maxTokens
     });
+  });
+
+  it("normalizes saved custom Gemma model presets", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(
+      parseStoredAppSettings(
+        JSON.stringify({
+          gemma: {
+            customModelPresets: [
+              {
+                id: " Translate Gemma ",
+                label: " TranslateGemma ",
+                modelRepo: "  owner/model-repo  ",
+                modelFile: "  model.Q8_0.gguf  "
+              },
+              {
+                id: "broken",
+                label: "Broken",
+                modelRepo: "",
+                modelFile: "missing-repo.gguf"
+              }
+            ]
+          }
+        }),
+        defaults
+      ).gemma.customModelPresets
+    ).toEqual([
+      {
+        id: "translate-gemma",
+        label: "TranslateGemma",
+        modelRepo: "owner/model-repo",
+        modelFile: "model.Q8_0.gguf"
+      }
+    ]);
+  });
+
+  it("adds the currently selected custom HF Gemma model to the saved preset list", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(
+      parseStoredAppSettings(
+        JSON.stringify({
+          gemma: {
+            modelRepo: "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
+            modelFile: "gemma-4-E4B-it-uncensored-Q8_0.gguf"
+          }
+        }),
+        defaults
+      ).gemma.customModelPresets
+    ).toEqual([
+      {
+        id: "trevorjs-gemma-4-e4b-it-uncensored-gguf-gemma-4-e4b-it-uncensored-q8_0-gguf",
+        label: "gemma-4-E4B-it-uncensored-GGUF / gemma-4-E4B-it-uncensored-Q8_0",
+        modelRepo: "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
+        modelFile: "gemma-4-E4B-it-uncensored-Q8_0.gguf"
+      }
+    ]);
   });
 
   it("normalizes Codex provider settings", () => {
@@ -317,6 +447,15 @@ describe("app settings helpers", () => {
     expect(parseStoredAppSettings("{\"ocr\":{\"device\":\"gpu\"}}", defaults).ocr.device).toBe("gpu");
     expect(parseStoredAppSettings("{\"ocr\":{\"device\":\"tpu\"}}", defaults).ocr.device).toBe(defaults.ocr.device);
     expect(resolveDefaultAppSettings({ MANGA_TRANSLATOR_OCR_DEVICE: "gpu" }).ocr.device).toBe("gpu");
+  });
+
+  it("normalizes OCR engine settings", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(parseStoredAppSettings("{\"ocr\":{\"engine\":\"paddleocr-v5\"}}", defaults).ocr.engine).toBe("paddleocr-v5");
+    expect(parseStoredAppSettings("{\"ocr\":{\"bboxProvider\":\"paddleocr-v5\"}}", defaults).ocr.engine).toBe("paddleocr-v5");
+    expect(parseStoredAppSettings("{\"ocr\":{\"engine\":\"bad\"}}", defaults).ocr.engine).toBe(defaults.ocr.engine);
+    expect(resolveDefaultAppSettings({ MANGA_TRANSLATOR_OCR_ENGINE: "paddleocr-v5" }).ocr.engine).toBe("paddleocr-v5");
   });
 
   it("normalizes sound-effect translation settings", () => {

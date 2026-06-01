@@ -1,11 +1,15 @@
+import { join } from "node:path";
 import type {
   AppSettings,
   CodexReasoningEffort,
+  GemmaCustomModelPreset,
   GemmaVramMode,
   JobPhase,
   ModelProvider,
   ModelSource,
   OcrDevice,
+  OcrEngine,
+  StorageSettings,
   TranslationMode
 } from "../shared/types";
 import type { DetectedGpuInfo } from "./gpuInfo";
@@ -31,6 +35,7 @@ export const DEFAULT_MAX_TOKENS = 12000;
 export const MIN_MAX_TOKENS = 300;
 export const MAX_MAX_TOKENS = 12000;
 export const DEFAULT_OCR_DEVICE: OcrDevice = "cpu";
+export const DEFAULT_OCR_ENGINE: OcrEngine = "paddleocr-vl";
 export const DEFAULT_TRANSLATION_MODE: TranslationMode = "image";
 export const DEFAULT_INCLUDE_SOUND_EFFECTS = true;
 export const DEFAULT_OCR_BBOX_EXPAND_X_RATIO = 0.2;
@@ -155,12 +160,14 @@ export type TranslationOptions = {
   codexModel: string;
   codexReasoningEffort: CodexReasoningEffort;
   codexOauthPort: number;
+  modelCacheDir?: string;
   translationMode: TranslationMode;
   includeSoundEffects: boolean;
   ocrBboxExpandXRatio: number;
   ocrBboxExpandYRatio: number;
   textOutlineWidthPx: number;
   ocrDevice: OcrDevice;
+  ocrEngine: OcrEngine;
   ocrBboxProvider?: string;
   ocrBboxCommand?: string;
   ocrBboxHintsPath?: string;
@@ -226,7 +233,8 @@ export function resolveDefaultAppSettings(
       oauthPort: resolvePortNumber(env.MANGA_TRANSLATOR_CODEX_OAUTH_PORT, DEFAULT_CODEX_OAUTH_PORT)
     },
     ocr: {
-      device: resolveOcrDevice(env.MANGA_TRANSLATOR_OCR_DEVICE, hardwareDefaults.ocrDevice)
+      device: resolveOcrDevice(env.MANGA_TRANSLATOR_OCR_DEVICE, hardwareDefaults.ocrDevice),
+      engine: resolveOcrEngine(env.MANGA_TRANSLATOR_OCR_ENGINE ?? env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER, DEFAULT_OCR_ENGINE)
     },
     translation: {
       mode: resolveTranslationMode(env.MANGA_TRANSLATOR_TRANSLATION_MODE, DEFAULT_TRANSLATION_MODE),
@@ -289,12 +297,19 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
   const codex = record?.codex;
   const ocr = record?.ocr;
   const translation = record?.translation;
+  const storage = record?.storage;
   const modelSource = resolveModelSource(asRecord(gemma)?.modelSource, defaults.gemma.modelSource);
   const resolvedModel = resolveStoredGemmaModel(asRecord(gemma), defaults);
   const resolvedMmproj =
     modelSource === "huggingface" ? resolveStoredGemmaMmproj(asRecord(gemma), resolvedModel, defaults) : {};
   const localModelPath = resolveOptionalString(asRecord(gemma)?.localModelPath);
   const localMmprojPath = resolveOptionalString(asRecord(gemma)?.localMmprojPath);
+  const customModelPresets = ensureCurrentGemmaModelPreset(
+    normalizeGemmaCustomModelPresets(asRecord(gemma)?.customModelPresets),
+    resolvedModel,
+    modelSource
+  );
+  const storageSettings = normalizeStorageSettings(storage);
   return {
     modelProvider: resolveModelProvider(record?.modelProvider, defaults.modelProvider),
     gemma: {
@@ -305,6 +320,7 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
       ...(resolvedMmproj.mmprojFile ? { mmprojFile: resolvedMmproj.mmprojFile } : {}),
       ...(localModelPath ? { localModelPath } : {}),
       ...(localMmprojPath ? { localMmprojPath } : {}),
+      ...(customModelPresets.length > 0 ? { customModelPresets } : {}),
       vramMode: resolveGemmaVramMode(asRecord(gemma)?.vramMode, defaults.gemma.vramMode)
     },
     codex: {
@@ -313,7 +329,11 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
       oauthPort: resolvePortNumber(asRecord(codex)?.oauthPort, defaults.codex.oauthPort)
     },
     ocr: {
-      device: resolveOcrDevice(asRecord(ocr)?.device, defaults.ocr.device)
+      device: resolveOcrDevice(asRecord(ocr)?.device, defaults.ocr.device),
+      engine: resolveOcrEngine(
+        asRecord(ocr)?.engine ?? asRecord(ocr)?.bboxProvider ?? record?.ocrBboxProvider,
+        defaults.ocr.engine
+      )
     },
     translation: {
       mode: resolveTranslationMode(asRecord(translation)?.mode ?? record?.translationMode, defaults.translation.mode),
@@ -334,6 +354,7 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
         defaults.translation.textOutlineWidthPx
       )
     },
+    ...(storageSettings ? { storage: storageSettings } : {}),
     maxTokens: resolveMaxTokens(record?.maxTokens, defaults.maxTokens)
   };
 }
@@ -365,6 +386,11 @@ export function buildBaseTranslationOptions({
 }): TranslationOptions {
   const gemmaVramMode = resolveGemmaVramMode(env.MANGA_TRANSLATOR_GEMMA_VRAM_MODE, settings.gemma.vramMode);
   const gemmaRuntimePreset = GEMMA_RUNTIME_PRESETS[gemmaVramMode];
+  const modelCacheDir = resolveOptionalString(settings.storage?.modelCacheDir);
+  const envUseDraft = readOptionalBooleanEnv(env, "MANGA_TRANSLATOR_USE_DRAFT");
+  const useDraft =
+    envUseDraft ??
+    Boolean(gemmaRuntimePreset.useDraft && isDefaultDflashDraftCompatible(settings.gemma.modelSource, settings.gemma.modelRepo, settings.gemma.modelFile));
   return {
     imagePath: "",
     outputDir: runDir,
@@ -433,7 +459,7 @@ export function buildBaseTranslationOptions({
       resolveOptionalString(env.MANGA_TRANSLATOR_DRAFT_MODEL_HF) ?? gemmaRuntimePreset.draftModelRepo,
     draftModelFile:
       resolveOptionalString(env.MANGA_TRANSLATOR_DRAFT_MODEL_FILE) ?? gemmaRuntimePreset.draftModelFile,
-    useDraft: readOptionalBooleanEnv(env, "MANGA_TRANSLATOR_USE_DRAFT") ?? gemmaRuntimePreset.useDraft,
+    useDraft,
     imageMinTokens: readNumberEnv(env, "MANGA_TRANSLATOR_IMAGE_MIN_TOKENS", DEFAULT_IMAGE_TOKENS),
     imageMaxTokens: readNumberEnv(env, "MANGA_TRANSLATOR_IMAGE_MAX_TOKENS", DEFAULT_IMAGE_TOKENS),
     includeEnhancedVariant: false,
@@ -479,12 +505,16 @@ export function buildBaseTranslationOptions({
       settings.translation.textOutlineWidthPx
     ),
     ocrDevice: resolveOcrDevice(env.MANGA_TRANSLATOR_OCR_DEVICE, settings.ocr.device),
-    ocrBboxProvider: resolveOptionalString(env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER),
+    ocrEngine: resolveOcrEngine(env.MANGA_TRANSLATOR_OCR_ENGINE ?? env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER, settings.ocr.engine),
+    ocrBboxProvider:
+      resolveOptionalString(env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER) ??
+      resolveOcrEngine(env.MANGA_TRANSLATOR_OCR_ENGINE, settings.ocr.engine),
     ocrBboxCommand: resolveOptionalString(env.MANGA_TRANSLATOR_OCR_BBOX_CMD),
     ocrBboxHintsPath: resolveOptionalString(env.MANGA_TRANSLATOR_OCR_BBOX_HINTS_PATH),
     ocrRuntimeDir: paths.ocrRuntimeDir,
-    hfHomeDir: paths.hfHomeDir,
-    hfHubCacheDir: paths.hfHubCacheDir,
+    modelCacheDir,
+    hfHomeDir: modelCacheDir ?? paths.hfHomeDir,
+    hfHubCacheDir: modelCacheDir ? join(modelCacheDir, "hub") : paths.hfHubCacheDir,
     label: `app-${jobId}`
   };
 }
@@ -542,6 +572,14 @@ function resolveGemmaVramMode(value: unknown, fallback: GemmaVramMode): GemmaVra
 
 function resolveOcrDevice(value: unknown, fallback: OcrDevice): OcrDevice {
   return value === "gpu" || value === "cpu" ? value : fallback;
+}
+
+function isDefaultDflashDraftCompatible(modelSource: ModelSource, modelRepo: string, modelFile: string): boolean {
+  return modelSource === "huggingface" && modelRepo === DEFAULT_GEMMA_MODEL_REPO && modelFile === DEFAULT_GEMMA_MODEL_FILE;
+}
+
+function resolveOcrEngine(value: unknown, fallback: OcrEngine): OcrEngine {
+  return value === "paddleocr-v5" || value === "paddleocr-vl" ? value : fallback;
 }
 
 function resolveTranslationMode(value: unknown, fallback: TranslationMode): TranslationMode {
@@ -603,6 +641,11 @@ function clampInteger(value: number, min: number, max: number): number {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function normalizeStorageSettings(value: unknown): StorageSettings | undefined {
+  const modelCacheDir = resolveOptionalString(asRecord(value)?.modelCacheDir);
+  return modelCacheDir ? { modelCacheDir } : undefined;
 }
 
 function normalizeDetectedGpuInfo(value?: number | DetectedGpuInfo | null): DetectedGpuInfo | null {
@@ -670,4 +713,89 @@ function resolveStoredGemmaMmproj(
     };
   }
   return {};
+}
+
+function normalizeGemmaCustomModelPresets(value: unknown): GemmaCustomModelPreset[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const presets: GemmaCustomModelPreset[] = [];
+  const seen = new Set<string>();
+  value.slice(0, 40).forEach((item, index) => {
+    const record = asRecord(item);
+    const modelRepo = resolveOptionalString(record?.modelRepo);
+    const modelFile = resolveOptionalString(record?.modelFile);
+    if (!record || !modelRepo || !modelFile) {
+      return;
+    }
+
+    const id = sanitizePresetId(resolveOptionalString(record.id) ?? `custom-${index + 1}`);
+    const dedupeKey = id || `${modelRepo}\n${modelFile}`;
+    if (seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+
+    const label = resolveOptionalString(record.label) ?? buildCustomPresetFallbackLabel(modelRepo, modelFile);
+    const mmprojRepo = resolveOptionalString(record.mmprojRepo);
+    const mmprojFile = resolveOptionalString(record.mmprojFile);
+    presets.push({
+      id: id || `custom-${presets.length + 1}`,
+      label,
+      modelRepo,
+      modelFile,
+      ...(mmprojRepo ? { mmprojRepo } : {}),
+      ...(mmprojFile ? { mmprojFile } : {})
+    });
+  });
+  return presets;
+}
+
+function ensureCurrentGemmaModelPreset(
+  presets: GemmaCustomModelPreset[],
+  model: Pick<AppSettings["gemma"], "modelRepo" | "modelFile">,
+  modelSource: ModelSource
+): GemmaCustomModelPreset[] {
+  if (modelSource !== "huggingface") {
+    return presets;
+  }
+  if (model.modelRepo === DEFAULT_GEMMA_MODEL_REPO && model.modelFile === DEFAULT_GEMMA_MODEL_FILE) {
+    return presets;
+  }
+  if (presets.some((preset) => preset.modelRepo === model.modelRepo && preset.modelFile === model.modelFile)) {
+    return presets;
+  }
+
+  const usedIds = new Set(presets.map((preset) => preset.id));
+  const baseId = sanitizePresetId(`${model.modelRepo}-${model.modelFile}`) || `custom-${presets.length + 1}`;
+  let id = baseId;
+  for (let suffix = 2; usedIds.has(id); suffix += 1) {
+    id = `${baseId}-${suffix}`;
+  }
+
+  return [
+    ...presets,
+    {
+      id,
+      label: buildCustomPresetFallbackLabel(model.modelRepo, model.modelFile),
+      modelRepo: model.modelRepo,
+      modelFile: model.modelFile
+    }
+  ];
+}
+
+function sanitizePresetId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function buildCustomPresetFallbackLabel(modelRepo: string, modelFile: string): string {
+  const repoName = modelRepo.split("/").filter(Boolean).pop() ?? modelRepo;
+  const fileName = modelFile.replace(/\.gguf$/i, "");
+  return `${repoName} / ${fileName}`.slice(0, 120);
 }

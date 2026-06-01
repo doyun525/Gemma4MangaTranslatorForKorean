@@ -459,6 +459,18 @@ export async function runWholePagePipeline({
           }
 
           const items = runtime.overlayTools.normalizeItems(parsed);
+          const koreanOutputProblem = findKoreanOutputProblem(items);
+          if (koreanOutputProblem) {
+            const languageError = new Error(
+              `${page.name}: ko 필드가 한국어로 번역되지 않았습니다. ${koreanOutputProblem}`
+            );
+            Object.assign(languageError, {
+              outputDir: pageOptions.outputDir,
+              outputPreview: summarizePreview(result.outputText),
+              responseFormat: "korean-overlay"
+            });
+            throw languageError;
+          }
           if (items.length === 0 && isRequestNoTextDetected(result.requestBody)) {
             successPage = buildNoTextCompletedPage(page);
             await onPageComplete?.(successPage);
@@ -507,6 +519,7 @@ export async function runWholePagePipeline({
             pageTotal: pages.length,
             progressTotal
           });
+          normalizedItems = filterIgnoredSoundEffectItems(normalizedItems, pageOptions);
           const blocks = await applySampledBackgroundColors(
             normalizedItems.map((item, itemIndex) => overlayItemToBlock(item, page, itemIndex, pageOptions)),
             page
@@ -1224,6 +1237,101 @@ function containsJapaneseKana(value: string | undefined): boolean {
   return /[\u3040-\u30ff]/u.test(String(value ?? ""));
 }
 
+function findKoreanOutputProblem(items: OverlayItem[]): string | null {
+  const candidates = items.filter((item) => shouldRequireKoreanKo(item));
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const badItems = candidates.filter((item) => !containsHangul(item.ko));
+  if (badItems.length === 0) {
+    return null;
+  }
+  if (badItems.length >= Math.max(1, Math.ceil(candidates.length * 0.35))) {
+    const ids = badItems.slice(0, 5).map((item) => item.id).join(", ");
+    return `한국어가 아닌 ko 항목 ${badItems.length}/${candidates.length}개, ids=${ids}`;
+  }
+  return null;
+}
+
+function shouldRequireKoreanKo(item: OverlayItem): boolean {
+  const source = String(item.jp ?? "").trim();
+  const ko = String(item.ko ?? "").trim();
+  if (!source || !ko || isNonTextMarker(source) || isNonTextMarker(ko)) {
+    return false;
+  }
+  if (/^[\d\s.,:;!?！？。、…~〜ー―\-－♡♥]+$/u.test(source)) {
+    return false;
+  }
+  return /[A-Za-z\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u.test(source);
+}
+
+function containsHangul(value: string | undefined): boolean {
+  return /[\uac00-\ud7a3]/u.test(String(value ?? ""));
+}
+
+function filterIgnoredSoundEffectItems(
+  items: OverlayItem[],
+  options: Pick<TranslationOptions, "includeSoundEffects">
+): OverlayItem[] {
+  if (options.includeSoundEffects !== false) {
+    return items;
+  }
+  return items.filter((item) => !isLikelySoundEffectOverlayItem(item));
+}
+
+function isLikelySoundEffectOverlayItem(item: OverlayItem): boolean {
+  const type = String(item.type ?? "").trim().toLowerCase();
+  if (/\b(?:sfx|sound|effect|onomatopoeia|reaction)\b/.test(type)) {
+    return true;
+  }
+
+  const source = compactTextForSoundEffectCheck(item.jp);
+  if (!source) {
+    return false;
+  }
+  const normalizedType = mapOverlayType(item.type);
+  const confidence = normalizeConfidence(item.confidence, Number.NaN);
+  const lowTrust = Number.isFinite(confidence) ? confidence < 0.82 : true;
+
+  if (normalizedType === "nonsolid" && isKatakanaLikeSoundEffectText(source)) {
+    return true;
+  }
+  if (normalizedType === "nonsolid" && lowTrust && isShortKanaReactionText(source)) {
+    return true;
+  }
+  return false;
+}
+
+function compactTextForSoundEffectCheck(value: string | undefined): string {
+  return String(value ?? "")
+    .replace(/\s+/g, "")
+    .replace(/[「」『』（）()\[\]【】"'“”‘’]/g, "")
+    .trim();
+}
+
+function isKatakanaLikeSoundEffectText(text: string): boolean {
+  const chars = [...text].filter((char) => /[A-Za-z0-9一-龯ぁ-ゖァ-ヺー]/u.test(char));
+  if (chars.length === 0 || chars.length > 14) {
+    return false;
+  }
+  const katakanaCount = chars.filter((char) => /[ァ-ヺー]/u.test(char)).length;
+  const kanaCount = chars.filter((char) => /[ぁ-ゖァ-ヺー]/u.test(char)).length;
+  const kanjiCount = chars.filter((char) => /[一-龯]/u.test(char)).length;
+  if (kanjiCount > 0) {
+    return false;
+  }
+  return katakanaCount >= Math.max(2, chars.length * 0.65) || (chars.length <= 5 && kanaCount === chars.length && /[ッっーァ-ヺ]/u.test(text));
+}
+
+function isShortKanaReactionText(text: string): boolean {
+  const chars = [...text].filter((char) => /[ぁ-ゖァ-ヺー]/u.test(char));
+  if (chars.length === 0 || chars.length > 8 || /[一-龯A-Za-z0-9]/u.test(text)) {
+    return false;
+  }
+  return chars.length / Math.max(1, [...text].length) > 0.6;
+}
+
 export function overlayItemToBlock(
   item: OverlayItem,
   page: MangaPage,
@@ -1232,14 +1340,15 @@ export function overlayItemToBlock(
 ): TranslationBlock {
   const type = mapOverlayType(item.type);
   const rawBbox = clampBbox(item.bbox);
-  const translatedText = item.ko.trim();
+  const rawTranslatedText = item.ko.trim();
   const sourceText = item.jp.trim();
-  const textForSizing = translatedText || sourceText || "...";
+  const textForSizing = rawTranslatedText || sourceText || "...";
   const lineHeight = 1.18;
   const fontSizePx = resolveOverlayFontSizePx(item, rawBbox, page, textForSizing);
   const sourceDirection = item.direction === "vertical" ? "vertical" : "horizontal";
   const bbox = rawBbox;
   const renderDirection = resolveInitialRenderDirection(type, sourceDirection, item, bbox, page, fontSizePx);
+  const translatedText = applyBboxAwareKoreanLineBreaks(rawTranslatedText, bbox, page, fontSizePx, lineHeight, renderDirection);
   const rotationDeg = enforceRotationDeg(type, item.angle ?? 0);
   const visualStyle = resolveBlockVisualStyle(type);
   return {
@@ -1263,6 +1372,89 @@ export function overlayItemToBlock(
     opacity: visualStyle.defaultOpacity,
     autoFitText: true
   };
+}
+
+function applyBboxAwareKoreanLineBreaks(
+  text: string,
+  bbox: BBox,
+  page: MangaPage,
+  fontSizePx: number,
+  lineHeight: number,
+  renderDirection: RenderTextDirection
+): string {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.includes("\n") || renderDirection !== "horizontal") {
+    return trimmed;
+  }
+
+  const compactLength = [...trimmed.replace(/\s+/g, "")].length;
+  if (compactLength < 8) {
+    return trimmed;
+  }
+
+  const widthPx = Math.max(1, (bbox.w / 1000) * page.width);
+  const heightPx = Math.max(1, (bbox.h / 1000) * page.height);
+  const safeFontSize = Math.max(8, fontSizePx);
+  const averageKoreanCharWidth = safeFontSize * 0.98;
+  const maxCharsPerLine = clamp(Math.floor(widthPx / averageKoreanCharWidth), 3, 14);
+  const lineHeightPx = Math.max(1, safeFontSize * lineHeight);
+  const maxLines = clamp(Math.floor(heightPx / (lineHeightPx * 0.78)), 1, 4);
+
+  if (maxLines < 2 || compactLength <= maxCharsPerLine) {
+    return trimmed;
+  }
+
+  return wrapKoreanTextForBbox(trimmed, maxCharsPerLine, maxLines);
+}
+
+function wrapKoreanTextForBbox(text: string, maxCharsPerLine: number, maxLines: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const lines: string[] = [];
+  let remaining = normalized;
+
+  while (remaining && lines.length < maxLines - 1) {
+    if ([...remaining.replace(/\s+/g, "")].length <= maxCharsPerLine) {
+      break;
+    }
+
+    const breakIndex = findNaturalKoreanBreakIndex(remaining, maxCharsPerLine);
+    const line = remaining.slice(0, breakIndex).trim();
+    const next = remaining.slice(breakIndex).trim();
+    if (!line || !next) {
+      break;
+    }
+    lines.push(line);
+    remaining = next;
+  }
+
+  if (remaining) {
+    lines.push(remaining.trim());
+  }
+
+  return lines.join("\n");
+}
+
+function findNaturalKoreanBreakIndex(text: string, maxCharsPerLine: number): number {
+  let charCount = 0;
+  let hardLimitIndex = text.length;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (!/\s/u.test(text[index] ?? "")) {
+      charCount += 1;
+    }
+    if (charCount > maxCharsPerLine) {
+      hardLimitIndex = index;
+      break;
+    }
+  }
+
+  const windowStart = Math.max(1, hardLimitIndex - 10);
+  const preferred = text.slice(windowStart, hardLimitIndex + 1).search(/[,.!?…。！？]\s*|\s+/u);
+  if (preferred >= 0) {
+    return windowStart + preferred + 1;
+  }
+
+  return Math.max(1, hardLimitIndex);
 }
 
 function normalizeConfidence(value: unknown, fallback: number): number {
@@ -1728,12 +1920,15 @@ function summarizeTranslationOptions(options: TranslationOptions): Record<string
     codexModel: options.codexModel,
     codexReasoningEffort: options.codexReasoningEffort,
     codexOauthPort: options.codexOauthPort,
+    modelCacheDir: options.modelCacheDir ?? null,
     translationMode: options.translationMode,
     includeSoundEffects: options.includeSoundEffects,
     ocrBboxExpandXRatio: options.ocrBboxExpandXRatio,
     ocrBboxExpandYRatio: options.ocrBboxExpandYRatio,
     textOutlineWidthPx: options.textOutlineWidthPx,
     ocrDevice: options.ocrDevice,
+    ocrEngine: options.ocrEngine,
+    ocrBboxProvider: options.ocrBboxProvider,
     hfHomeDir: options.hfHomeDir ?? null,
     hfHubCacheDir: options.hfHubCacheDir ?? null
   };

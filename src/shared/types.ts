@@ -9,7 +9,17 @@ export type ModelSource = "huggingface" | "local";
 export type GemmaVramMode = "full" | "economy";
 export type CodexReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 export type OcrDevice = "cpu" | "gpu";
+export type OcrEngine = "paddleocr-vl" | "paddleocr-v5";
 export type TranslationMode = "image" | "ocr-text" | "ocr-text-with-image-retry";
+
+export type GemmaCustomModelPreset = {
+  id: string;
+  label: string;
+  modelRepo: string;
+  modelFile: string;
+  mmprojRepo?: string;
+  mmprojFile?: string;
+};
 
 export type GemmaSettings = {
   modelSource: ModelSource;
@@ -19,6 +29,7 @@ export type GemmaSettings = {
   mmprojFile?: string;
   localModelPath?: string;
   localMmprojPath?: string;
+  customModelPresets?: GemmaCustomModelPreset[];
   vramMode: GemmaVramMode;
 };
 
@@ -30,6 +41,7 @@ export type CodexSettings = {
 
 export type OcrSettings = {
   device: OcrDevice;
+  engine: OcrEngine;
 };
 
 export type TranslationSettings = {
@@ -40,12 +52,17 @@ export type TranslationSettings = {
   textOutlineWidthPx: number;
 };
 
+export type StorageSettings = {
+  modelCacheDir?: string;
+};
+
 export type AppSettings = {
   modelProvider: ModelProvider;
   gemma: GemmaSettings;
   codex: CodexSettings;
   ocr: OcrSettings;
   translation: TranslationSettings;
+  storage?: StorageSettings;
   maxTokens: number;
 };
 

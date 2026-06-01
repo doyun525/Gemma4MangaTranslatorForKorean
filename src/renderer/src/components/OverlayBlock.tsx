@@ -51,7 +51,7 @@ export function OverlayBlock({
     color: block.textColor,
     borderWidth: showChrome ? 2 : 0,
     borderColor: showChrome ? visualStyle.borderColor : "transparent",
-    backgroundColor: showChrome ? hexToRgba(visualStyle.backgroundColor, block.opacity) : "transparent",
+    backgroundColor: showChrome ? hexToRgba(block.backgroundColor || visualStyle.backgroundColor, block.opacity) : "transparent",
     fontFamily: resolveBlockFontFamily(block.fontFamily),
     fontSize: `${layout.fontSizePx}px`,
     lineHeight: block.lineHeight,

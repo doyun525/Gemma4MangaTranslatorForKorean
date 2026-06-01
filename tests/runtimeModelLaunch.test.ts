@@ -163,6 +163,9 @@ describe("runtime model launch helpers", () => {
     expect(runtimeSource).toContain("emitRuntimeProgress(batchOptions, \"ocr_running\"");
     expect(runtimeSource).toContain("createCommandOutputLineEmitter(onOutput)");
     expect(runtimeSource).toContain("stdoutLines.write(chunk)");
+    expect(runtimeSource).toContain("--provider ${quoteCommandArg(provider)}");
+    expect(runtimeSource).toContain("provider === \"paddleocr-vl\" || provider === \"paddleocr-v5\"");
+    expect(paddleSource).toContain("choices=[\"paddleocr-vl\", \"paddleocr-v5\"]");
     expect(paddleSource).toContain("flush=True");
   });
 
@@ -610,6 +613,28 @@ describe("runtime model launch helpers", () => {
     expect(args.slice(args.indexOf("--top-k"), args.indexOf("--top-k") + 2)).toEqual(["--top-k", "64"]);
     expect(args.slice(args.indexOf("--top-p"), args.indexOf("--top-p") + 2)).toEqual(["--top-p", "0.95"]);
     expect(args.slice(args.indexOf("--min-p"), args.indexOf("--min-p") + 2)).toEqual(["--min-p", "0.0"]);
+  });
+
+  it("uses ChatML instead of the model Jinja template for TranslateGemma GGUF models", () => {
+    const args = buildLaunchArgs({
+      port: 18180,
+      fitTargetMb: 1024,
+      ctx: 8192,
+      batch: 1024,
+      ubatch: 1024,
+      cacheTypeK: "q4_0",
+      cacheTypeV: "q4_0",
+      modelRepo: "mradermacher/translategemma-4b-it-GGUF",
+      modelFile: "translategemma-4b-it.Q8_0.gguf"
+    });
+
+    expect(args).toContain("--no-jinja");
+    expect(args.slice(args.indexOf("--chat-template"), args.indexOf("--chat-template") + 2)).toEqual([
+      "--chat-template",
+      "chatml"
+    ]);
+    expect(args).not.toContain("--kv-unified");
+    expect(args).not.toContain("--jinja");
   });
 
   it("passes economy performance tuning launch options when explicitly configured", () => {
