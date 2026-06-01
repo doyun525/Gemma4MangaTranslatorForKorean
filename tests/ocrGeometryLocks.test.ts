@@ -30,7 +30,26 @@ describe("OCR candidate geometry locks", () => {
       [{ id: 1, label: "text", x1: 100, y1: 100, x2: 200, y2: 200 }]
     );
 
-    expect(result[0]?.bbox).toEqual({ x: 100, y: 100, w: 100, h: 100 });
+    expect(result[0]?.bbox).toEqual({ x: 80, y: 90, w: 140, h: 120 });
+  });
+
+  it("uses configured OCR bbox expansion ratios", () => {
+    const result = applyOcrCandidateGeometryLocks(
+      [
+        {
+          id: 1,
+          type: "solid",
+          bbox: { x: 104, y: 106, w: 88, h: 86 },
+          jp: "jp",
+          ko: "ko"
+        }
+      ],
+      page,
+      [{ id: 1, label: "text", x1: 100, y1: 100, x2: 200, y2: 200 }],
+      { ocrBboxExpandXRatio: 0.1, ocrBboxExpandYRatio: 0.05 }
+    );
+
+    expect(result[0]?.bbox).toEqual({ x: 90, y: 95, w: 120, h: 110 });
   });
 
   it("does not silently move an item to a nearby unused candidate with a different id", () => {

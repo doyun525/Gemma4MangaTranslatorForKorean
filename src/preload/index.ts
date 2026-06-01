@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
   ChapterSnapshot,
@@ -34,6 +34,8 @@ const api = {
   previewFolderImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-folder"),
   previewZipImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-zip"),
   previewZipFolderImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-zip-folder"),
+  previewDroppedImport: (filePaths: string[]): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-dropped", filePaths),
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   createImport: (request: CreateImportRequest): Promise<CreateImportResult> => ipcRenderer.invoke("import:create", request),
   exportWorkShare: (request: WorkShareExportRequest): Promise<WorkShareExportResult | null> => ipcRenderer.invoke("share:export-work", request),
   previewWorkShareImport: (): Promise<WorkShareImportPreview | null> => ipcRenderer.invoke("share:preview-import"),

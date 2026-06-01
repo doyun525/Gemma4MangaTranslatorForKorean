@@ -14,7 +14,9 @@ const runtimeHelpers = require("../src/main/runtime/simple-page-translate.cjs") 
   }>;
   buildResponsesRequestBody: (
     options: { [key: string]: unknown },
-    imageVariants: Array<{ role: string; dataUrl: string; width?: number; height?: number; originalWidth?: number; originalHeight?: number }>
+    imageVariants: Array<{ role: string; dataUrl: string; width?: number; height?: number; originalWidth?: number; originalHeight?: number }>,
+    promptText?: string,
+    systemPrompt?: string
   ) => {
     model: string;
     instructions: string;
@@ -41,6 +43,7 @@ const runtimeHelpers = require("../src/main/runtime/simple-page-translate.cjs") 
   parsePipRawProgress: (line: string) => { current: number; total: number } | null;
   parseResponsesSseText: (rawText: string) => { outputText: string; eventCount: number; rawResponse: unknown };
   requestTranslation: (server: { baseUrl: string }, options: { [key: string]: unknown }) => Promise<{ outputText: string; rawResponse: unknown; requestBody: Record<string, unknown> }>;
+  resolveTranslationMode: (options: { [key: string]: unknown }) => string;
   resolveFfmpegPath: (options: { [key: string]: unknown }) => string;
   resolveOcrInstallBatchProgressRanges: (batches: string[][], start: number, end: number) => Array<{ start: number; end: number }>;
   resolveManagedHfFilePath: (options: { [key: string]: unknown }, repo: string, file: string) => string | null;
@@ -61,6 +64,7 @@ const {
   resolveManagedHfFilePath,
   resolveFfmpegPath,
   parseResponsesSseText,
+  resolveTranslationMode,
   requestTranslation
 } = runtimeHelpers;
 
@@ -261,7 +265,7 @@ describe("runtime model launch helpers", () => {
     expect(requestBody).not.toHaveProperty("max_tokens");
   });
 
-  it("uses tight Japanese glyph bbox instructions for Codex Responses requests", () => {
+  it("uses tight source glyph bbox instructions for Codex Responses requests", () => {
     const requestBody = buildResponsesRequestBody(
       {
         modelProvider: "openai-codex",
@@ -276,11 +280,12 @@ describe("runtime model launch helpers", () => {
     const imageDescription = requestBody.input[0]?.content.find((part) => part.type === "input_text" && part.text?.includes("Image 1:"))?.text ?? "";
 
     expect(requestBody.instructions).toContain("Geometry accuracy comes before Korean text fit");
+    expect(requestBody.instructions).toContain("Translate all Japanese and English source text into natural Korean.");
     expect(requestBody.instructions).toContain("Never merge separate speech bubbles, including touching or stacked balloon lobes.");
-    expect(promptText).toContain("Detect every visible Japanese text group");
-    expect(promptText).toContain("You are given one full-page Japanese manga image.");
-    expect(promptText).toContain("fontSize is the apparent Japanese glyph size in Image 1 pixels");
-    expect(promptText).toContain("x1, y1, x2, y2 describe the tight rectangle corners of the visible Japanese glyph ink and its outline.");
+    expect(promptText).toContain("Detect every visible Japanese or English text group");
+    expect(promptText).toContain("You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.");
+    expect(promptText).toContain("fontSize is the apparent source glyph size in Image 1 pixels");
+    expect(promptText).toContain("x1, y1, x2, y2 describe the tight rectangle corners of the visible source glyph ink and its outline.");
     expect(promptText).toContain("Each speech bubble is one dialogue item.");
     expect(promptText).toContain("If two white balloon lobes touch, overlap, stack vertically, or connect through a narrow neck");
     expect(promptText).toContain("Never enlarge, shift, or reshape the rectangle");
@@ -312,6 +317,7 @@ describe("runtime model launch helpers", () => {
     expect(prompt).toContain("Required candidate ids: 1, 2.");
     expect(prompt).toContain('candidate 1: label:text x1:67 y1:589 x2:267 y2:760 ocrText:"いえ…資金はこちらも"');
     expect(prompt).toContain('candidate 2: label:text x1:83 y1:767 x2:239 y2:1029 ocrText:"モリーダ村に支店を置く"');
+    expect(prompt).toContain("Use the candidate rectangle size to choose natural line breaks for ko.");
     expect(prompt).toContain("Do not merge two candidates into one record");
     expect(prompt).toContain("add a new record with id greater than 2");
     expect(prompt).not.toContain("Find one anchor point");
@@ -328,12 +334,69 @@ describe("runtime model launch helpers", () => {
       [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 420, height: 320, originalWidth: 420, originalHeight: 320 }]
     );
 
-    expect(prompt).toContain("You are given one user-selected crop from a Japanese manga page.");
+    expect(prompt).toContain("You are given one user-selected crop from a manga page. Source text may be Japanese, English, or mixed Japanese/English.");
     expect(prompt).toContain("# Selected region grouping");
     expect(prompt).toContain("Do not treat the whole crop as one text item.");
     expect(prompt).toContain("If the crop contains one speech bubble or one caption plate, output exactly one record");
-    expect(prompt).toContain("Inside one speech bubble, never split by Japanese vertical column, text line, word, sentence fragment, punctuation gap, or line break.");
+    expect(prompt).toContain("Inside one speech bubble, never split by source text column, text line, word, sentence fragment, punctuation gap, or line break.");
     expect(prompt).toContain("jp must include all columns in natural Japanese reading order");
+  });
+
+  it("omits initial images in OCR text-only translation modes", () => {
+    const variants = [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 100, height: 100 }];
+    const messages = buildMessages(
+      {
+        translationMode: "ocr-text",
+        imageWidth: 100,
+        imageHeight: 100,
+        ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }]
+      },
+      variants
+    );
+    const requestBody = buildResponsesRequestBody(
+      {
+        modelProvider: "openai-codex",
+        translationMode: "ocr-text-with-image-retry",
+        codexModel: "gpt-5.5",
+        maxTokens: 512,
+        imageWidth: 100,
+        imageHeight: 100,
+        ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }]
+      },
+      variants,
+      getOverlayPrompt({ translationMode: "ocr-text", ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }] }, []),
+      "system"
+    );
+
+    expect(resolveTranslationMode({ translationMode: "ocr-text" })).toBe("ocr-text");
+    expect(messages[1]?.content.some((part) => part.type === "image_url")).toBe(false);
+    expect(messages[1]?.content.some((part) => part.type === "text" && part.text?.includes("OCR text-only mode"))).toBe(true);
+    expect(requestBody.input[0]?.content.some((part) => part.type === "input_image")).toBe(false);
+  });
+
+  it("allows forced image input for crop retry even when the initial mode is OCR text", () => {
+    const messages = buildMessages(
+      { translationMode: "ocr-text-with-image-retry", forceImageInput: true, promptOverrideText: "retry" },
+      [{ role: "crop-retry", dataUrl: "data:image/png;base64,crop", width: 100, height: 100 }]
+    );
+
+    expect(messages[1]?.content.some((part) => part.type === "image_url")).toBe(true);
+  });
+
+  it("can disable sound-effect translation in the prompt", () => {
+    const prompt = getOverlayPrompt(
+      {
+        imageWidth: 836,
+        imageHeight: 1188,
+        includeSoundEffects: false
+      },
+      [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 836, height: 1188, originalWidth: 836, originalHeight: 1188 }]
+    );
+
+    expect(prompt).toContain("Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX");
+    expect(prompt).toContain("Translate dialogue, narration captions, and meaningful labels/signs only.");
+    expect(prompt).not.toContain("Do a separate SFX pass");
+    expect(prompt).not.toContain("ko must be bare Korean effect lettering only");
   });
 
   it("normalizes bbox hint JSON with low-trust OCR text", async () => {
@@ -364,7 +427,21 @@ describe("runtime model launch helpers", () => {
     expect(result.hints[0]).toMatchObject({ x1: 67, y1: 589, x2: 267, y2: 760, ocrText: "いえ…" });
   });
 
-  it("uses the same tight Japanese glyph bbox prompt for Gemma chat requests", () => {
+  it("treats English OCR hints as translatable text evidence", async () => {
+    const result = await collectOcrBboxHints({
+      imageWidth: 836,
+      imageHeight: 1188,
+      ocrBboxHints: [
+        { id: 1, label: "text", x1: 100, y1: 120, x2: 260, y2: 180, ocrText: "Hello there!" }
+      ]
+    });
+
+    expect(result.hints).toHaveLength(1);
+    expect(result.textEvidenceCount).toBe(1);
+    expect(result.noTextDetected).toBe(false);
+  });
+
+  it("uses the same tight source glyph bbox prompt for Gemma chat requests", () => {
     const messages = buildMessages(
       {
         modelProvider: "gemma",
@@ -379,7 +456,7 @@ describe("runtime model launch helpers", () => {
     expect(systemText).toContain("Geometry accuracy comes before Korean text fit");
     expect(messages[1]?.content[0]).toMatchObject({ type: "image_url" });
     expect(messages[1]?.content[1]).toMatchObject({ type: "text" });
-    expect(userPrompt).toContain("Detect every visible Japanese text group");
+    expect(userPrompt).toContain("Detect every visible Japanese or English text group");
     expect(userPrompt).toContain("Return x1, y1, x2, y2 as normalized 0..1000");
     expect(userPrompt).toContain("direction, angle, fontSize");
     expect(userPrompt).toContain("For SFX, box only the sound-effect glyph strokes");
@@ -468,6 +545,7 @@ describe("runtime model launch helpers", () => {
       ctx: 8192,
       batch: 1024,
       ubatch: 1024,
+      gemmaVramMode: "economy",
       cacheTypeK: "q4_0",
       cacheTypeV: "q4_0",
       ctxCheckpoints: 0,

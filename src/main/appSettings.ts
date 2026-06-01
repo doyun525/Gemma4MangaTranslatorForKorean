@@ -5,7 +5,8 @@ import type {
   JobPhase,
   ModelProvider,
   ModelSource,
-  OcrDevice
+  OcrDevice,
+  TranslationMode
 } from "../shared/types";
 import type { DetectedGpuInfo } from "./gpuInfo";
 
@@ -30,6 +31,15 @@ export const DEFAULT_MAX_TOKENS = 12000;
 export const MIN_MAX_TOKENS = 300;
 export const MAX_MAX_TOKENS = 12000;
 export const DEFAULT_OCR_DEVICE: OcrDevice = "cpu";
+export const DEFAULT_TRANSLATION_MODE: TranslationMode = "image";
+export const DEFAULT_INCLUDE_SOUND_EFFECTS = true;
+export const DEFAULT_OCR_BBOX_EXPAND_X_RATIO = 0.2;
+export const DEFAULT_OCR_BBOX_EXPAND_Y_RATIO = 0.1;
+export const MIN_OCR_BBOX_EXPAND_RATIO = 0;
+export const MAX_OCR_BBOX_EXPAND_RATIO = 1;
+export const DEFAULT_TEXT_OUTLINE_WIDTH_PX = 1.4;
+export const MIN_TEXT_OUTLINE_WIDTH_PX = 0;
+export const MAX_TEXT_OUTLINE_WIDTH_PX = 8;
 
 const DEFAULT_IMAGE_TOKENS = 1024;
 
@@ -145,6 +155,11 @@ export type TranslationOptions = {
   codexModel: string;
   codexReasoningEffort: CodexReasoningEffort;
   codexOauthPort: number;
+  translationMode: TranslationMode;
+  includeSoundEffects: boolean;
+  ocrBboxExpandXRatio: number;
+  ocrBboxExpandYRatio: number;
+  textOutlineWidthPx: number;
   ocrDevice: OcrDevice;
   ocrBboxProvider?: string;
   ocrBboxCommand?: string;
@@ -213,6 +228,23 @@ export function resolveDefaultAppSettings(
     ocr: {
       device: resolveOcrDevice(env.MANGA_TRANSLATOR_OCR_DEVICE, hardwareDefaults.ocrDevice)
     },
+    translation: {
+      mode: resolveTranslationMode(env.MANGA_TRANSLATOR_TRANSLATION_MODE, DEFAULT_TRANSLATION_MODE),
+      includeSoundEffects:
+        readOptionalBooleanEnv(env, "MANGA_TRANSLATOR_INCLUDE_SOUND_EFFECTS") ?? DEFAULT_INCLUDE_SOUND_EFFECTS,
+      ocrBboxExpandXRatio: resolveOcrBboxExpandRatio(
+        env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_X_RATIO ?? env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_X,
+        DEFAULT_OCR_BBOX_EXPAND_X_RATIO
+      ),
+      ocrBboxExpandYRatio: resolveOcrBboxExpandRatio(
+        env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_Y_RATIO ?? env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_Y,
+        DEFAULT_OCR_BBOX_EXPAND_Y_RATIO
+      ),
+      textOutlineWidthPx: resolveTextOutlineWidthPx(
+        env.MANGA_TRANSLATOR_TEXT_OUTLINE_WIDTH_PX,
+        DEFAULT_TEXT_OUTLINE_WIDTH_PX
+      )
+    },
     maxTokens: resolveMaxTokens(env.MANGA_TRANSLATOR_MAX_TOKENS, DEFAULT_MAX_TOKENS)
   };
 }
@@ -256,6 +288,7 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
   const gemma = record?.gemma;
   const codex = record?.codex;
   const ocr = record?.ocr;
+  const translation = record?.translation;
   const modelSource = resolveModelSource(asRecord(gemma)?.modelSource, defaults.gemma.modelSource);
   const resolvedModel = resolveStoredGemmaModel(asRecord(gemma), defaults);
   const resolvedMmproj =
@@ -281,6 +314,25 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
     },
     ocr: {
       device: resolveOcrDevice(asRecord(ocr)?.device, defaults.ocr.device)
+    },
+    translation: {
+      mode: resolveTranslationMode(asRecord(translation)?.mode ?? record?.translationMode, defaults.translation.mode),
+      includeSoundEffects:
+        resolveOptionalBoolean(asRecord(translation)?.includeSoundEffects) ??
+        resolveOptionalBoolean(record?.includeSoundEffects) ??
+        defaults.translation.includeSoundEffects,
+      ocrBboxExpandXRatio: resolveOcrBboxExpandRatio(
+        asRecord(translation)?.ocrBboxExpandXRatio ?? record?.ocrBboxExpandXRatio,
+        defaults.translation.ocrBboxExpandXRatio
+      ),
+      ocrBboxExpandYRatio: resolveOcrBboxExpandRatio(
+        asRecord(translation)?.ocrBboxExpandYRatio ?? record?.ocrBboxExpandYRatio,
+        defaults.translation.ocrBboxExpandYRatio
+      ),
+      textOutlineWidthPx: resolveTextOutlineWidthPx(
+        asRecord(translation)?.textOutlineWidthPx ?? record?.textOutlineWidthPx,
+        defaults.translation.textOutlineWidthPx
+      )
     },
     maxTokens: resolveMaxTokens(record?.maxTokens, defaults.maxTokens)
   };
@@ -410,6 +462,22 @@ export function buildBaseTranslationOptions({
     codexModel: settings.codex.model,
     codexReasoningEffort: resolveCodexReasoningEffort(env.MANGA_TRANSLATOR_CODEX_REASONING_EFFORT, settings.codex.reasoningEffort),
     codexOauthPort: settings.codex.oauthPort,
+    translationMode: resolveTranslationMode(env.MANGA_TRANSLATOR_TRANSLATION_MODE, settings.translation.mode),
+    includeSoundEffects:
+      readOptionalBooleanEnv(env, "MANGA_TRANSLATOR_INCLUDE_SOUND_EFFECTS") ??
+      settings.translation.includeSoundEffects,
+    ocrBboxExpandXRatio: resolveOcrBboxExpandRatio(
+      env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_X_RATIO ?? env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_X,
+      settings.translation.ocrBboxExpandXRatio
+    ),
+    ocrBboxExpandYRatio: resolveOcrBboxExpandRatio(
+      env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_Y_RATIO ?? env.MANGA_TRANSLATOR_OCR_BBOX_EXPAND_Y,
+      settings.translation.ocrBboxExpandYRatio
+    ),
+    textOutlineWidthPx: resolveTextOutlineWidthPx(
+      env.MANGA_TRANSLATOR_TEXT_OUTLINE_WIDTH_PX,
+      settings.translation.textOutlineWidthPx
+    ),
     ocrDevice: resolveOcrDevice(env.MANGA_TRANSLATOR_OCR_DEVICE, settings.ocr.device),
     ocrBboxProvider: resolveOptionalString(env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER),
     ocrBboxCommand: resolveOptionalString(env.MANGA_TRANSLATOR_OCR_BBOX_CMD),
@@ -440,7 +508,17 @@ function readOptionalBooleanEnv(env: NodeJS.ProcessEnv, name: string): boolean |
   if (raw === undefined || raw === "") {
     return undefined;
   }
-  const normalized = raw.trim().toLowerCase();
+  return resolveOptionalBoolean(raw);
+}
+
+function resolveOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(normalized)) {
     return true;
   }
@@ -464,6 +542,10 @@ function resolveGemmaVramMode(value: unknown, fallback: GemmaVramMode): GemmaVra
 
 function resolveOcrDevice(value: unknown, fallback: OcrDevice): OcrDevice {
   return value === "gpu" || value === "cpu" ? value : fallback;
+}
+
+function resolveTranslationMode(value: unknown, fallback: TranslationMode): TranslationMode {
+  return value === "image" || value === "ocr-text" || value === "ocr-text-with-image-retry" ? value : fallback;
 }
 
 function resolveCodexReasoningEffort(value: unknown, fallback: CodexReasoningEffort): CodexReasoningEffort {
@@ -497,6 +579,22 @@ function resolveMaxTokens(value: unknown, fallback: number): number {
     return fallback;
   }
   return clampInteger(parsed, MIN_MAX_TOKENS, MAX_MAX_TOKENS);
+}
+
+function resolveOcrBboxExpandRatio(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(MAX_OCR_BBOX_EXPAND_RATIO, Math.max(MIN_OCR_BBOX_EXPAND_RATIO, parsed));
+}
+
+function resolveTextOutlineWidthPx(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(MAX_TEXT_OUTLINE_WIDTH_PX, Math.max(MIN_TEXT_OUTLINE_WIDTH_PX, parsed));
 }
 
 function clampInteger(value: number, min: number, max: number): number {

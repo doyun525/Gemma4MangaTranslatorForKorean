@@ -31,22 +31,24 @@ export function getAppPaths(): AppPaths {
   const executableDir = dirname(process.execPath);
   const resourcesDir = process.resourcesPath;
   const dataRoot = isPackaged ? resolvePackagedDataRoot(executableDir) : repoRoot;
+  const sharedWindowsDataRoot = process.platform === "win32" ? join(process.env.LOCALAPPDATA || dataRoot, "manga-gemma-translator") : null;
   const libraryDir = isPackaged ? join(dataRoot, "library") : join(repoRoot, "library");
   const logsDir = isPackaged ? join(dataRoot, "logs") : join(repoRoot, "logs");
   const runtimeDir = isPackaged ? join(resourcesDir, "app-runtime") : join(repoRoot, "out", "app-runtime");
-  const toolsDir = isPackaged ? join(resourcesDir, "tools") : join(repoRoot, "tools");
+  const llamaServerBinary = process.platform === "win32" ? "llama-server.exe" : "llama-server";
+  const toolsDir = resolveToolsDir({ isPackaged, resourcesDir, repoRoot, llamaServerBinary });
   const explicitOcrRuntimeDir = process.env.MANGA_TRANSLATOR_OCR_RUNTIME_DIR?.trim();
   const ocrRuntimeDir = explicitOcrRuntimeDir || (
     process.platform === "win32"
-      ? join(process.env.LOCALAPPDATA || dataRoot, "manga-gemma-translator", "ocr-runtime")
+      ? join(sharedWindowsDataRoot || dataRoot, "ocr-runtime")
       : join(dataRoot, "ocr-runtime")
   );
   const llamaRuntimeDir = join(toolsDir, "beellama-v0.2.0-cuda12.4");
-  const llamaServerBinary = process.platform === "win32" ? "llama-server.exe" : "llama-server";
   const explicitHfHome = process.env.MANGA_TRANSLATOR_HF_HOME?.trim();
   const explicitHubCache = process.env.HF_HUB_CACHE?.trim() || process.env.HUGGINGFACE_HUB_CACHE?.trim();
-  const hfHomeDir = isPackaged ? join(dataRoot, "hf-cache") : explicitHfHome || undefined;
-  const hfHubCacheDir = isPackaged ? join(dataRoot, "hf-cache", "hub") : explicitHubCache || undefined;
+  const defaultHfHomeDir = isPackaged ? join(dataRoot, "hf-cache") : sharedWindowsDataRoot ? join(sharedWindowsDataRoot, "hf-cache") : undefined;
+  const hfHomeDir = explicitHfHome || defaultHfHomeDir;
+  const hfHubCacheDir = explicitHubCache || (hfHomeDir ? join(hfHomeDir, "hub") : undefined);
 
   return {
     isPackaged,
@@ -81,6 +83,54 @@ export function ensureWritableAppDirectories(): AppPaths {
   }
   mkdirSync(paths.ocrRuntimeDir, { recursive: true });
   return paths;
+}
+
+function resolveToolsDir({
+  isPackaged,
+  resourcesDir,
+  repoRoot,
+  llamaServerBinary
+}: {
+  isPackaged: boolean;
+  resourcesDir: string;
+  repoRoot: string;
+  llamaServerBinary: string;
+}): string {
+  const explicitToolsDir = process.env.MANGA_TRANSLATOR_TOOLS_DIR?.trim();
+  if (explicitToolsDir) {
+    return explicitToolsDir;
+  }
+
+  const packagedToolsDir = join(resourcesDir, "tools");
+  if (isPackaged) {
+    return packagedToolsDir;
+  }
+
+  const repoToolsDir = join(repoRoot, "tools");
+  if (hasBundledLlamaServer(repoToolsDir, llamaServerBinary)) {
+    return repoToolsDir;
+  }
+
+  const installedToolsDir = resolveInstalledWindowsToolsDir(llamaServerBinary);
+  return installedToolsDir ?? repoToolsDir;
+}
+
+function resolveInstalledWindowsToolsDir(llamaServerBinary: string): string | null {
+  if (process.platform !== "win32") {
+    return null;
+  }
+
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (!localAppData) {
+    return null;
+  }
+
+  const toolsDir = join(localAppData, "Programs", "manga-gemma-translator", "resources", "tools");
+  return hasBundledLlamaServer(toolsDir, llamaServerBinary) ? toolsDir : null;
+}
+
+function hasBundledLlamaServer(toolsDir: string, llamaServerBinary: string): boolean {
+  return existsSync(join(toolsDir, "beellama-v0.2.0-cuda12.4", llamaServerBinary));
 }
 
 function resolvePackagedDataRoot(executableDir: string): string {

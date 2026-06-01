@@ -120,6 +120,7 @@ export default function App(): React.JSX.Element {
   const [translationSourceOpen, setTranslationSourceOpen] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreviewResult | null>(null);
   const [importBusy, setImportBusy] = useState(false);
+  const [fileDropActive, setFileDropActive] = useState(false);
   const [shareExportOpen, setShareExportOpen] = useState(false);
   const [shareExportBusy, setShareExportBusy] = useState(false);
   const [shareImportPreview, setShareImportPreview] = useState<WorkShareImportPreview | null>(null);
@@ -152,6 +153,7 @@ export default function App(): React.JSX.Element {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const fileDragDepthRef = useRef(0);
   const saveTimerRef = useRef<number | null>(null);
   const lastWheelNavigationAtRef = useRef(0);
   const dirtyVersionRef = useRef(0);
@@ -630,6 +632,72 @@ export default function App(): React.JSX.Element {
     }
     setImportPreview(preview);
   }, []);
+
+  const openDroppedImportPreview = useCallback(
+    async (files: File[]) => {
+      const filePaths = files
+        .map((file) => window.mangaApi.getPathForFile(file) || (file as File & { path?: string }).path || "")
+        .filter(Boolean);
+      if (filePaths.length === 0) {
+        pushStatus("드롭한 파일 경로를 읽지 못했습니다.");
+        return;
+      }
+      try {
+        const preview = await window.mangaApi.previewDroppedImport(filePaths);
+        if (preview) {
+          setImportPreview(preview);
+        } else {
+          pushStatus("가져올 수 있는 이미지가 없습니다.");
+        }
+      } catch (error) {
+        console.error(error);
+        pushStatus(formatErrorMessage(error, "드롭한 파일을 읽지 못했습니다."));
+      }
+    },
+    [pushStatus]
+  );
+
+  const onWorkspaceDragEnter = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    fileDragDepthRef.current += 1;
+    setFileDropActive(true);
+  }, []);
+
+  const onWorkspaceDragOver = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setFileDropActive(true);
+  }, []);
+
+  const onWorkspaceDragLeave = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) {
+      setFileDropActive(false);
+    }
+  }, []);
+
+  const onWorkspaceDrop = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      fileDragDepthRef.current = 0;
+      setFileDropActive(false);
+      void openDroppedImportPreview(Array.from(event.dataTransfer.files));
+    },
+    [openDroppedImportPreview]
+  );
 
   const selectTranslateSource = useCallback(
     async (mode: TranslateSourceMode) => {
@@ -1712,7 +1780,8 @@ export default function App(): React.JSX.Element {
   const submitSettings = useCallback(async (nextSettings: AppSettings) => {
     setSettingsBusy(true);
     try {
-      const saved = await window.mangaApi.saveSettings(nextSettings);
+      await window.mangaApi.saveSettings(nextSettings);
+      const saved = await window.mangaApi.getSettings();
       setSettings(saved);
       setSettingsOpen(false);
       pushStatus("설정을 저장했습니다. 다음 번 번역 실행부터 적용됩니다.");
@@ -1856,11 +1925,15 @@ export default function App(): React.JSX.Element {
 
       <section
         ref={workspacePanelRef}
-        className="workspace"
+        className={`workspace ${fileDropActive ? "file-drop-active" : ""}`}
         tabIndex={0}
         aria-label="읽기 영역"
         onMouseDown={() => workspacePanelRef.current?.focus()}
         onWheel={onWorkspaceWheel}
+        onDragEnter={onWorkspaceDragEnter}
+        onDragOver={onWorkspaceDragOver}
+        onDragLeave={onWorkspaceDragLeave}
+        onDrop={onWorkspaceDrop}
       >
         {selectedPage ? (
           <div className="workspace-pane">
@@ -1879,6 +1952,7 @@ export default function App(): React.JSX.Element {
               retouchPreview={retouchPreviewLayer}
               regionSelectionActive={Boolean(regionSelection?.active)}
               regionSelectionRect={regionSelectionRect}
+              fileDropActive={fileDropActive}
               onStagePointerMove={onStagePointerMove}
               onStagePointerUp={onStagePointerUp}
               onStagePointerDown={onStagePointerDown}
@@ -2562,6 +2636,13 @@ function isEditableTarget(target: EventTarget | null): boolean {
   }
 
   return Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true'], [contenteditable='plaintext-only']"));
+}
+
+function hasDraggedFiles(dataTransfer: DataTransfer | null): boolean {
+  if (!dataTransfer) {
+    return false;
+  }
+  return Array.from(dataTransfer.types).includes("Files");
 }
 
 function formatErrorMessage(error: unknown, fallback: string): string {

@@ -6,11 +6,20 @@ import type {
   ModelTestProgressEvent,
   ModelProvider,
   ModelSource,
-  OcrDevice
+  OcrDevice,
+  TranslationMode
 } from "../../../shared/types";
 
 const MIN_MAX_TOKENS = 300;
 const MAX_MAX_TOKENS = 12000;
+const MIN_OCR_BBOX_EXPAND_PERCENT = 0;
+const MAX_OCR_BBOX_EXPAND_PERCENT = 100;
+const DEFAULT_OCR_BBOX_EXPAND_X_PERCENT = 20;
+const DEFAULT_OCR_BBOX_EXPAND_Y_PERCENT = 10;
+const DEFAULT_TEXT_OUTLINE_WIDTH_PX = 1.4;
+const DEFAULT_TRANSLATION_MODE: TranslationMode = "image";
+const MIN_TEXT_OUTLINE_WIDTH_PX = 0;
+const MAX_TEXT_OUTLINE_WIDTH_PX = 8;
 const DEFAULT_GEMMA_MODEL_REPO =
   "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-i1-GGUF";
 const DEFAULT_GEMMA_MMPROJ_REPO =
@@ -48,6 +57,12 @@ type CodexReasoningOption = {
 
 type OcrDeviceOption = {
   id: OcrDevice;
+  label: string;
+  description: string;
+};
+
+type TranslationModeOption = {
+  id: TranslationMode;
   label: string;
   description: string;
 };
@@ -93,6 +108,24 @@ const MODEL_PROVIDER_OPTIONS: ModelProviderOption[] = [
     id: "openai-codex",
     label: "OpenAI Codex",
     description: "Codex 로그인 토큰을 쓰는 openai-oauth 엔드포인트로 요청합니다."
+  }
+];
+
+const TRANSLATION_MODE_OPTIONS: TranslationModeOption[] = [
+  {
+    id: "image",
+    label: "이미지 직접 분석",
+    description: "현재 방식입니다. 페이지 이미지를 함께 보내 정확도를 우선합니다."
+  },
+  {
+    id: "ocr-text",
+    label: "OCR 텍스트만",
+    description: "이미지를 보내지 않고 OCR 텍스트와 bbox만 번역합니다."
+  },
+  {
+    id: "ocr-text-with-image-retry",
+    label: "OCR 우선",
+    description: "먼저 OCR 텍스트만 번역하고, 낮은 신뢰도 항목만 crop 이미지로 재시도합니다."
   }
 ];
 
@@ -185,6 +218,19 @@ export function SettingsModal({
   );
   const [codexOauthPort, setCodexOauthPort] = React.useState(String(initialSettings.codex.oauthPort));
   const [ocrDevice, setOcrDevice] = React.useState<OcrDevice>(initialSettings.ocr.device);
+  const [translationMode, setTranslationMode] = React.useState<TranslationMode>(() =>
+    resolveTranslationMode(initialSettings.translation?.mode)
+  );
+  const [includeSoundEffects, setIncludeSoundEffects] = React.useState(initialSettings.translation.includeSoundEffects);
+  const [ocrBboxExpandXPercent, setOcrBboxExpandXPercent] = React.useState(
+    ratioToPercentInput(initialSettings.translation.ocrBboxExpandXRatio, DEFAULT_OCR_BBOX_EXPAND_X_PERCENT)
+  );
+  const [ocrBboxExpandYPercent, setOcrBboxExpandYPercent] = React.useState(
+    ratioToPercentInput(initialSettings.translation.ocrBboxExpandYRatio, DEFAULT_OCR_BBOX_EXPAND_Y_PERCENT)
+  );
+  const [textOutlineWidthPx, setTextOutlineWidthPx] = React.useState(
+    numberToInput(initialSettings.translation.textOutlineWidthPx, DEFAULT_TEXT_OUTLINE_WIDTH_PX)
+  );
   const [maxTokens, setMaxTokens] = React.useState(String(initialSettings.maxTokens));
   const [localActionBusy, setLocalActionBusy] = React.useState(false);
   const [testState, setTestState] = React.useState<TestState>({ status: "idle", message: null, detail: null });
@@ -206,6 +252,15 @@ export function SettingsModal({
     setCodexReasoningEffort(initialSettings.codex.reasoningEffort);
     setCodexOauthPort(String(initialSettings.codex.oauthPort));
     setOcrDevice(initialSettings.ocr.device);
+    setTranslationMode(resolveTranslationMode(initialSettings.translation?.mode));
+    setIncludeSoundEffects(initialSettings.translation.includeSoundEffects);
+    setOcrBboxExpandXPercent(
+      ratioToPercentInput(initialSettings.translation.ocrBboxExpandXRatio, DEFAULT_OCR_BBOX_EXPAND_X_PERCENT)
+    );
+    setOcrBboxExpandYPercent(
+      ratioToPercentInput(initialSettings.translation.ocrBboxExpandYRatio, DEFAULT_OCR_BBOX_EXPAND_Y_PERCENT)
+    );
+    setTextOutlineWidthPx(numberToInput(initialSettings.translation.textOutlineWidthPx, DEFAULT_TEXT_OUTLINE_WIDTH_PX));
     setMaxTokens(String(initialSettings.maxTokens));
     setTestState({ status: "idle", message: null, detail: null });
     setTestLogLines([]);
@@ -244,18 +299,29 @@ export function SettingsModal({
   const trimmedCodexModel = codexModel.trim();
   const parsedCodexOauthPort = Number(codexOauthPort);
   const parsedMaxTokens = Number(maxTokens);
+  const parsedOcrBboxExpandXPercent = Number(ocrBboxExpandXPercent);
+  const parsedOcrBboxExpandYPercent = Number(ocrBboxExpandYPercent);
+  const parsedTextOutlineWidthPx = Number(textOutlineWidthPx);
   const codexOauthPortValid =
     Number.isInteger(parsedCodexOauthPort) && parsedCodexOauthPort >= 0 && parsedCodexOauthPort <= 65535;
   const maxTokensValid =
     Number.isInteger(parsedMaxTokens) && parsedMaxTokens >= MIN_MAX_TOKENS && parsedMaxTokens <= MAX_MAX_TOKENS;
+  const ocrBboxExpandValid =
+    isValidPercent(parsedOcrBboxExpandXPercent) && isValidPercent(parsedOcrBboxExpandYPercent);
+  const textOutlineWidthValid =
+    Number.isFinite(parsedTextOutlineWidthPx) &&
+    parsedTextOutlineWidthPx >= MIN_TEXT_OUTLINE_WIDTH_PX &&
+    parsedTextOutlineWidthPx <= MAX_TEXT_OUTLINE_WIDTH_PX;
   const gemmaSettingsReady = modelSource === "local" ? Boolean(trimmedLocalModelPath) : Boolean(trimmedModelRepo && trimmedModelFile);
   const canSubmit = Boolean(
     maxTokensValid &&
+      ocrBboxExpandValid &&
+      textOutlineWidthValid &&
       (modelProvider === "openai-codex" ? trimmedCodexModel && codexOauthPortValid : gemmaSettingsReady)
   );
 
   const buildSettings = React.useCallback((): AppSettings | null => {
-    if (!maxTokensValid) {
+    if (!maxTokensValid || !ocrBboxExpandValid || !textOutlineWidthValid) {
       return null;
     }
 
@@ -284,6 +350,13 @@ export function SettingsModal({
         ocr: {
           device: ocrDevice
         },
+        translation: {
+          mode: resolveTranslationMode(translationMode),
+          includeSoundEffects,
+          ocrBboxExpandXRatio: parsedOcrBboxExpandXPercent / 100,
+          ocrBboxExpandYRatio: parsedOcrBboxExpandYPercent / 100,
+          textOutlineWidthPx: parsedTextOutlineWidthPx
+        },
         maxTokens: parsedMaxTokens
       };
     }
@@ -308,6 +381,13 @@ export function SettingsModal({
       ocr: {
         device: ocrDevice
       },
+      translation: {
+        mode: resolveTranslationMode(translationMode),
+        includeSoundEffects,
+        ocrBboxExpandXRatio: parsedOcrBboxExpandXPercent / 100,
+        ocrBboxExpandYRatio: parsedOcrBboxExpandYPercent / 100,
+        textOutlineWidthPx: parsedTextOutlineWidthPx
+      },
       maxTokens: parsedMaxTokens
     };
   }, [
@@ -323,9 +403,16 @@ export function SettingsModal({
     trimmedCodexModel,
     parsedCodexOauthPort,
     parsedMaxTokens,
+    parsedOcrBboxExpandXPercent,
+    parsedOcrBboxExpandYPercent,
+    parsedTextOutlineWidthPx,
     vramMode,
     codexReasoningEffort,
     ocrDevice,
+    translationMode,
+    includeSoundEffects,
+    ocrBboxExpandValid,
+    textOutlineWidthValid,
     initialSettings.codex.model,
     initialSettings.codex.oauthPort,
     maxTokensValid
@@ -519,6 +606,105 @@ export function SettingsModal({
               {OCR_DEVICE_OPTIONS.find((option) => option.id === ocrDevice)?.description}
             </p>
           </div>
+
+          <label className="settings-checkbox-row">
+            <input
+              type="checkbox"
+              checked={includeSoundEffects}
+              disabled={controlsBusy}
+              onChange={(event) => {
+                clearTestState();
+                setIncludeSoundEffects(event.target.checked);
+              }}
+            />
+            효과음/배경음 번역 포함
+          </label>
+          <p className="muted-line modal-note">
+            끄면 말풍선 대사와 캡션 중심으로 번역하고, 의성어·효과음·배경 반응음은 무시합니다.
+          </p>
+
+          <div className="settings-field-stack">
+            <span>LLM 번역 구조</span>
+            <div className="settings-preset-group" role="tablist" aria-label="LLM 번역 구조">
+              {TRANSLATION_MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`settings-preset-button ${translationMode === option.id ? "active" : ""}`}
+                  onClick={() => {
+                    clearTestState();
+                    setTranslationMode(option.id);
+                  }}
+                  disabled={controlsBusy}
+                  aria-pressed={translationMode === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted-line modal-note">
+              {TRANSLATION_MODE_OPTIONS.find((option) => option.id === translationMode)?.description ??
+                TRANSLATION_MODE_OPTIONS.find((option) => option.id === DEFAULT_TRANSLATION_MODE)?.description}
+            </p>
+          </div>
+
+          <div className="settings-field-stack">
+            <span>OCR bbox 텍스트 블록 확장</span>
+            <div className="settings-number-grid">
+              <label>
+                좌우 확장 (%)
+                <input
+                  type="number"
+                  min={MIN_OCR_BBOX_EXPAND_PERCENT}
+                  max={MAX_OCR_BBOX_EXPAND_PERCENT}
+                  step={1}
+                  value={ocrBboxExpandXPercent}
+                  disabled={controlsBusy}
+                  onChange={(event) => {
+                    clearTestState();
+                    setOcrBboxExpandXPercent(event.target.value);
+                  }}
+                />
+              </label>
+              <label>
+                위아래 확장 (%)
+                <input
+                  type="number"
+                  min={MIN_OCR_BBOX_EXPAND_PERCENT}
+                  max={MAX_OCR_BBOX_EXPAND_PERCENT}
+                  step={1}
+                  value={ocrBboxExpandYPercent}
+                  disabled={controlsBusy}
+                  onChange={(event) => {
+                    clearTestState();
+                    setOcrBboxExpandYPercent(event.target.value);
+                  }}
+                />
+              </label>
+            </div>
+            <p className="muted-line modal-note">
+              OCR 후보 bbox를 텍스트 블록으로 쓸 때 적용합니다. 기본값은 좌우 20%, 위아래 10%입니다.
+            </p>
+          </div>
+
+          <label>
+            기본 외곽선 두께(px)
+            <input
+              type="number"
+              min={MIN_TEXT_OUTLINE_WIDTH_PX}
+              max={MAX_TEXT_OUTLINE_WIDTH_PX}
+              step={0.1}
+              value={textOutlineWidthPx}
+              disabled={controlsBusy}
+              onChange={(event) => {
+                clearTestState();
+                setTextOutlineWidthPx(event.target.value);
+              }}
+            />
+          </label>
+          <p className="muted-line modal-note">
+            새로 생성되는 텍스트 블록의 기본 외곽선 두께입니다. 개별 블록에서도 조절할 수 있습니다.
+          </p>
 
           {modelProvider === "gemma" ? (
             <>
@@ -791,6 +977,16 @@ export function SettingsModal({
           {!maxTokensValid ? (
             <p className="muted-line">최대 출력 토큰은 {MIN_MAX_TOKENS} 이상 {MAX_MAX_TOKENS} 이하의 정수여야 합니다.</p>
           ) : null}
+          {!ocrBboxExpandValid ? (
+            <p className="muted-line">
+              OCR bbox 확장값은 {MIN_OCR_BBOX_EXPAND_PERCENT} 이상 {MAX_OCR_BBOX_EXPAND_PERCENT} 이하의 숫자여야 합니다.
+            </p>
+          ) : null}
+          {!textOutlineWidthValid ? (
+            <p className="muted-line">
+              기본 외곽선 두께는 {MIN_TEXT_OUTLINE_WIDTH_PX} 이상 {MAX_TEXT_OUTLINE_WIDTH_PX} 이하의 숫자여야 합니다.
+            </p>
+          ) : null}
         </section>
 
         <div className="modal-actions settings-actions">
@@ -810,6 +1006,32 @@ export function SettingsModal({
       </div>
     </div>
   );
+}
+
+function ratioToPercentInput(value: unknown, fallbackPercent: number): string {
+  const ratio = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(ratio)) {
+    return String(fallbackPercent);
+  }
+  return String(Math.round(ratio * 100));
+}
+
+function numberToInput(value: unknown, fallback: number): string {
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) {
+    return String(fallback);
+  }
+  return String(Math.round(number * 10) / 10);
+}
+
+function resolveTranslationMode(value: unknown): TranslationMode {
+  return value === "image" || value === "ocr-text" || value === "ocr-text-with-image-retry"
+    ? value
+    : DEFAULT_TRANSLATION_MODE;
+}
+
+function isValidPercent(value: number): boolean {
+  return Number.isFinite(value) && value >= MIN_OCR_BBOX_EXPAND_PERCENT && value <= MAX_OCR_BBOX_EXPAND_PERCENT;
 }
 
 function resolveModelPreset(modelRepo: string, modelFile: string): ModelPresetId {

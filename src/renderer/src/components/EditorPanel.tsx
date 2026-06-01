@@ -165,6 +165,18 @@ export function EditorPanel({
         <ColorField label="글자색" value={resolveColor(block.textColor, "#111111")} disabled={disabled} onChange={(textColor) => onUpdate({ textColor })} />
         <ColorField label="외곽선" value={outlineColor} disabled={disabled} onChange={(nextOutlineColor) => onUpdate({ outlineColor: nextOutlineColor })} />
       </div>
+      <label>
+        외곽선 두께 {resolveOutlineWidth(block.outlineWidthPx).toFixed(1)}px
+        <input
+          type="range"
+          min={0}
+          max={8}
+          step={0.1}
+          value={resolveOutlineWidth(block.outlineWidthPx)}
+          disabled={disabled}
+          onChange={(event) => onUpdate({ outlineWidthPx: resolveOutlineWidth(Number(event.target.value)) })}
+        />
+      </label>
       <div className="block-actions">
         <button onClick={onDuplicate} disabled={disabled}>복제</button>
         <button className="danger" onClick={onDelete} disabled={disabled}>삭제</button>
@@ -203,4 +215,12 @@ function clampFontSize(value: number): number {
     return 24;
   }
   return Math.max(10, Math.min(160, Math.round(value)));
+}
+
+function resolveOutlineWidth(value: number | undefined): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 1.4;
+  }
+  return Math.max(0, Math.min(8, Math.round(parsed * 10) / 10));
 }

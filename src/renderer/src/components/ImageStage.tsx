@@ -29,6 +29,7 @@ type ImageStageProps = {
   } | null;
   regionSelectionActive: boolean;
   regionSelectionRect: BBox | null;
+  fileDropActive?: boolean;
   onStagePointerMove: (event: React.PointerEvent) => void;
   onStagePointerUp: (event: React.PointerEvent) => void;
   onStagePointerDown: (event: React.PointerEvent) => void;
@@ -51,6 +52,7 @@ export function ImageStage({
   retouchPreview = null,
   regionSelectionActive,
   regionSelectionRect,
+  fileDropActive = false,
   onStagePointerMove,
   onStagePointerUp,
   onStagePointerDown,
@@ -74,7 +76,8 @@ export function ImageStage({
           regionSelectionActive ? "selecting-region" : "",
           blockPointerDisabled ? "editing-mask" : "",
           retouchCursor ? "retouch-tool-enabled" : "",
-          cursorVisible ? "retouch-cursor-active" : ""
+          cursorVisible ? "retouch-cursor-active" : "",
+          fileDropActive ? "file-drop-active" : ""
         ]
           .filter(Boolean)
           .join(" ")}
@@ -157,6 +160,7 @@ export function ImageStage({
             }}
           />
         ) : null}
+        {fileDropActive ? <div className="stage-drop-overlay">파일을 놓아 가져오기</div> : null}
       </div>
     </div>
   );

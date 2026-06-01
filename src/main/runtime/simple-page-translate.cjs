@@ -103,6 +103,8 @@ function buildOptionSummary(options = {}) {
     codexModel: resolveConfiguredCodexModel(options),
     codexReasoningEffort: resolveConfiguredCodexReasoningEffort(options),
     codexOauthPort: options.codexOauthPort,
+    translationMode: resolveTranslationMode(options),
+    includeSoundEffects: shouldIncludeSoundEffects(options),
     ocrBboxProvider: resolveOcrBboxProvider(options),
     ocrDevice: resolveOcrDevice(options),
     ocrRuntimeDir: resolveOcrRuntimeDir(options),
@@ -1003,23 +1005,25 @@ const OVERLAY_OUTPUT_SCHEMA = [
 const OVERLAY_PROMPT_SECTIONS = [
   [
     "Task",
-    "You are given the same Japanese manga page in multiple full-page renderings.",
+    "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English.",
     "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page.",
-    "Detect every visible Japanese text group and translate it into concise Korean.",
+    "Detect every visible Japanese or English text group and translate it into concise Korean.",
     "Scan the entire page before writing records; do not stop after the first obvious text.",
-    "First identify the exact Japanese glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
+    "First identify the exact source glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
     "Before reading dialogue text, segment the visible speech balloons themselves. Each distinct balloon lobe and each separated dialogue text cluster becomes a separate dialogue record.",
-    "Only output real Japanese text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
+    "Only output real Japanese or English text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
   ],
   [
     "Output",
     "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
     "Use exactly these keys, one per line: id, type, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.",
     "Do not blindly copy the example values. Estimate fontSize and direction from the actual glyphs in Image 1.",
-    "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese text, correctly read, correctly typed, and correctly translated.",
+    "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese or English text, correctly read, correctly typed, and correctly translated.",
     "Use confidence below 0.72 when the crop is hard to read, partly clipped, possibly decorative, or the translation may be uncertain.",
-    "If jp has multiple visible source lines, put every readable source line in jp. Continuation lines after jp: belong to jp until the ko: key.",
-    "Write ko as natural Korean for horizontal reading. Do not mirror Japanese vertical line breaks; use commas or short Korean phrases unless a real list or dialogue pause needs a line break.",
+    "The jp field stores the original source text even when the source language is English. If jp has multiple visible source lines, put every readable source line in jp. Continuation lines after jp: belong to jp until the ko: key.",
+    "Write ko as natural Korean for horizontal reading. Do not mirror source line breaks; use commas or short Korean phrases unless a real list or dialogue pause needs a line break.",
+    "When the Korean translation would be too long for the bbox, insert natural Korean line breaks inside ko so it fits the same visual text area. Prefer 1-3 short lines for dialogue and captions.",
+    "For OCR candidate records, use that candidate's x1, y1, x2, y2 rectangle as the available text box when deciding ko line breaks.",
     "If the entire jp or ko would be only [?], skip that record instead of outputting an unreadable placeholder.",
     "Put one blank line between records.",
     "Example:",
@@ -1028,7 +1032,7 @@ const OVERLAY_PROMPT_SECTIONS = [
   [
     "Geometry",
     "Coordinates are integers in the coordinate frame described above, with top-left origin.",
-    "x1, y1, x2, y2 describe the tight rectangle corners of the visible Japanese glyph ink and its outline.",
+    "x1, y1, x2, y2 describe the tight rectangle corners of the visible source glyph ink and its outline.",
     "For each item, first find the four extremes of the complete jp text: leftmost visible glyph/outline pixel, topmost pixel, rightmost pixel, and bottommost pixel. Then output x1 = left, y1 = top, x2 = right, y2 = bottom.",
     "The rectangle must cover every visible stroke, outline, dakuten mark, punctuation mark, small kana, long vowel mark, and trailing kana belonging to jp.",
     "A tight rectangle may still have a tiny 1-3 px safety margin around glyph ink; missing any stroke outside the box is worse than including a hair of surrounding paper.",
@@ -1037,15 +1041,15 @@ const OVERLAY_PROMPT_SECTIONS = [
     "For one or two vertical text columns, keep w close to the actual glyph-column width, but never make it narrower than the full visible strokes.",
     "Never include the whole speech bubble, caption plate, panel, background art, motion lines, or blank margin.",
     "Never enlarge, shift, or reshape the rectangle to make Korean easier to fit.",
-    "fontSize is the apparent Japanese glyph size in Image 1 pixels.",
+    "fontSize is the apparent source glyph size in Image 1 pixels.",
     "fontSize is the height of one normal full-size source character, not the Korean overlay size and not the example default.",
     "For mixed handwriting, use the main readable glyph size; do not reduce fontSize because small furigana, punctuation, or thin strokes are present.",
-    "direction is the original Japanese glyph writing direction: horizontal or vertical. This is about the Japanese source text, not the Korean rendering.",
+    "direction is the original source glyph writing direction: horizontal or vertical. This is about the source text, not the Korean rendering.",
     "angle is the visible glyph slant in degrees from -30 to 30. Use 0 for upright text.",
-    "Before final output, mentally fill each bbox with translucent color: no Japanese glyph from jp should remain visible outside that filled area.",
+    "Before final output, mentally fill each bbox with translucent color: no source glyph from jp should remain visible outside that filled area.",
     "Then check tightness: if the filled area covers large blank bubble paper or caption-box padding on any side, redraw the bbox tighter around the glyph ink.",
     "Then check placement: the center of the bbox must lie on or very near the jp glyph ink cluster, not on adjacent background art or empty panel space.",
-    "Decorative hearts, bubble tails, panel borders, box borders, background textures, and motion effects are not Japanese glyph ink."
+    "Decorative hearts, bubble tails, panel borders, box borders, background textures, and motion effects are not source glyph ink."
   ],
   [
     "Segmentation",
@@ -1054,7 +1058,7 @@ const OVERLAY_PROMPT_SECTIONS = [
     "If one visible outline contains upper and lower lobes with a narrow waist, large blank gap, or two separate text clusters, split it into one record per lobe/text cluster.",
     "Do not create one tall dialogue bbox spanning stacked upper/lower bubbles.",
     "Do not merge two speech bubbles just because the sentence continues across them; split jp and ko by the visible balloon/lobe that contains each text group.",
-    "Inside one speech bubble, group all Japanese glyph lines from that same bubble into one item.",
+    "Inside one speech bubble, group all source glyph lines from that same bubble into one item.",
     "Process panels and bubbles exhaustively from top to bottom and right to left.",
     "For captions and narration boxes, box only the printed glyphs, not the surrounding box.",
     "For SFX, box only the sound-effect glyph strokes and their visible outline, not speed lines or impact effects.",
@@ -1067,8 +1071,8 @@ const OVERLAY_PROMPT_SECTIONS = [
   [
     "Rendering hints",
     "type is one of solid or nonsolid.",
-    "Use type solid only when the Japanese glyphs sit on a plain, flat, single-color speech-bubble or caption background where an opaque Korean text box is appropriate.",
-    "Use type nonsolid when the Japanese glyphs sit on artwork, screentone, gradient, texture, transparent or gray bubble fill, SFX lettering, labels, handwriting, or any uncertain/mixed background.",
+    "Use type solid only when the source glyphs sit on a plain, flat, single-color speech-bubble or caption background where an opaque Korean text box is appropriate.",
+    "Use type nonsolid when the source glyphs sit on artwork, screentone, gradient, texture, transparent or gray bubble fill, SFX lettering, labels, handwriting, or any uncertain/mixed background.",
     "If unsure whether the background is truly flat and single-color, choose nonsolid.",
     "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
     "For sound-effect or reaction lettering, translate the visual sound/reaction text itself, not the character's motion or the scene description.",
@@ -1084,15 +1088,25 @@ const PROMPT_KO_BBOX_LINES_MULTIVIEW = buildOverlayPrompt();
 function buildSystemPrompt(options = {}) {
   const lines = [
     "You are an OCR and manga-translation engine.",
+    "Translate all Japanese and English source text into natural Korean.",
     "Return only the machine-readable record format requested by the user prompt.",
-    "Geometry accuracy comes before Korean text fit: preserve the original Japanese glyph position and apparent size.",
-    "Never merge separate speech bubbles, including touching or stacked balloon lobes.",
-    "For SFX records, output bare Korean effect lettering only; do not wrap it in parentheses/brackets/quotes or turn it into a stage direction."
+    "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
+    "Never merge separate speech bubbles, including touching or stacked balloon lobes."
   ];
+
+  if (!shouldIncludeSoundEffects(options)) {
+    lines.push(
+      "Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX. Translate dialogue, narration captions, and readable UI/sign text only."
+    );
+  } else {
+    lines.push(
+      "For SFX records, output bare Korean effect lettering only; do not wrap it in parentheses/brackets/quotes or turn it into a stage direction."
+    );
+  }
 
   if (options.regionCropMode) {
     lines.push(
-      "Selected-region mode: group by visual text container, not by line or column. One speech bubble or one caption plate is one item even when the Japanese is split across multiple vertical columns or lines."
+      "Selected-region mode: group by visual text container, not by line or column. One speech bubble or one caption plate is one item even when the source text is split across multiple vertical columns or lines."
     );
   }
 
@@ -1101,6 +1115,7 @@ function buildSystemPrompt(options = {}) {
 
 function buildOverlayPrompt(options = {}, imageVariants = []) {
   const sections = OVERLAY_PROMPT_SECTIONS.map(([title, ...lines]) => [title, ...lines]);
+  applySoundEffectPreference(sections, options);
   sections[0] = buildTaskSection(options, imageVariants);
   const regionCropSection = buildRegionCropSection(options);
   if (regionCropSection.length > 1) {
@@ -1125,26 +1140,61 @@ function getOverlayPrompt(options = {}, imageVariants = []) {
   return buildOverlayPrompt(options, imageVariants);
 }
 
+function shouldIncludeSoundEffects(options = {}) {
+  return options.includeSoundEffects !== false;
+}
+
+function applySoundEffectPreference(sections, options = {}) {
+  if (shouldIncludeSoundEffects(options)) {
+    return;
+  }
+
+  const segmentation = sections.find((section) => section[0] === "Segmentation");
+  if (segmentation) {
+    const kept = segmentation.filter((line, index) => index === 0 || !/\bSFX\b|sound-effect|kana sound effect/i.test(line));
+    kept.push(
+      "Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX, even when they are readable.",
+      "Include dialogue in speech bubbles, narration captions, signs, labels, and UI text when they carry semantic meaning."
+    );
+    segmentation.splice(0, segmentation.length, ...kept);
+  }
+
+  const renderingHints = sections.find((section) => section[0] === "Rendering hints");
+  if (renderingHints) {
+    const kept = renderingHints.filter((line, index) => index === 0 || !/\bSFX\b|sound-effect|reaction lettering/i.test(line));
+    kept.push("When sound-effect or reaction lettering is present, ignore it instead of translating it.");
+    renderingHints.splice(0, renderingHints.length, ...kept);
+  }
+}
+
 function buildTaskSection(options = {}, imageVariants = []) {
   const hasAssistImages = imageVariants.length > 1;
   const regionCropMode = Boolean(options.regionCropMode);
+  const textOnlyMode = !shouldSendInitialImages(options);
   return [
     "Task",
-    hasAssistImages
-      ? "You are given the same Japanese manga page in multiple full-page renderings."
+    textOnlyMode
+      ? "You are given OCR candidate records from a manga page. No image is included in this request."
+      : hasAssistImages
+      ? "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English."
       : regionCropMode
-        ? "You are given one user-selected crop from a Japanese manga page."
-        : "You are given one full-page Japanese manga image.",
-    hasAssistImages
+        ? "You are given one user-selected crop from a manga page. Source text may be Japanese, English, or mixed Japanese/English."
+        : "You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.",
+    textOnlyMode
+      ? "Use the OCR text and bbox candidates as the only source of evidence."
+      : hasAssistImages
       ? "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page."
       : regionCropMode
         ? "Image 1 is the coordinate-authority selected crop."
         : "Image 1 is the coordinate-authority full page.",
-    "Detect every visible Japanese text group and translate it into concise Korean.",
+    "Detect every visible Japanese or English text group and translate it into concise Korean.",
+    shouldIncludeSoundEffects(options)
+      ? "Include dialogue, narration captions, meaningful labels/signs, and sound-effect lettering."
+      : "Translate dialogue, narration captions, and meaningful labels/signs only. Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX.",
     "Scan the entire page before writing records; do not stop after the first obvious text.",
-    "First identify the exact Japanese glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
+    "First identify the exact source glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
     "Before reading dialogue text, segment the visible speech balloons themselves. Each distinct balloon lobe and each separated dialogue text cluster becomes a separate dialogue record.",
-    "Only output real Japanese text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
+    "Only output real Japanese or English text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
   ];
 }
 
@@ -1155,13 +1205,17 @@ function buildRegionCropSection(options = {}) {
 
   return [
     "Selected region grouping",
-    "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or SFX inside it.",
-    "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate containers: separate speech bubbles/lobes, separate caption plates, or separate SFX glyph groups.",
-    "If the crop contains one speech bubble or one caption plate, output exactly one record for all readable Japanese in that container.",
-    "Inside one speech bubble, never split by Japanese vertical column, text line, word, sentence fragment, punctuation gap, or line break.",
+    shouldIncludeSoundEffects(options)
+      ? "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or SFX inside it."
+      : "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or ignored SFX inside it.",
+    shouldIncludeSoundEffects(options)
+      ? "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate containers: separate speech bubbles/lobes, separate caption plates, or separate SFX glyph groups."
+      : "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate dialogue or caption containers; ignore SFX glyph groups.",
+    "If the crop contains one speech bubble or one caption plate, output exactly one record for all readable Japanese or English text in that container.",
+    "Inside one speech bubble, never split by source text column, text line, word, sentence fragment, punctuation gap, or line break.",
     "For vertical dialogue in one bubble, jp must include all columns in natural Japanese reading order, and ko must be one coherent Korean translation for that bubble.",
     "Only split a dialogue item when there is a visible separate speech bubble/lobe or clearly separate dialogue container, not merely because columns are separated by blank paper.",
-    "The bbox for that one record should tightly cover the union of all visible Japanese glyph ink belonging to the same bubble/caption, not the whole bubble paper."
+    "The bbox for that one record should tightly cover the union of all visible source glyph ink belonging to the same bubble/caption, not the whole bubble paper."
   ];
 }
 
@@ -1227,25 +1281,47 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     return [];
   }
 
+  if (!shouldSendInitialImages(options)) {
+    return [
+      "OCR text-only mode",
+      "No page image is included in this request. Use only the OCR candidate records below.",
+      "Translate each candidate's ocrText into natural Korean and keep the exact candidate id and x1, y1, x2, y2.",
+      "Because the image is unavailable, do not invent missing text outside candidates.",
+      "Use type solid for ocr_textbox, speech, bubble, caption, or dialogue labels. Use type nonsolid for ocr_textline, ocr_textgroup, handwriting, label, or uncertain labels.",
+      shouldIncludeSoundEffects(options)
+        ? "Translate readable sound-effect text only when the OCR text itself is clearly an effect word."
+        : "Skip candidates that are only sound effects, background sound lettering, reaction lettering, or decorative effects.",
+      "If ocrText is empty, unreadable, or only symbols, skip that candidate.",
+      "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
+      "",
+      ...formattedHints
+    ];
+  }
+
   return [
     "OCR bbox candidates",
     "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
-    "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese text and Korean translation.",
+    "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
     "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when solid-background and nonsolid-background candidates are close together.",
-    "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
-    `Required candidate ids: ${candidateIds.join(", ")}.`,
+    "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
+    shouldIncludeSoundEffects(options)
+      ? `Required candidate ids: ${candidateIds.join(", ")}.`
+      : `Required candidate ids for dialogue, captions, signs, labels, and UI text: ${candidateIds.join(", ")}. Skip candidates that are only SFX, background sound lettering, reaction lettering, or decorative effects.`,
     "Read and translate only the text inside that candidate rectangle plus a tiny visual margin; do not move the rectangle to a different nearby text group.",
-    "For each candidate, read every visible Japanese line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
-    "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the Japanese vertical line breaks.",
+    "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
+    "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
+    "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the source line breaks.",
     "For ocr_textline and ocr_textgroup candidates, use type nonsolid unless the text is clearly on a flat single-color bubble or caption background.",
     "Labels, handwriting, captions on texture, diagram text, search terms, and sound-effect lettering are nonsolid.",
     "You may change a candidate bbox only when Image 1 clearly proves the candidate clips visible glyph strokes or includes non-text art; then change the minimum amount needed.",
     "Do not merge two candidates into one record, even when the sentence continues across them. Candidate rectangles are separate output records.",
     "If two candidates are stacked or touching speech bubbles, output two separate dialogue records with their original ids.",
-    "OCR candidates are a floor, not a ceiling. After processing candidates, inspect the whole Image 1 again for missing Japanese text.",
-    `If the detector missed visible Japanese text, add a new record with id greater than ${maxCandidateId}. Never reuse a candidate id for missing text outside that candidate rectangle.`,
-    "New records are allowed only for clear Japanese glyphs that are not covered by any candidate.",
-    "For new missing SFX records, search especially near character bodies, panel edges, and lower panels where OCR often misses gray or outlined kana. The bbox must visibly cover kana/SFX glyph strokes.",
+    "OCR candidates are a floor, not a ceiling. After processing candidates, inspect the whole Image 1 again for missing Japanese or English text.",
+    `If the detector missed visible Japanese or English text, add a new record with id greater than ${maxCandidateId}. Never reuse a candidate id for missing text outside that candidate rectangle.`,
+    "New records are allowed only for clear Japanese or English glyphs that are not covered by any candidate.",
+    shouldIncludeSoundEffects(options)
+      ? "For new missing SFX records, search especially near character bodies, panel edges, and lower panels where OCR often misses gray or outlined kana. The bbox must visibly cover kana/SFX glyph strokes."
+      : "Do not add new missing SFX, background sound lettering, reaction lettering, or decorative effect records.",
     "Never add SFX on panel trim, furniture lines, wall patterns, or isolated vertical strokes.",
     "The candidate coordinates below are already converted into the same coordinate frame required for your output.",
     "",
@@ -1791,7 +1867,7 @@ async function prepareImageVariants(options) {
 
 function buildMessages(options, imageVariants) {
   const promptText = options.promptOverrideText || getOverlayPrompt(options, imageVariants);
-  const imageParts = imageVariants.flatMap((variant, index) => ([
+  const imageParts = shouldSendInitialImages(options) ? imageVariants.flatMap((variant, index) => ([
     {
       type: "image_url",
       image_url: {
@@ -1802,7 +1878,7 @@ function buildMessages(options, imageVariants) {
       type: "text",
       text: describeImageVariant(variant, index, options)
     }
-  ]));
+  ])) : [];
 
   return [
     {
@@ -1817,7 +1893,7 @@ function buildMessages(options, imageVariants) {
 }
 
 function buildResponsesInput(options, imageVariants, promptText = options.promptOverrideText || getOverlayPrompt(options, imageVariants)) {
-  const content = imageVariants.flatMap((variant, index) => ([
+  const content = shouldSendInitialImages(options) ? imageVariants.flatMap((variant, index) => ([
     {
       type: "input_image",
       image_url: variant.dataUrl,
@@ -1827,7 +1903,7 @@ function buildResponsesInput(options, imageVariants, promptText = options.prompt
       type: "input_text",
       text: describeImageVariant(variant, index, options)
     }
-  ]));
+  ])) : [];
 
   return [
     {
@@ -1864,7 +1940,7 @@ function describeImageVariant(variant, index, options = {}) {
   return `Image ${index + 1}: the original full manga page. Use it as the geometry authority.${sizeText}${originalSizeText}`;
 }
 
-function buildCropRetryPrompt(targets = []) {
+function buildCropRetryPrompt(targets = [], options = {}) {
   const targetLines = targets.map((target, index) => {
     const cropImageIndex = index + 2;
     const confidence = Number.isFinite(Number(target.confidence)) ? Number(target.confidence).toFixed(2) : "unknown";
@@ -1884,15 +1960,18 @@ function buildCropRetryPrompt(targets = []) {
     "Image 1 is the full page for context only. Each following image is an expanded crop for exactly one target id.",
     "Do not detect new text, do not output extra ids, and do not change any bbox geometry.",
     "For each target, ignore any previous model OCR/translation. The crop image itself is the authority.",
-    "Read all real Japanese text inside that crop for the same target id, then translate it naturally into Korean.",
+    "Read all real Japanese or English text inside that crop for the same target id, then translate it naturally into Korean.",
+    shouldIncludeSoundEffects(options)
+      ? "Sound-effect or reaction lettering may be translated only when the target itself is a real SFX item."
+      : "If the target is sound-effect lettering, background sound lettering, reaction lettering, or decorative SFX, output type: reject, confidence: 1, jp: [non-text], ko: [non-text].",
     "",
     "# Output",
     "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
     "Output exactly one record for each target id, using exactly these keys: id, type, direction, angle, fontSize, confidence, jp, ko.",
     "Do not output x1, y1, x2, y2, bbox, width, or height.",
     "confidence is 0.00 to 1.00 for the corrected OCR+translation.",
-    "If the crop is decoration, panel trim, texture, non-Japanese art, or otherwise not real Japanese text, output type: reject, confidence: 1, jp: [non-text], ko: [non-text].",
-    "If the crop still has readable Japanese, never output only [?]; give the best OCR and concise natural Korean.",
+    "If the crop is decoration, panel trim, texture, non-Japanese/non-English art, or otherwise not real Japanese or English text, output type: reject, confidence: 1, jp: [non-text], ko: [non-text].",
+    "If the crop still has readable Japanese or English, never output only [?]; give the best OCR and concise natural Korean.",
     "Use type solid only for flat single-color bubble/caption backgrounds; use type nonsolid for artwork, screentone, texture, handwriting, labels, SFX, or uncertainty.",
     "Keep ordinary dialogue and caption Korean horizontal and natural unless the source is actual SFX/reaction lettering.",
     "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
@@ -2172,11 +2251,31 @@ function buildOcrBboxResult(hints = [], diagnostics = [], options = {}) {
 }
 
 function countOcrTextEvidence(hints = []) {
-  return hints.reduce((count, hint) => count + (hasJapaneseTextEvidence(readOcrCandidateText(hint)) ? 1 : 0), 0);
+  return hints.reduce((count, hint) => count + (hasTranslatableTextEvidence(readOcrCandidateText(hint)) ? 1 : 0), 0);
 }
 
-function hasJapaneseTextEvidence(value) {
+function resolveTranslationMode(options = {}) {
+  const mode = String(options.translationMode ?? process.env.MANGA_TRANSLATOR_TRANSLATION_MODE ?? "image").trim();
+  return mode === "ocr-text" || mode === "ocr-text-with-image-retry" ? mode : "image";
+}
+
+function shouldSendInitialImages(options = {}) {
+  if (options.forceImageInput) {
+    return true;
+  }
+  return resolveTranslationMode(options) === "image";
+}
+
+function shouldUseImageRetry(options = {}) {
+  const mode = resolveTranslationMode(options);
+  return mode === "image" || mode === "ocr-text-with-image-retry";
+}
+
+function hasTranslatableTextEvidence(value) {
   const text = String(value ?? "");
+  if (/[A-Za-z]{2,}/.test(text) || /(^|[^A-Za-z])[AIai]([^A-Za-z]|$)/.test(text)) {
+    return true;
+  }
   for (const char of text) {
     const code = char.codePointAt(0);
     if (
@@ -2582,7 +2681,7 @@ async function installOcrPythonPackages(pythonPath, installBatches, targetDir, o
     endPercent: 0.86
   });
   try {
-    const pipProgressArgs = `--cache-dir ${quoteCommandArg(pipCacheDir)} --progress-bar raw`;
+    const pipProgressArgs = `--cache-dir ${quoteCommandArg(pipCacheDir)} --progress-bar ${resolvePipProgressBarMode()}`;
     monitor.setStep("pip 업데이트", 0.04, 0.1);
     await runShellCommand(`${quoteCommandArg(pythonPath)} -m pip install --upgrade ${pipProgressArgs} pip`, {
       timeoutMs: 300000,
@@ -2638,6 +2737,11 @@ function resolveOcrInstallBatchProgressRanges(installBatches, startPercent, endP
     cursor = next;
     return range;
   });
+}
+
+function resolvePipProgressBarMode() {
+  const value = String(process.env.MANGA_TRANSLATOR_PIP_PROGRESS_BAR ?? "off").trim().toLowerCase();
+  return ["on", "off", "raw"].includes(value) ? value : "off";
 }
 
 function resolveInstallProgressDir(pythonPath) {
@@ -3632,8 +3736,7 @@ function buildLaunchArgs(options) {
     "--frequency-penalty",
     "0",
     ...(useBeellamaGemmaLaunch ? [] : ["--fit", "on", "--fit-target", String(options.fitTargetMb)]),
-    "-ngl",
-    "all",
+    ...resolveGpuLayerArgs(options),
     "-fa",
     "on",
     "--temp",
@@ -3724,6 +3827,14 @@ function buildLaunchArgs(options) {
   args.push("--log-timestamps", "--log-prefix", "--log-colors", "off");
 
   return args;
+}
+
+function resolveGpuLayerArgs(options = {}) {
+  const configured = process.env.MANGA_TRANSLATOR_N_GPU_LAYERS || process.env.LLAMA_ARG_N_GPU_LAYERS;
+  if (configured && String(configured).trim()) {
+    return ["-ngl", String(configured).trim()];
+  }
+  return ["-ngl", "all"];
 }
 
 function resolveDraftModelRepoArg(options = {}) {
@@ -3967,7 +4078,7 @@ async function requestTranslation(server, options) {
     if (ocrBboxResult.diagnostics.length > 0) {
       requestSummary.ocrBboxDiagnostics = ocrBboxResult.diagnostics;
     }
-    emitRuntimeProgress(promptOptions, "page_done", "페이지 텍스트 없음", "Paddle OCR에서 일본어 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다.");
+    emitRuntimeProgress(promptOptions, "page_done", "페이지 텍스트 없음", "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다.");
     return {
       requestBody: requestSummary,
       rawResponse: {
@@ -3980,7 +4091,9 @@ async function requestTranslation(server, options) {
     };
   }
 
-  const preparedVariants = await prepareImageVariants(options);
+  const preparedVariants = shouldSendInitialImages(promptOptions)
+    ? await prepareImageVariants(options)
+    : { imageVariants: [], diagnostics: [] };
   const imageVariants = preparedVariants.imageVariants;
   const promptText = promptOptions.promptOverrideText || getOverlayPrompt(promptOptions, imageVariants);
   const systemPrompt = buildSystemPrompt(promptOptions);
@@ -4087,11 +4200,12 @@ async function requestCropRetryTranslation(server, options, targets = []) {
     };
   }
 
-  const promptText = options.promptOverrideText || buildCropRetryPrompt(retryTargets);
+  const promptText = options.promptOverrideText || buildCropRetryPrompt(retryTargets, options);
   const promptOptions = {
     ...options,
     promptOverrideText: promptText,
-    ocrBboxHints: []
+    ocrBboxHints: [],
+    forceImageInput: true
   };
   const systemPrompt = buildSystemPrompt(promptOptions);
   const requestBody = isOpenAICodexProvider(promptOptions)
@@ -4486,6 +4600,8 @@ async function saveArtifacts(options, result) {
       codexModel: resolveConfiguredCodexModel(options),
       codexReasoningEffort: resolveConfiguredCodexReasoningEffort(options),
       codexOauthPort: options.codexOauthPort,
+      includeSoundEffects: shouldIncludeSoundEffects(options),
+      translationMode: resolveTranslationMode(options),
       fitTargetMb: options.fitTargetMb,
       imageMinTokens: options.imageMinTokens,
       imageMaxTokens: options.imageMaxTokens,
@@ -4520,6 +4636,7 @@ module.exports = {
   getScaledSize,
   parseOcrBatchProgressLine,
   parsePipRawProgress,
+  resolveTranslationMode,
   resolveOcrInstallBatchProgressRanges,
   resolveFfmpegPath,
   resolveManagedHfFilePath,

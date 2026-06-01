@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, extname, join } from "node:path";
@@ -499,6 +499,8 @@ function registerIpc(): void {
     const preview = await previewZipFolder(result.filePaths[0]);
     return preview.chapters.length ? preview : null;
   });
+
+  ipcMain.handle("import:preview-dropped", async (_event, filePaths: string[]) => previewDroppedImport(filePaths));
 
   ipcMain.handle("import:create", async (_event, request: CreateImportRequest) => createImport(request));
 
@@ -1108,6 +1110,52 @@ function registerIpc(): void {
     await runJobCleanup(job, "cancel");
     return { cancelled: true };
   });
+}
+
+async function previewDroppedImport(filePaths: string[]): Promise<ImportPreviewResult | null> {
+  const paths = Array.from(new Set(filePaths.map((filePath) => String(filePath ?? "").trim()).filter(Boolean))).filter((filePath) =>
+    existsSync(filePath)
+  );
+  if (paths.length === 0) {
+    return null;
+  }
+
+  if (paths.length === 1) {
+    const filePath = paths[0];
+    const stat = statSync(filePath);
+    if (stat.isDirectory()) {
+      const preview = await previewFolder(filePath);
+      return preview.chapters[0]?.pages.length ? preview : null;
+    }
+    if (isZipPath(filePath)) {
+      const preview = await previewZip(filePath);
+      return preview.chapters[0]?.pages.length ? preview : null;
+    }
+  }
+
+  const imagePaths = paths.filter((filePath) => !statSync(filePath).isDirectory() && isImportImagePath(filePath));
+  if (imagePaths.length === paths.length) {
+    const preview = await previewImages(imagePaths);
+    return preview.chapters[0]?.pages.length ? preview : null;
+  }
+
+  const zipPaths = paths.filter((filePath) => !statSync(filePath).isDirectory() && isZipPath(filePath));
+  if (zipPaths.length === paths.length && zipPaths.length > 0) {
+    const previews = await Promise.all(zipPaths.map((zipPath) => previewZip(zipPath)));
+    const chapters = previews.flatMap((preview) => preview.chapters);
+    return {
+      mode: "batch",
+      sourceKind: "zip-folder",
+      suggestedWorkTitle: "제목없음",
+      chapters
+    };
+  }
+
+  throw new Error("이미지 파일, 이미지 폴더, ZIP 파일만 끌어올 수 있습니다.");
+}
+
+function isImportImagePath(filePath: string): boolean {
+  return [".png", ".jpg", ".jpeg", ".webp"].includes(extname(filePath).toLowerCase());
 }
 
 function isAbortError(error: unknown): boolean {

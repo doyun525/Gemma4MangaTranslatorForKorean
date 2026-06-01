@@ -9,6 +9,7 @@ export type ModelSource = "huggingface" | "local";
 export type GemmaVramMode = "full" | "economy";
 export type CodexReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 export type OcrDevice = "cpu" | "gpu";
+export type TranslationMode = "image" | "ocr-text" | "ocr-text-with-image-retry";
 
 export type GemmaSettings = {
   modelSource: ModelSource;
@@ -31,11 +32,20 @@ export type OcrSettings = {
   device: OcrDevice;
 };
 
+export type TranslationSettings = {
+  mode: TranslationMode;
+  includeSoundEffects: boolean;
+  ocrBboxExpandXRatio: number;
+  ocrBboxExpandYRatio: number;
+  textOutlineWidthPx: number;
+};
+
 export type AppSettings = {
   modelProvider: ModelProvider;
   gemma: GemmaSettings;
   codex: CodexSettings;
   ocr: OcrSettings;
+  translation: TranslationSettings;
   maxTokens: number;
 };
 
@@ -102,6 +112,7 @@ export type TranslationBlock = {
   textAlign: "left" | "center" | "right";
   textColor: string;
   outlineColor?: string;
+  outlineWidthPx?: number;
   backgroundColor: string;
   opacity: number;
   autoFitText?: boolean;

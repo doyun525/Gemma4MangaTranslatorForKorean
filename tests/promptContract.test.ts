@@ -3,20 +3,22 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("prompt contracts", () => {
-  it("keeps one canonical overlay prompt with tight Japanese glyph bbox rules", () => {
+  it("keeps one canonical overlay prompt with tight source glyph bbox rules", () => {
     const runtimeSource = readFileSync(join(process.cwd(), "src/main/runtime/simple-page-translate.cjs"), "utf8");
     const pipelineSource = readFileSync(join(process.cwd(), "src/main/wholePagePipeline.ts"), "utf8");
 
     expect(runtimeSource).toContain("const OVERLAY_PROMPT_SECTIONS");
-    expect(runtimeSource).toContain("x1, y1, x2, y2 describe the tight rectangle corners of the visible Japanese glyph ink and its outline.");
+    expect(runtimeSource).toContain("Detect every visible Japanese or English text group and translate it into concise Korean.");
+    expect(runtimeSource).toContain("Translate all Japanese and English source text into natural Korean.");
+    expect(runtimeSource).toContain("x1, y1, x2, y2 describe the tight rectangle corners of the visible source glyph ink and its outline.");
     expect(runtimeSource).toContain("Return x1, y1, x2, y2 as integer pixel coordinates");
-    expect(runtimeSource).toContain("fontSize is the apparent Japanese glyph size in Image 1 pixels.");
+    expect(runtimeSource).toContain("fontSize is the apparent source glyph size in Image 1 pixels.");
     expect(runtimeSource).toContain("Each speech bubble is one dialogue item.");
     expect(runtimeSource).toContain("If two white balloon lobes touch, overlap, stack vertically, or connect through a narrow neck");
     expect(runtimeSource).toContain("For SFX, box only the sound-effect glyph strokes");
     expect(runtimeSource).toContain("type is one of solid or nonsolid.");
-    expect(runtimeSource).toContain("Use type solid only when the Japanese glyphs sit on a plain, flat, single-color speech-bubble or caption background");
-    expect(runtimeSource).toContain("Use type nonsolid when the Japanese glyphs sit on artwork, screentone, gradient, texture");
+    expect(runtimeSource).toContain("Use type solid only when the source glyphs sit on a plain, flat, single-color speech-bubble or caption background");
+    expect(runtimeSource).toContain("Use type nonsolid when the source glyphs sit on artwork, screentone, gradient, texture");
     expect(runtimeSource).toContain("For sound-effect or reaction lettering, ko must be bare Korean effect lettering only");
     expect(runtimeSource).toContain("do not wrap it in parentheses/brackets/quotes");
     expect(runtimeSource).toContain("Coordinate calibration");
@@ -25,6 +27,7 @@ describe("prompt contracts", () => {
     expect(runtimeSource).toContain("bboxCoordinateSpace");
     expect(runtimeSource).toContain("Use exactly these keys, one per line: id, type, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.");
     expect(runtimeSource).toContain("confidence is your confidence from 0.00 to 1.00");
+    expect(runtimeSource).toContain("insert natural Korean line breaks inside ko");
     expect(runtimeSource).toContain("You are directly OCR-reading and translating only the low-confidence manga crop images listed below.");
     expect(runtimeSource).toContain("The crop image itself is the authority.");
     expect(runtimeSource).toContain("OCR bbox candidates");

@@ -33,7 +33,11 @@ export function OverlayBlock({
 
   const displayText = block.translatedText || block.sourceText || "...";
   const layout = resolveBlockTextLayout(block, displayText, pageSize, stageSize);
-  const textOutlineShadow = resolveTextOutlineShadow(layout.fontSizePx, resolveCssColor(block.outlineColor, "#ffffff"));
+  const textOutlineShadow = resolveTextOutlineShadow(
+    layout.fontSizePx,
+    resolveCssColor(block.outlineColor, "#ffffff"),
+    block.outlineWidthPx
+  );
   const visualStyle = resolveBlockVisualStyle(block.type);
   const pendingPattern = showChrome && highlightType === "solid" && block.type === "nonsolid";
   const style: React.CSSProperties = {
@@ -73,8 +77,16 @@ export function OverlayBlock({
     height: block.renderDirection === "vertical" ? `${layout.fitInnerHeight}px` : undefined,
     maxWidth: "100%",
     maxHeight: "100%",
-    overflow: "visible",
+    overflow: "visible"
+  };
+  const outlineStyle: React.CSSProperties = {
+    ...contentStyle,
+    color: resolveCssColor(block.outlineColor, "#ffffff"),
     textShadow: textOutlineShadow
+  };
+  const fillStyle: React.CSSProperties = {
+    ...contentStyle,
+    color: block.textColor
   };
 
   return (
@@ -94,7 +106,10 @@ export function OverlayBlock({
       onPointerDown={pointerDisabled ? undefined : onPointerDown}
     >
       <div className="overlay-text" style={textWrapStyle}>
-        <span className="overlay-text-content" style={contentStyle}>
+        <span className="overlay-text-content overlay-text-outline" style={outlineStyle} aria-hidden="true">
+          {displayText}
+        </span>
+        <span className="overlay-text-content overlay-text-fill" style={fillStyle}>
           {displayText}
         </span>
       </div>
@@ -108,8 +123,8 @@ export function OverlayBlock({
   );
 }
 
-function resolveTextOutlineShadow(fontSizePx: number, color: string): string {
-  const radius = resolveTextOutlinePx(fontSizePx);
+function resolveTextOutlineShadow(fontSizePx: number, color: string, outlineWidthPx?: number): string {
+  const radius = resolveTextOutlinePx(fontSizePx, outlineWidthPx);
   const halfRadius = Math.round(radius * 0.55 * 10) / 10;
   const offsets = [
     [0, -radius],
@@ -128,7 +143,11 @@ function resolveTextOutlineShadow(fontSizePx: number, color: string): string {
   return offsets.map(([x, y]) => `${x}px ${y}px 0 ${color}`).join(", ");
 }
 
-function resolveTextOutlinePx(fontSizePx: number): number {
+function resolveTextOutlinePx(fontSizePx: number, outlineWidthPx?: number): number {
+  const configured = Number(outlineWidthPx);
+  if (Number.isFinite(configured)) {
+    return Math.round(Math.min(8, Math.max(0, configured)) * 10) / 10;
+  }
   return Math.round(Math.min(4, Math.max(0.35, fontSizePx * 0.055)) * 10) / 10;
 }
 

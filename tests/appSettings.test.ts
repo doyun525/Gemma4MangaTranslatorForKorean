@@ -8,8 +8,13 @@ import {
   DEFAULT_GEMMA_MMPROJ_REPO,
   DEFAULT_GEMMA_MODEL_FILE,
   DEFAULT_GEMMA_MODEL_REPO,
+  DEFAULT_INCLUDE_SOUND_EFFECTS,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_OCR_BBOX_EXPAND_X_RATIO,
+  DEFAULT_OCR_BBOX_EXPAND_Y_RATIO,
   DEFAULT_OCR_DEVICE,
+  DEFAULT_TEXT_OUTLINE_WIDTH_PX,
+  DEFAULT_TRANSLATION_MODE,
   parseStoredAppSettings,
   resolveHardwareDefaults,
   resolveDefaultAppSettings
@@ -30,6 +35,11 @@ describe("app settings helpers", () => {
     expect(defaults.codex.reasoningEffort).toBe(DEFAULT_CODEX_REASONING_EFFORT);
     expect(defaults.codex.oauthPort).toBe(DEFAULT_CODEX_OAUTH_PORT);
     expect(defaults.ocr.device).toBe(DEFAULT_OCR_DEVICE);
+    expect(defaults.translation.mode).toBe(DEFAULT_TRANSLATION_MODE);
+    expect(defaults.translation.includeSoundEffects).toBe(DEFAULT_INCLUDE_SOUND_EFFECTS);
+    expect(defaults.translation.ocrBboxExpandXRatio).toBe(DEFAULT_OCR_BBOX_EXPAND_X_RATIO);
+    expect(defaults.translation.ocrBboxExpandYRatio).toBe(DEFAULT_OCR_BBOX_EXPAND_Y_RATIO);
+    expect(defaults.translation.textOutlineWidthPx).toBe(DEFAULT_TEXT_OUTLINE_WIDTH_PX);
     expect(defaults.maxTokens).toBe(DEFAULT_MAX_TOKENS);
   });
 
@@ -61,6 +71,7 @@ describe("app settings helpers", () => {
       },
       codex: defaults.codex,
       ocr: defaults.ocr,
+      translation: defaults.translation,
       maxTokens: defaults.maxTokens
     });
   });
@@ -73,6 +84,7 @@ describe("app settings helpers", () => {
       gemma: defaults.gemma,
       codex: defaults.codex,
       ocr: defaults.ocr,
+      translation: defaults.translation,
       maxTokens: defaults.maxTokens
     });
 
@@ -81,6 +93,7 @@ describe("app settings helpers", () => {
       gemma: defaults.gemma,
       codex: defaults.codex,
       ocr: defaults.ocr,
+      translation: defaults.translation,
       maxTokens: defaults.maxTokens
     });
   });
@@ -101,6 +114,13 @@ describe("app settings helpers", () => {
       },
       ocr: {
         device: "gpu"
+      },
+      translation: {
+        mode: "ocr-text-with-image-retry",
+        includeSoundEffects: false,
+        ocrBboxExpandXRatio: 0.25,
+        ocrBboxExpandYRatio: 0.15,
+        textOutlineWidthPx: 2.5
       },
       maxTokens: DEFAULT_MAX_TOKENS
     };
@@ -129,6 +149,11 @@ describe("app settings helpers", () => {
     expect(options.codexReasoningEffort).toBe(DEFAULT_CODEX_REASONING_EFFORT);
     expect(options.codexOauthPort).toBe(DEFAULT_CODEX_OAUTH_PORT);
     expect(options.ocrDevice).toBe("gpu");
+    expect(options.translationMode).toBe("ocr-text-with-image-retry");
+    expect(options.includeSoundEffects).toBe(false);
+    expect(options.ocrBboxExpandXRatio).toBe(0.25);
+    expect(options.ocrBboxExpandYRatio).toBe(0.15);
+    expect(options.textOutlineWidthPx).toBe(2.5);
     expect(options.gemmaVramMode).toBe("economy");
     expect(options.cacheTypeK).toBe("q4_0");
     expect(options.cacheTypeV).toBe("q4_0");
@@ -252,6 +277,7 @@ describe("app settings helpers", () => {
       },
       codex: defaults.codex,
       ocr: defaults.ocr,
+      translation: defaults.translation,
       maxTokens: defaults.maxTokens
     });
   });
@@ -280,6 +306,7 @@ describe("app settings helpers", () => {
         oauthPort: 10532
       },
       ocr: defaults.ocr,
+      translation: defaults.translation,
       maxTokens: defaults.maxTokens
     });
   });
@@ -290,6 +317,59 @@ describe("app settings helpers", () => {
     expect(parseStoredAppSettings("{\"ocr\":{\"device\":\"gpu\"}}", defaults).ocr.device).toBe("gpu");
     expect(parseStoredAppSettings("{\"ocr\":{\"device\":\"tpu\"}}", defaults).ocr.device).toBe(defaults.ocr.device);
     expect(resolveDefaultAppSettings({ MANGA_TRANSLATOR_OCR_DEVICE: "gpu" }).ocr.device).toBe("gpu");
+  });
+
+  it("normalizes sound-effect translation settings", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(parseStoredAppSettings("{\"translation\":{\"includeSoundEffects\":false}}", defaults).translation.includeSoundEffects).toBe(false);
+    expect(parseStoredAppSettings("{\"translation\":{\"includeSoundEffects\":true}}", defaults).translation.includeSoundEffects).toBe(true);
+    expect(parseStoredAppSettings("{\"includeSoundEffects\":false}", defaults).translation.includeSoundEffects).toBe(false);
+    expect(resolveDefaultAppSettings({ MANGA_TRANSLATOR_INCLUDE_SOUND_EFFECTS: "0" }).translation.includeSoundEffects).toBe(false);
+  });
+
+  it("normalizes OCR bbox expansion settings", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(
+      parseStoredAppSettings("{\"translation\":{\"ocrBboxExpandXRatio\":0.3,\"ocrBboxExpandYRatio\":0.2}}", defaults).translation
+    ).toMatchObject({
+      ocrBboxExpandXRatio: 0.3,
+      ocrBboxExpandYRatio: 0.2
+    });
+    expect(parseStoredAppSettings("{\"translation\":{\"ocrBboxExpandXRatio\":-1}}", defaults).translation.ocrBboxExpandXRatio).toBe(0);
+    expect(parseStoredAppSettings("{\"translation\":{\"ocrBboxExpandYRatio\":2}}", defaults).translation.ocrBboxExpandYRatio).toBe(1);
+    expect(
+      resolveDefaultAppSettings({
+        MANGA_TRANSLATOR_OCR_BBOX_EXPAND_X_RATIO: "0.4",
+        MANGA_TRANSLATOR_OCR_BBOX_EXPAND_Y_RATIO: "0.3"
+      }).translation
+    ).toMatchObject({
+      ocrBboxExpandXRatio: 0.4,
+      ocrBboxExpandYRatio: 0.3
+    });
+  });
+
+  it("normalizes translation mode and outline width settings", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(parseStoredAppSettings("{\"translation\":{\"mode\":\"ocr-text\"}}", defaults).translation.mode).toBe("ocr-text");
+    expect(parseStoredAppSettings("{\"translation\":{\"mode\":\"ocr-text-with-image-retry\"}}", defaults).translation.mode).toBe(
+      "ocr-text-with-image-retry"
+    );
+    expect(parseStoredAppSettings("{\"translation\":{\"mode\":\"bad\"}}", defaults).translation.mode).toBe(defaults.translation.mode);
+    expect(parseStoredAppSettings("{\"translation\":{\"textOutlineWidthPx\":2.2}}", defaults).translation.textOutlineWidthPx).toBe(2.2);
+    expect(parseStoredAppSettings("{\"translation\":{\"textOutlineWidthPx\":-1}}", defaults).translation.textOutlineWidthPx).toBe(0);
+    expect(parseStoredAppSettings("{\"translation\":{\"textOutlineWidthPx\":20}}", defaults).translation.textOutlineWidthPx).toBe(8);
+    expect(
+      resolveDefaultAppSettings({
+        MANGA_TRANSLATOR_TRANSLATION_MODE: "ocr-text",
+        MANGA_TRANSLATOR_TEXT_OUTLINE_WIDTH_PX: "3"
+      }).translation
+    ).toMatchObject({
+      mode: "ocr-text",
+      textOutlineWidthPx: 3
+    });
   });
 
   it("chooses first-run defaults from detected GPU generation and VRAM", () => {
