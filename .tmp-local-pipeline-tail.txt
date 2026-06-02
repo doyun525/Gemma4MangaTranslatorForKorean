@@ -1,0 +1,400 @@
+﻿}
+
+function formatOcrHintDetail(result: OcrBboxResult): string {
+  if (isOcrResultNoTextDetected(result)) {
+    return `${result.hints.length}媛??꾨낫, ?띿뒪??洹쇨굅 ?놁쓬`;
+  }
+  if (Number.isFinite(result.textEvidenceCount)) {
+    return `${result.hints.length}媛??꾨낫, ?띿뒪??洹쇨굅 ${result.textEvidenceCount}媛?;
+  }
+  return `${result.hints.length}媛??꾨낫`;
+}
+
+function startOcrHintsForPage(options: OcrPageTaskOptions): Promise<OcrBboxResult> {
+  const task = collectOcrHintsForPage(options);
+  task.catch(() => {
+    // The caller awaits the same promise later; this prevents early unhandled-rejection noise while LLM translation is running.
+  });
+  return task;
+}
+
+async function collectOcrHintsForPage({
+  runtime,
+  baseOptions,
+  page,
+  index,
+  total,
+  runPaths,
+  emit,
+  jobId,
+  signal
+}: OcrPageTaskOptions): Promise<OcrBboxResult> {
+  throwIfAborted(signal);
+  const cachePath = getOcrHintsCachePath(runPaths, page);
+  const cached = await readCachedOcrHints(cachePath, page);
+  if (cached) {
+    emit({
+      id: jobId,
+      kind: "gemma-analysis",
+      status: "running",
+      progressText: `${page.name} OCR ?ъ궗??,
+      phase: "ocr_running",
+      progressCurrent: index + 1,
+      progressTotal: total,
+      pageIndex: index + 1,
+      pageTotal: total,
+      detail: formatOcrHintDetail(cached)
+    });
+    return cached;
+  }
+
+  const ocrOptions = buildOcrPageOptions(baseOptions, page, runPaths, index, total);
+  ocrOptions.abortSignal = signal;
+  ocrOptions.onProgress = (progress) => {
+    const hasExplicitPageProgress = Number.isFinite(progress.pageIndex) && Number.isFinite(progress.pageTotal);
+    const suppressDefaultPageProgress = progress.pageIndex === null || progress.pageTotal === null;
+    const shouldDefaultToPage = Boolean(ocrOptions.ocrProgressDefaultToPage) && !suppressDefaultPageProgress;
+    emit({
+      id: jobId,
+      kind: "gemma-analysis",
+      status: "running",
+      progressText: progress.progressText,
+      phase: progress.phase,
+      progressCurrent: progress.progressCurrent ?? (shouldDefaultToPage ? index + 1 : undefined),
+      progressTotal: progress.progressTotal ?? total,
+      pageIndex: hasExplicitPageProgress ? Number(progress.pageIndex) : shouldDefaultToPage ? index + 1 : undefined,
+      pageTotal: hasExplicitPageProgress ? Number(progress.pageTotal) : shouldDefaultToPage ? total : undefined,
+      detail: progress.detail,
+      progressMode: progress.progressMode,
+      progressPercent: progress.progressPercent,
+      progressBytes: progress.progressBytes,
+      progressTotalBytes: progress.progressTotalBytes,
+      progressBytesPerSecond: progress.progressBytesPerSecond,
+      installLogLine: progress.installLogLine
+    });
+  };
+
+  emit({
+    id: jobId,
+    kind: "gemma-analysis",
+    status: "running",
+    progressText: `${page.name} OCR 遺꾩꽍 以?,
+    phase: "ocr_running",
+    progressCurrent: index + 1,
+    progressTotal: total,
+    pageIndex: index + 1,
+    pageTotal: total,
+    detail: "?섏씠吏 OCR???앸굹硫??대떦 ?섏씠吏 踰덉뿭怨??ㅼ쓬 ?섏씠吏 OCR??寃뱀퀜 吏꾪뻾?⑸땲??"
+  });
+
+  const result = await runtime.simplePage.collectOcrBboxHints(ocrOptions);
+  throwIfAborted(signal);
+  await writeCachedOcrHints(cachePath, page, result);
+  emit({
+    id: jobId,
+    kind: "gemma-analysis",
+    status: "running",
+    progressText: `${page.name} OCR ?꾨즺`,
+    phase: "ocr_running",
+    progressCurrent: index + 1,
+    progressTotal: total,
+    pageIndex: index + 1,
+    pageTotal: total,
+    detail: formatOcrHintDetail(result)
+  });
+  return result;
+}
+
+function shouldSerializeGpuOcrWithModel(options: TranslationOptions): boolean {
+  if (options.modelProvider !== "gemma") {
+    return false;
+  }
+  if (process.env.MANGA_TRANSLATOR_ALLOW_GPU_OCR_MODEL_OVERLAP === "1") {
+    return false;
+  }
+  const device = String(process.env.MANGA_TRANSLATOR_OCR_DEVICE ?? options.ocrDevice ?? "").trim().toLowerCase();
+  return device === "gpu" || device.startsWith("gpu:") || device === "cuda" || device.startsWith("cuda:");
+}
+
+async function prepareOcrHintsForPages({
+  runtime,
+  baseOptions,
+  pages,
+  runPaths,
+  emit,
+  jobId,
+  signal
+}: {
+  runtime: RuntimeModules;
+  baseOptions: TranslationOptions;
+  pages: MangaPage[];
+  runPaths: ChapterRunPaths;
+  emit: (event: JobEvent) => void;
+  jobId: string;
+  signal: AbortSignal;
+}): Promise<Map<string, OcrBboxResult>> {
+  const results = new Map<string, OcrBboxResult>();
+  const total = pages.length;
+  const pendingPages: Array<{ page: MangaPage; index: number; options: TranslationOptions; cachePath: string }> = [];
+
+  for (const [index, page] of pages.entries()) {
+    throwIfAborted(signal);
+    const cachePath = getOcrHintsCachePath(runPaths, page);
+    const cached = await readCachedOcrHints(cachePath, page);
+    if (cached) {
+      results.set(page.id, cached);
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "running",
+        progressText: `${page.name} OCR ?ъ궗??,
+        phase: "ocr_running",
+        progressCurrent: index + 1,
+        progressTotal: total,
+        pageIndex: index + 1,
+        pageTotal: total,
+        detail: formatOcrHintDetail(cached)
+      });
+      continue;
+    }
+
+    const ocrOptions = buildOcrPageOptions(baseOptions, page, runPaths, index, total);
+    ocrOptions.abortSignal = signal;
+    ocrOptions.onProgress = (progress) => {
+      const hasExplicitPageProgress = Number.isFinite(progress.pageIndex) && Number.isFinite(progress.pageTotal);
+      const suppressDefaultPageProgress = progress.pageIndex === null || progress.pageTotal === null;
+      const shouldDefaultToPage = Boolean(ocrOptions.ocrProgressDefaultToPage) && !suppressDefaultPageProgress;
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "running",
+        progressText: progress.progressText,
+        phase: progress.phase,
+        progressCurrent: progress.progressCurrent ?? (shouldDefaultToPage ? index + 1 : results.size),
+        progressTotal: progress.progressTotal ?? total,
+        pageIndex: hasExplicitPageProgress ? Number(progress.pageIndex) : shouldDefaultToPage ? index + 1 : undefined,
+        pageTotal: hasExplicitPageProgress ? Number(progress.pageTotal) : shouldDefaultToPage ? total : undefined,
+        detail: progress.detail,
+        progressMode: progress.progressMode,
+        progressPercent: progress.progressPercent,
+        progressBytes: progress.progressBytes,
+        progressTotalBytes: progress.progressTotalBytes,
+        progressBytesPerSecond: progress.progressBytesPerSecond,
+        installLogLine: progress.installLogLine
+      });
+    };
+    pendingPages.push({ page, index, options: ocrOptions, cachePath });
+  }
+
+  if (pendingPages.length > 0) {
+    pendingPages.forEach((entry) => {
+      entry.options.ocrBatchCompletedBefore = results.size;
+      entry.options.ocrBatchTotal = total;
+    });
+    emit({
+      id: jobId,
+      kind: "gemma-analysis",
+      status: "running",
+      progressText: "Paddle OCR 諛곗튂 ?좊텇??以?,
+      phase: "ocr_running",
+      progressCurrent: 0,
+      progressTotal: pendingPages.length,
+      pageTotal: total,
+      detail: `${pendingPages.length}?섏씠吏瑜???踰덉뿉 泥섎━?⑸땲?? OCR ?꾨줈?몄뒪????援ш컙 ?앹뿉??醫낅즺?⑸땲??`
+    });
+
+    const batchResults = runtime.simplePage.collectOcrBboxHintsBatch
+      ? await runtime.simplePage.collectOcrBboxHintsBatch(pendingPages.map((entry) => entry.options))
+      : await collectOcrHintsSequentially(runtime, pendingPages);
+
+    for (const [batchIndex, result] of batchResults.entries()) {
+      throwIfAborted(signal);
+      const entry = pendingPages[batchIndex];
+      if (!entry) {
+        continue;
+      }
+      await writeCachedOcrHints(entry.cachePath, entry.page, result);
+      results.set(entry.page.id, result);
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "running",
+        progressText: `${entry.page.name} OCR ?꾨즺`,
+        phase: "ocr_running",
+        progressCurrent: batchIndex + 1,
+        progressTotal: pendingPages.length,
+        pageIndex: entry.index + 1,
+        pageTotal: total,
+        detail: formatOcrHintDetail(result)
+      });
+    }
+  }
+
+  emit({
+    id: jobId,
+    kind: "gemma-analysis",
+    status: "running",
+    progressText: "Paddle OCR ?좊텇???꾨즺",
+    phase: "ocr_running",
+    progressCurrent: total,
+    progressTotal: total,
+    pageTotal: total,
+    detail: "OCR ?꾨줈?몄뒪瑜?醫낅즺?섍퀬 AI 踰덉뿭 ?④퀎濡??섏뼱媛묐땲??"
+  });
+
+  return results;
+}
+
+async function collectOcrHintsSequentially(
+  runtime: RuntimeModules,
+  entries: Array<{ options: TranslationOptions }>
+): Promise<OcrBboxResult[]> {
+  const results: OcrBboxResult[] = [];
+  for (const entry of entries) {
+    results.push(await runtime.simplePage.collectOcrBboxHints(entry.options));
+  }
+  return results;
+}
+
+function buildOcrPageOptions(baseOptions: TranslationOptions, page: MangaPage, runPaths: ChapterRunPaths, index: number, total: number): TranslationOptions {
+  const outputDir = getOcrHintsOutputDir(runPaths, page);
+  return {
+    ...baseOptions,
+    imagePath: page.imagePath,
+    imageWidth: page.width,
+    imageHeight: page.height,
+    outputDir,
+    label: `ocr-page-${index + 1}`,
+    ocrPageIndex: index + 1,
+    ocrPageTotal: total,
+    ocrProgressDefaultToPage: true
+  };
+}
+
+function getOcrHintsOutputDir(runPaths: ChapterRunPaths, page: MangaPage): string {
+  return join(runPaths.chapterDir, "ocr-hints", page.id);
+}
+
+function getOcrHintsCachePath(runPaths: ChapterRunPaths, page: MangaPage): string {
+  return join(getOcrHintsOutputDir(runPaths, page), "result.json");
+}
+
+async function readCachedOcrHints(cachePath: string, page: MangaPage): Promise<OcrBboxResult | null> {
+  try {
+    const raw = JSON.parse(await readFile(cachePath, "utf8")) as {
+      schemaVersion?: number;
+      imagePath?: string;
+      width?: number;
+      height?: number;
+      hints?: unknown[];
+      diagnostics?: unknown[];
+      noTextDetected?: boolean;
+      textEvidenceCount?: number;
+    };
+    if (
+      raw.schemaVersion !== OCR_HINT_CACHE_SCHEMA_VERSION ||
+      raw.imagePath !== page.imagePath ||
+      raw.width !== page.width ||
+      raw.height !== page.height ||
+      !Array.isArray(raw.hints)
+    ) {
+      return null;
+    }
+    return {
+      hints: raw.hints,
+      diagnostics: Array.isArray(raw.diagnostics) ? raw.diagnostics : [],
+      noTextDetected: Boolean(raw.noTextDetected),
+      textEvidenceCount: Number.isFinite(raw.textEvidenceCount) ? Number(raw.textEvidenceCount) : undefined
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedOcrHints(cachePath: string, page: MangaPage, result: OcrBboxResult): Promise<void> {
+  await mkdir(dirname(cachePath), { recursive: true });
+  await writeFile(
+    cachePath,
+    `${JSON.stringify({
+      imagePath: page.imagePath,
+      width: page.width,
+      height: page.height,
+      schemaVersion: OCR_HINT_CACHE_SCHEMA_VERSION,
+      hints: result.hints,
+      diagnostics: result.diagnostics,
+      noTextDetected: Boolean(result.noTextDetected),
+      textEvidenceCount: Number.isFinite(result.textEvidenceCount) ? result.textEvidenceCount : undefined,
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`,
+    "utf8"
+  );
+}
+
+export function buildBaseOptions(
+  jobId: string,
+  runDir: string,
+  settings: AppSettings,
+  paths = getAppPaths(),
+  env: NodeJS.ProcessEnv = process.env
+): TranslationOptions {
+  return buildBaseTranslationOptions({
+    jobId,
+    runDir,
+    paths,
+    settings,
+    env
+  });
+}
+
+function buildPageOptions(baseOptions: TranslationOptions, page: MangaPage, index: number, attempt: number): TranslationOptions {
+  return {
+    ...baseOptions,
+    imagePath: page.imagePath,
+    imageWidth: page.width,
+    imageHeight: page.height,
+    outputDir: join(baseOptions.outputDir, "pages", page.id, `attempt-${attempt}`),
+    label: `page-${index + 1}-attempt-${attempt}`
+  };
+}
+
+type CropRetryContext = {
+  runtime: RuntimeModules;
+  server: ModelEndpointHandle;
+  pageOptions: TranslationOptions;
+  page: MangaPage;
+  items: OverlayItem[];
+  emit: PipelineOptions["emit"];
+  jobId: string;
+  pageIndex: number;
+  pageTotal: number;
+  progressTotal: number;
+};
+
+async function maybeRetryLowConfidenceItems({
+  runtime,
+  server,
+  pageOptions,
+  page,
+  items,
+  emit,
+  jobId,
+  pageIndex,
+  pageTotal,
+  progressTotal
+}: CropRetryContext): Promise<OverlayItem[]> {
+  if (!runtime.simplePage.requestCropRetryTranslation || !runtime.overlayTools.parseRetryItems) {
+    return items;
+  }
+
+  const targets = selectCropRetryTargets(items, page);
+  if (targets.length === 0 || pageOptions.translationMode === "ocr-text") {
+    return items;
+  }
+
+  const retryOptions = {
+    ...pageOptions,
+    label: `${pageOptions.label}-crop-retry`,
+    outputDir: join(pageOptions.outputDir, "crop-retry")
+  };
+
+  emit({

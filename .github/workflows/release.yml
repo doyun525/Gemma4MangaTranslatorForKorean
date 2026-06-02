@@ -52,6 +52,19 @@ jobs:
       - name: Prepare bundled Python runtime
         run: node scripts/prepare-ocr-python.cjs
 
+      - name: Verify bundled Flux Klein runtime
+        shell: pwsh
+        run: |
+          $runner = Join-Path $PWD "tools/mgt-flux-klein/mgt-flux-klein.exe"
+          if (-not (Test-Path $runner)) {
+            throw "Missing bundled Flux Klein runner: $runner"
+          }
+          $size = (Get-Item $runner).Length
+          if ($size -lt 1048576) {
+            throw "Bundled Flux Klein runner is too small: $size bytes"
+          }
+          Write-Host "Bundled Flux Klein runner: $runner ($size bytes)"
+
       - name: Build Windows release
         run: npm run build && npx electron-builder --config electron-builder.config.cjs --win nsis --x64 --publish never
 

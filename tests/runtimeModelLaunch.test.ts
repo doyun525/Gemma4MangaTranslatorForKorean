@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+﻿import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,9 +14,7 @@ const runtimeHelpers = require("../src/main/runtime/simple-page-translate.cjs") 
   }>;
   buildResponsesRequestBody: (
     options: { [key: string]: unknown },
-    imageVariants: Array<{ role: string; dataUrl: string; width?: number; height?: number; originalWidth?: number; originalHeight?: number }>,
-    promptText?: string,
-    systemPrompt?: string
+    imageVariants: Array<{ role: string; dataUrl: string; width?: number; height?: number; originalWidth?: number; originalHeight?: number }>
   ) => {
     model: string;
     instructions: string;
@@ -25,6 +23,10 @@ const runtimeHelpers = require("../src/main/runtime/simple-page-translate.cjs") 
     stream: boolean;
     store: boolean;
   };
+  buildOcrRuntimeEnv: (
+    options: { [key: string]: unknown },
+    runtime?: { runtimeDir?: string; packageDir?: string; includePackageDir?: boolean }
+  ) => Record<string, string>;
   getOverlayPrompt: (
     options: { [key: string]: unknown },
     imageVariants: Array<{ role: string; dataUrl?: string; width?: number; height?: number; originalWidth?: number; originalHeight?: number }>
@@ -36,36 +38,50 @@ const runtimeHelpers = require("../src/main/runtime/simple-page-translate.cjs") 
     textEvidenceCount: number;
   }>;
   collectRequiredHfDownloads: (options: { [key: string]: unknown }) => Array<{ kind: string; file: string; destination: string }>;
+  collectRequiredPaddleOcrModelDownloads: (
+    options: { [key: string]: unknown },
+    runtime?: { runtimeDir?: string }
+  ) => Array<{ kind: string; repo: string; file: string; destination: string; url: string }>;
   extractModelOutputText: (parsed: unknown) => string;
   inspectModelLaunch: (options: { [key: string]: unknown }) => { launchMode: string; model?: string; reasoningEffort?: string };
   isModelCached: (options: { [key: string]: unknown }) => boolean;
   parseOcrBatchProgressLine: (line: string) => { index: number; total: number; count: number } | null;
+  parsePaddleModelFetchProgress: (line: string) => { totalFiles: number; currentFiles: number | null; percent: number | null } | null;
   parsePipRawProgress: (line: string) => { current: number; total: number } | null;
   parseResponsesSseText: (rawText: string) => { outputText: string; eventCount: number; rawResponse: unknown };
   requestTranslation: (server: { baseUrl: string }, options: { [key: string]: unknown }) => Promise<{ outputText: string; rawResponse: unknown; requestBody: Record<string, unknown> }>;
-  resolveTranslationMode: (options: { [key: string]: unknown }) => string;
+  resolveOcrGpuCudaTag: (options?: { [key: string]: unknown }) => string;
+  resolveOcrGpuPackageIndexUrl: (options?: { [key: string]: unknown }) => string;
+  resolveTranslationMode: (options?: { [key: string]: unknown }) => string;
   resolveFfmpegPath: (options: { [key: string]: unknown }) => string;
+  resolveOcrBboxTimeoutMs: (pageCount?: number) => number;
   resolveOcrInstallBatchProgressRanges: (batches: string[][], start: number, end: number) => Array<{ start: number; end: number }>;
   resolveManagedHfFilePath: (options: { [key: string]: unknown }, repo: string, file: string) => string | null;
 };
 const {
   buildLaunchArgs,
   buildMessages,
+  buildOcrRuntimeEnv,
   buildResponsesRequestBody,
   collectOcrBboxHints,
   collectRequiredHfDownloads,
+  collectRequiredPaddleOcrModelDownloads,
   getOverlayPrompt,
   extractModelOutputText,
   inspectModelLaunch,
   isModelCached,
   parseOcrBatchProgressLine,
+  parsePaddleModelFetchProgress,
   parsePipRawProgress,
   resolveOcrInstallBatchProgressRanges,
   resolveManagedHfFilePath,
+  resolveOcrBboxTimeoutMs,
   resolveFfmpegPath,
   parseResponsesSseText,
-  resolveTranslationMode,
-  requestTranslation
+  requestTranslation,
+  resolveOcrGpuCudaTag,
+  resolveOcrGpuPackageIndexUrl,
+  resolveTranslationMode
 } = runtimeHelpers;
 
 const tempDirs: string[] = [];
@@ -86,6 +102,14 @@ function createTempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
 }
 
 function writeCachedAssets({
@@ -136,6 +160,110 @@ describe("runtime model launch helpers", () => {
     expect(parseOcrBatchProgressLine("[paddleocr] warmup")).toBeNull();
   });
 
+  it("parses Paddle model fetch progress lines", () => {
+    expect(parsePaddleModelFetchProgress("Fetching 19 files: 11%|█ | 2/19 [00:00<00:07, 2.14it/s]")).toEqual({
+      totalFiles: 19,
+      currentFiles: 2,
+      percent: 11
+    });
+    expect(parsePaddleModelFetchProgress("Creating model: ('PaddleOCR-VL-1.5-0.9B', None, None)")).toBeNull();
+  });
+
+  it("allows slow first-run Paddle model downloads before timing out OCR bbox analysis", () => {
+    const previous = process.env.MANGA_TRANSLATOR_OCR_BBOX_TIMEOUT_MS;
+    delete process.env.MANGA_TRANSLATOR_OCR_BBOX_TIMEOUT_MS;
+    try {
+      expect(resolveOcrBboxTimeoutMs(1)).toBeGreaterThanOrEqual(60 * 60 * 1000);
+      expect(resolveOcrBboxTimeoutMs(20)).toBeGreaterThanOrEqual(60 * 60 * 1000);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MANGA_TRANSLATOR_OCR_BBOX_TIMEOUT_MS;
+      } else {
+        process.env.MANGA_TRANSLATOR_OCR_BBOX_TIMEOUT_MS = previous;
+      }
+    }
+  });
+
+  it("prepares Paddle OCR model downloads in the PaddleX official cache", () => {
+    const runtimeDir = createTempDir("ocr-runtime-");
+    const tasks = collectRequiredPaddleOcrModelDownloads({}, { runtimeDir });
+
+    expect(tasks).toHaveLength(36);
+    expect(tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        repo: "PaddlePaddle/PP-DocLayoutV3",
+        file: "inference.pdiparams",
+        destination: join(runtimeDir, "paddlex-cache", "official_models", "PP-DocLayoutV3", "inference.pdiparams")
+      }),
+      expect.objectContaining({
+        repo: "PaddlePaddle/PaddleOCR-VL-1.5",
+        file: "model.safetensors",
+        destination: join(runtimeDir, "paddlex-cache", "official_models", "PaddleOCR-VL-1.5", "model.safetensors")
+      }),
+      expect.objectContaining({
+        repo: "PaddlePaddle/PP-OCRv5_server_det",
+        file: "inference.pdiparams",
+        destination: join(runtimeDir, "paddlex-cache", "official_models", "PP-OCRv5_server_det", "inference.pdiparams")
+      }),
+      expect.objectContaining({
+        repo: "PaddlePaddle/PP-OCRv5_server_rec",
+        file: "inference.pdiparams",
+        destination: join(runtimeDir, "paddlex-cache", "official_models", "PP-OCRv5_server_rec", "inference.pdiparams")
+      })
+    ]));
+  });
+
+  it("disables hf-xet for Paddle OCR Python downloads by default", () => {
+    const runtimeDir = createTempDir("ocr-runtime-");
+    const previousDisableXet = process.env.HF_HUB_DISABLE_XET;
+    const previousDownloadTimeout = process.env.HF_HUB_DOWNLOAD_TIMEOUT;
+    delete process.env.HF_HUB_DISABLE_XET;
+    delete process.env.HF_HUB_DOWNLOAD_TIMEOUT;
+    try {
+      const env = buildOcrRuntimeEnv({}, { runtimeDir, includePackageDir: false });
+      expect(env.HF_HUB_DISABLE_XET).toBe("1");
+      expect(env.HF_HUB_DOWNLOAD_TIMEOUT).toBe("300");
+    } finally {
+      if (previousDisableXet === undefined) {
+        delete process.env.HF_HUB_DISABLE_XET;
+      } else {
+        process.env.HF_HUB_DISABLE_XET = previousDisableXet;
+      }
+      if (previousDownloadTimeout === undefined) {
+        delete process.env.HF_HUB_DOWNLOAD_TIMEOUT;
+      } else {
+        process.env.HF_HUB_DOWNLOAD_TIMEOUT = previousDownloadTimeout;
+      }
+    }
+  });
+
+  it("uses the configured CUDA tag for isolated Paddle OCR GPU runtimes", () => {
+    const runtimeDir = createTempDir("ocr-runtime-");
+    const previousCudaTag = process.env.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG;
+    const previousPaddleCudaTag = process.env.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG;
+    const previousOcrGpuCuda = process.env.MANGA_TRANSLATOR_OCR_GPU_CUDA;
+    const previousIndexUrl = process.env.MANGA_TRANSLATOR_OCR_GPU_PADDLE_INDEX_URL;
+    const previousPaddleIndexUrl = process.env.MANGA_TRANSLATOR_PADDLEOCR_GPU_INDEX_URL;
+    delete process.env.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG;
+    delete process.env.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG;
+    delete process.env.MANGA_TRANSLATOR_OCR_GPU_CUDA;
+    delete process.env.MANGA_TRANSLATOR_OCR_GPU_PADDLE_INDEX_URL;
+    delete process.env.MANGA_TRANSLATOR_PADDLEOCR_GPU_INDEX_URL;
+    try {
+      expect(resolveOcrGpuCudaTag({ ocrGpuCudaTag: "cu129" })).toBe("cu129");
+      expect(resolveOcrGpuPackageIndexUrl({ ocrGpuCudaTag: "cu129" })).toBe("https://www.paddlepaddle.org.cn/packages/stable/cu129/");
+      const env = buildOcrRuntimeEnv({ ocrDevice: "gpu", ocrGpuCudaTag: "cu129" }, { runtimeDir, includePackageDir: false });
+      expect(env.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG).toBe("cu129");
+      expect(env.MANGA_TRANSLATOR_PADDLEOCR_DEVICE).toBe("gpu:0");
+    } finally {
+      restoreEnv("MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG", previousCudaTag);
+      restoreEnv("MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG", previousPaddleCudaTag);
+      restoreEnv("MANGA_TRANSLATOR_OCR_GPU_CUDA", previousOcrGpuCuda);
+      restoreEnv("MANGA_TRANSLATOR_OCR_GPU_PADDLE_INDEX_URL", previousIndexUrl);
+      restoreEnv("MANGA_TRANSLATOR_PADDLEOCR_GPU_INDEX_URL", previousPaddleIndexUrl);
+    }
+  });
+
   it("prefers the bundled ffmpeg from the tools directory", () => {
     const toolsDir = createTempDir("tools-");
     const binaryName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
@@ -163,9 +291,6 @@ describe("runtime model launch helpers", () => {
     expect(runtimeSource).toContain("emitRuntimeProgress(batchOptions, \"ocr_running\"");
     expect(runtimeSource).toContain("createCommandOutputLineEmitter(onOutput)");
     expect(runtimeSource).toContain("stdoutLines.write(chunk)");
-    expect(runtimeSource).toContain("--provider ${quoteCommandArg(provider)}");
-    expect(runtimeSource).toContain("provider === \"paddleocr-vl\" || provider === \"paddleocr-v5\"");
-    expect(paddleSource).toContain("choices=[\"paddleocr-vl\", \"paddleocr-v5\"]");
     expect(paddleSource).toContain("flush=True");
   });
 
@@ -268,7 +393,7 @@ describe("runtime model launch helpers", () => {
     expect(requestBody).not.toHaveProperty("max_tokens");
   });
 
-  it("uses tight source glyph bbox instructions for Codex Responses requests", () => {
+  it("uses tight Japanese glyph bbox instructions for Codex Responses requests", () => {
     const requestBody = buildResponsesRequestBody(
       {
         modelProvider: "openai-codex",
@@ -283,12 +408,11 @@ describe("runtime model launch helpers", () => {
     const imageDescription = requestBody.input[0]?.content.find((part) => part.type === "input_text" && part.text?.includes("Image 1:"))?.text ?? "";
 
     expect(requestBody.instructions).toContain("Geometry accuracy comes before Korean text fit");
-    expect(requestBody.instructions).toContain("Translate all Japanese and English source text into natural Korean.");
     expect(requestBody.instructions).toContain("Never merge separate speech bubbles, including touching or stacked balloon lobes.");
-    expect(promptText).toContain("Detect every visible Japanese or English text group");
-    expect(promptText).toContain("You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.");
-    expect(promptText).toContain("fontSize is the apparent source glyph size in Image 1 pixels");
-    expect(promptText).toContain("x1, y1, x2, y2 describe the tight rectangle corners of the visible source glyph ink and its outline.");
+    expect(promptText).toContain("Detect every visible Japanese text group");
+    expect(promptText).toContain("You are given one full-page Japanese manga image.");
+    expect(promptText).toContain("fontSize is the apparent Japanese glyph size in Image 1 pixels");
+    expect(promptText).toContain("x1, y1, x2, y2 describe the tight rectangle corners of the visible Japanese glyph ink and its outline.");
     expect(promptText).toContain("Each speech bubble is one dialogue item.");
     expect(promptText).toContain("If two white balloon lobes touch, overlap, stack vertically, or connect through a narrow neck");
     expect(promptText).toContain("Never enlarge, shift, or reshape the rectangle");
@@ -320,7 +444,6 @@ describe("runtime model launch helpers", () => {
     expect(prompt).toContain("Required candidate ids: 1, 2.");
     expect(prompt).toContain('candidate 1: label:text x1:67 y1:589 x2:267 y2:760 ocrText:"いえ…資金はこちらも"');
     expect(prompt).toContain('candidate 2: label:text x1:83 y1:767 x2:239 y2:1029 ocrText:"モリーダ村に支店を置く"');
-    expect(prompt).toContain("Use the candidate rectangle size to choose natural line breaks for ko.");
     expect(prompt).toContain("Do not merge two candidates into one record");
     expect(prompt).toContain("add a new record with id greater than 2");
     expect(prompt).not.toContain("Find one anchor point");
@@ -337,69 +460,12 @@ describe("runtime model launch helpers", () => {
       [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 420, height: 320, originalWidth: 420, originalHeight: 320 }]
     );
 
-    expect(prompt).toContain("You are given one user-selected crop from a manga page. Source text may be Japanese, English, or mixed Japanese/English.");
+    expect(prompt).toContain("You are given one user-selected crop from a Japanese manga page.");
     expect(prompt).toContain("# Selected region grouping");
     expect(prompt).toContain("Do not treat the whole crop as one text item.");
     expect(prompt).toContain("If the crop contains one speech bubble or one caption plate, output exactly one record");
-    expect(prompt).toContain("Inside one speech bubble, never split by source text column, text line, word, sentence fragment, punctuation gap, or line break.");
+    expect(prompt).toContain("Inside one speech bubble, never split by Japanese vertical column, text line, word, sentence fragment, punctuation gap, or line break.");
     expect(prompt).toContain("jp must include all columns in natural Japanese reading order");
-  });
-
-  it("omits initial images in OCR text-only translation modes", () => {
-    const variants = [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 100, height: 100 }];
-    const messages = buildMessages(
-      {
-        translationMode: "ocr-text",
-        imageWidth: 100,
-        imageHeight: 100,
-        ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }]
-      },
-      variants
-    );
-    const requestBody = buildResponsesRequestBody(
-      {
-        modelProvider: "openai-codex",
-        translationMode: "ocr-text-with-image-retry",
-        codexModel: "gpt-5.5",
-        maxTokens: 512,
-        imageWidth: 100,
-        imageHeight: 100,
-        ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }]
-      },
-      variants,
-      getOverlayPrompt({ translationMode: "ocr-text", ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }] }, []),
-      "system"
-    );
-
-    expect(resolveTranslationMode({ translationMode: "ocr-text" })).toBe("ocr-text");
-    expect(messages[1]?.content.some((part) => part.type === "image_url")).toBe(false);
-    expect(messages[1]?.content.some((part) => part.type === "text" && part.text?.includes("OCR text-only mode"))).toBe(true);
-    expect(requestBody.input[0]?.content.some((part) => part.type === "input_image")).toBe(false);
-  });
-
-  it("allows forced image input for crop retry even when the initial mode is OCR text", () => {
-    const messages = buildMessages(
-      { translationMode: "ocr-text-with-image-retry", forceImageInput: true, promptOverrideText: "retry" },
-      [{ role: "crop-retry", dataUrl: "data:image/png;base64,crop", width: 100, height: 100 }]
-    );
-
-    expect(messages[1]?.content.some((part) => part.type === "image_url")).toBe(true);
-  });
-
-  it("can disable sound-effect translation in the prompt", () => {
-    const prompt = getOverlayPrompt(
-      {
-        imageWidth: 836,
-        imageHeight: 1188,
-        includeSoundEffects: false
-      },
-      [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 836, height: 1188, originalWidth: 836, originalHeight: 1188 }]
-    );
-
-    expect(prompt).toContain("Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX");
-    expect(prompt).toContain("Translate dialogue, narration captions, and meaningful labels/signs only.");
-    expect(prompt).not.toContain("Do a separate SFX pass");
-    expect(prompt).not.toContain("ko must be bare Korean effect lettering only");
   });
 
   it("normalizes bbox hint JSON with low-trust OCR text", async () => {
@@ -430,21 +496,7 @@ describe("runtime model launch helpers", () => {
     expect(result.hints[0]).toMatchObject({ x1: 67, y1: 589, x2: 267, y2: 760, ocrText: "いえ…" });
   });
 
-  it("treats English OCR hints as translatable text evidence", async () => {
-    const result = await collectOcrBboxHints({
-      imageWidth: 836,
-      imageHeight: 1188,
-      ocrBboxHints: [
-        { id: 1, label: "text", x1: 100, y1: 120, x2: 260, y2: 180, ocrText: "Hello there!" }
-      ]
-    });
-
-    expect(result.hints).toHaveLength(1);
-    expect(result.textEvidenceCount).toBe(1);
-    expect(result.noTextDetected).toBe(false);
-  });
-
-  it("uses the same tight source glyph bbox prompt for Gemma chat requests", () => {
+  it("uses the same tight Japanese glyph bbox prompt for Gemma chat requests", () => {
     const messages = buildMessages(
       {
         modelProvider: "gemma",
@@ -459,7 +511,7 @@ describe("runtime model launch helpers", () => {
     expect(systemText).toContain("Geometry accuracy comes before Korean text fit");
     expect(messages[1]?.content[0]).toMatchObject({ type: "image_url" });
     expect(messages[1]?.content[1]).toMatchObject({ type: "text" });
-    expect(userPrompt).toContain("Detect every visible Japanese or English text group");
+    expect(userPrompt).toContain("Detect every visible Japanese text group");
     expect(userPrompt).toContain("Return x1, y1, x2, y2 as normalized 0..1000");
     expect(userPrompt).toContain("direction, angle, fontSize");
     expect(userPrompt).toContain("For SFX, box only the sound-effect glyph strokes");
@@ -548,7 +600,6 @@ describe("runtime model launch helpers", () => {
       ctx: 8192,
       batch: 1024,
       ubatch: 1024,
-      gemmaVramMode: "economy",
       cacheTypeK: "q4_0",
       cacheTypeV: "q4_0",
       ctxCheckpoints: 0,
@@ -613,28 +664,6 @@ describe("runtime model launch helpers", () => {
     expect(args.slice(args.indexOf("--top-k"), args.indexOf("--top-k") + 2)).toEqual(["--top-k", "64"]);
     expect(args.slice(args.indexOf("--top-p"), args.indexOf("--top-p") + 2)).toEqual(["--top-p", "0.95"]);
     expect(args.slice(args.indexOf("--min-p"), args.indexOf("--min-p") + 2)).toEqual(["--min-p", "0.0"]);
-  });
-
-  it("uses ChatML instead of the model Jinja template for TranslateGemma GGUF models", () => {
-    const args = buildLaunchArgs({
-      port: 18180,
-      fitTargetMb: 1024,
-      ctx: 8192,
-      batch: 1024,
-      ubatch: 1024,
-      cacheTypeK: "q4_0",
-      cacheTypeV: "q4_0",
-      modelRepo: "mradermacher/translategemma-4b-it-GGUF",
-      modelFile: "translategemma-4b-it.Q8_0.gguf"
-    });
-
-    expect(args).toContain("--no-jinja");
-    expect(args.slice(args.indexOf("--chat-template"), args.indexOf("--chat-template") + 2)).toEqual([
-      "--chat-template",
-      "chatml"
-    ]);
-    expect(args).not.toContain("--kv-unified");
-    expect(args).not.toContain("--jinja");
   });
 
   it("passes economy performance tuning launch options when explicitly configured", () => {
@@ -1041,5 +1070,49 @@ describe("runtime model launch helpers", () => {
         process.env.HUGGINGFACE_HUB_CACHE = previousLegacyHubCache;
       }
     }
+  });
+
+  it("omits initial images in OCR text-only translation modes", () => {
+    const variants = [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 100, height: 100 }];
+    const messages = buildMessages(
+      {
+        translationMode: "ocr-text",
+        imageWidth: 100,
+        imageHeight: 100,
+        ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }]
+      },
+      variants
+    );
+    const requestBody = buildResponsesRequestBody(
+      {
+        modelProvider: "openai-codex",
+        translationMode: "ocr-text",
+        codexModel: "gpt-5.5",
+        maxTokens: 512,
+        imageWidth: 100,
+        imageHeight: 100,
+        ocrBboxHints: [{ id: 1, label: "ocr_textbox", x1: 1, y1: 2, x2: 30, y2: 40, ocrText: "Hello" }]
+      },
+      variants
+    );
+
+    expect(resolveTranslationMode({ translationMode: "ocr-text" })).toBe("ocr-text");
+    expect(messages[1]?.content.some((part) => part.type === "image_url")).toBe(false);
+    expect(messages[1]?.content.some((part) => part.type === "text" && part.text?.includes("No image is included in this request"))).toBe(true);
+    expect(requestBody.input[0]?.content.some((part) => part.type === "input_image")).toBe(false);
+  });
+
+  it("can disable sound-effect translation in the prompt", () => {
+    const prompt = getOverlayPrompt(
+      {
+        includeSoundEffects: false,
+        imageWidth: 1000,
+        imageHeight: 1000
+      },
+      [{ role: "original", dataUrl: "data:image/png;base64,abc123", width: 1000, height: 1000 }]
+    );
+
+    expect(prompt).toContain("Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX");
+    expect(prompt).not.toContain("For SFX records, output bare Korean effect lettering only");
   });
 });

@@ -10,10 +10,11 @@ type OverlayBlockProps = {
   stageSize: ViewportSize;
   selected: boolean;
   showChrome: boolean;
-  highlightType: TranslationBlock["type"] | null;
+  showExcluded?: boolean;
   pointerDisabled?: boolean;
   onPointerDown: (event: React.PointerEvent) => void;
   onResizePointerDown: (event: React.PointerEvent) => void;
+  onToggleExcluded?: () => void;
 };
 
 export function OverlayBlock({
@@ -22,10 +23,11 @@ export function OverlayBlock({
   stageSize,
   selected,
   showChrome,
-  highlightType,
+  showExcluded = false,
   pointerDisabled = false,
   onPointerDown,
-  onResizePointerDown
+  onResizePointerDown,
+  onToggleExcluded
 }: OverlayBlockProps): React.JSX.Element | null {
   if (block.renderDirection === "hidden") {
     return null;
@@ -39,7 +41,6 @@ export function OverlayBlock({
     block.outlineWidthPx
   );
   const visualStyle = resolveBlockVisualStyle(block.type);
-  const pendingPattern = showChrome && highlightType === "solid" && block.type === "nonsolid";
   const style: React.CSSProperties = {
     left: layout.rect.left,
     top: layout.rect.top,
@@ -89,16 +90,16 @@ export function OverlayBlock({
     color: block.textColor
   };
 
+  const excluded = showExcluded && Boolean(block.inpaintExcluded);
+
   return (
     <div
       className={[
         "overlay-block",
         `block-${block.type}`,
         selected ? "selected" : "",
-        showChrome ? "" : "chrome-hidden",
-        showChrome && highlightType && block.type === highlightType ? "highlight-target" : "",
-        showChrome && highlightType && block.type !== highlightType ? "highlight-dimmed" : "",
-        pendingPattern ? "pattern-pending" : ""
+        excluded ? "excluded" : "",
+        showChrome ? "" : "chrome-hidden"
       ]
         .filter(Boolean)
         .join(" ")}
@@ -113,12 +114,27 @@ export function OverlayBlock({
           {displayText}
         </span>
       </div>
-      {selected && !pointerDisabled ? <button className="resize-handle" onPointerDown={onResizePointerDown} aria-label="Resize" /> : null}
-      {pendingPattern ? (
-        <div className="pattern-pending-marker" aria-hidden="true">
-          <span>다음 단계에서 처리</span>
-        </div>
+      {showExcluded && onToggleExcluded && !pointerDisabled ? (
+        <button
+          type="button"
+          className={`overlay-exclude-toggle ${block.inpaintExcluded ? "excluded" : ""}`}
+          title={block.inpaintExcluded ? "인페인팅에 다시 포함" : "인페인팅에서 제외"}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleExcluded();
+          }}
+        >
+          {block.inpaintExcluded ? "제외됨" : "제외"}
+        </button>
+      ) : excluded ? (
+        <span className="overlay-excluded-badge" aria-hidden="true">제외</span>
       ) : null}
+      {selected && !pointerDisabled ? <button className="resize-handle" onPointerDown={onResizePointerDown} aria-label="Resize" /> : null}
     </div>
   );
 }

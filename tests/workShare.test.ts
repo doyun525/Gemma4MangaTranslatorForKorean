@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LibraryChapter, LibraryWork } from "../src/shared/types";
@@ -150,6 +150,174 @@ describe("work share packages", () => {
 
     await expect(library.previewWorkShareImport(sharePath)).rejects.toThrow(/안전하지 않은 경로|이미지 경로/);
   });
+
+  it("does not leave an empty work when import creation has no selected chapters", async () => {
+    const rootDir = await createTempLibrary();
+    const library = await loadLibrary(rootDir);
+    await writeFile(join(rootDir, "001.png"), "image");
+
+    await expect(
+      library.createImport({
+        preview: {
+          mode: "single",
+          sourceKind: "images",
+          suggestedWorkTitle: "새 작품",
+          chapters: [
+            {
+              draftId: "draft-a",
+              title: "1화",
+              sourceKind: "images",
+              pages: [{ name: "001.png", sourceKind: "file", sourcePath: join(rootDir, "001.png") }]
+            }
+          ]
+        },
+        target: { mode: "new", title: "새 작품" },
+        selections: [{ draftId: "draft-a", title: "1화", enabled: false }]
+      })
+    ).rejects.toThrow(/생성할 화/);
+
+    const index = await library.listLibrary();
+    expect(index.works).toHaveLength(0);
+  });
+
+  it("rolls back a new work import when a later chapter draft fails", async () => {
+    const rootDir = await createTempLibrary();
+    const library = await loadLibrary(rootDir);
+    const goodImagePath = join(rootDir, "001.png");
+    await writeFile(goodImagePath, "image");
+
+    await expect(
+      library.createImport({
+        preview: {
+          mode: "batch",
+          sourceKind: "folder",
+          suggestedWorkTitle: "실패할 작품",
+          chapters: [
+            {
+              draftId: "draft-a",
+              title: "1화",
+              sourceKind: "folder",
+              pages: [{ name: "001.png", sourceKind: "file", sourcePath: goodImagePath }]
+            },
+            {
+              draftId: "draft-b",
+              title: "2화",
+              sourceKind: "folder",
+              pages: [{ name: "missing.png", sourceKind: "file", sourcePath: join(rootDir, "missing.png") }]
+            }
+          ]
+        },
+        target: { mode: "new", title: "실패할 작품" },
+        selections: [
+          { draftId: "draft-a", title: "1화", enabled: true },
+          { draftId: "draft-b", title: "2화", enabled: true }
+        ]
+      })
+    ).rejects.toThrow();
+
+    const index = await library.listLibrary();
+    expect(index.works).toHaveLength(0);
+  });
+
+  it("does not append partial chapters to an existing work when import creation fails", async () => {
+    const rootDir = await createTempLibrary();
+    const library = await loadLibrary(rootDir);
+    await seedLibrary(rootDir);
+    const goodImagePath = join(rootDir, "001.png");
+    await writeFile(goodImagePath, "image");
+
+    await expect(
+      library.createImport({
+        preview: {
+          mode: "batch",
+          sourceKind: "folder",
+          suggestedWorkTitle: "추가 실패",
+          chapters: [
+            {
+              draftId: "draft-a",
+              title: "3화",
+              sourceKind: "folder",
+              pages: [{ name: "001.png", sourceKind: "file", sourcePath: goodImagePath }]
+            },
+            {
+              draftId: "draft-b",
+              title: "4화",
+              sourceKind: "folder",
+              pages: [{ name: "missing.png", sourceKind: "file", sourcePath: join(rootDir, "missing.png") }]
+            }
+          ]
+        },
+        target: { mode: "existing", workId: "work-1" },
+        selections: [
+          { draftId: "draft-a", title: "3화", enabled: true },
+          { draftId: "draft-b", title: "4화", enabled: true }
+        ]
+      })
+    ).rejects.toThrow();
+
+    const index = await library.listLibrary();
+    const work = index.works.find((candidate) => candidate.id === "work-1");
+    expect(work?.chapterOrder).toEqual(["chapter-a", "chapter-b"]);
+
+    const chapterDirs = await readdir(join(rootDir, "works", "work-1", "chapters"));
+    expect(chapterDirs.sort()).toEqual(["chapter-a", "chapter-b"]);
+  });
+
+  it("cleans stale work and chapter directories without touching indexed data", async () => {
+    const rootDir = await createTempLibrary();
+    const library = await loadLibrary(rootDir);
+    await seedLibrary(rootDir);
+    await writeJson(join(rootDir, "index.json"), { workOrder: ["work-1", "missing-work"] });
+    await mkdir(join(rootDir, "works", "orphan-work"), { recursive: true });
+    await mkdir(join(rootDir, "works", "work-1", "chapters", "orphan-chapter"), { recursive: true });
+
+    const result = await library.cleanupLibraryOrphans();
+
+    expect(result.missingWorkReferencesRemoved).toBe(1);
+    expect(result.workDirsRemoved).toBe(1);
+    expect(result.chapterDirsRemoved).toBe(1);
+    expect(existsSync(join(rootDir, "works", "orphan-work"))).toBe(false);
+    expect(existsSync(join(rootDir, "works", "work-1", "chapters", "orphan-chapter"))).toBe(false);
+
+    const index = await library.listLibrary();
+    expect(index.workOrder).toEqual(["work-1"]);
+    expect(index.works[0]?.chapterOrder).toEqual(["chapter-a", "chapter-b"]);
+  });
+
+  it("rejects saving a chapter snapshot under a forged work id", async () => {
+    const rootDir = await createTempLibrary();
+    const library = await loadLibrary(rootDir);
+    await seedLibrary(rootDir);
+    const chapter = await library.openChapter("chapter-a");
+
+    await expect(library.saveChapterSnapshot({ ...chapter, workId: "work-forged" })).rejects.toThrow(/보관함 위치/);
+  });
+
+  it("saves page blocks without letting the renderer overwrite image paths", async () => {
+    const rootDir = await createTempLibrary();
+    const library = await loadLibrary(rootDir);
+    await seedLibrary(rootDir);
+    const chapter = await library.openChapter("chapter-a");
+    const originalPage = chapter.pages[0]!;
+    const originalImagePath = originalPage.imagePath;
+
+    const saved = await library.savePageBlocks({
+      chapterId: chapter.id,
+      pageId: originalPage.id,
+      blocks: [
+        {
+          ...originalPage.blocks[0]!,
+          id: "edited-block",
+          translatedText: "수정됨"
+        }
+      ]
+    });
+
+    expect(saved.pages[0]?.imagePath).toBe(originalImagePath);
+    expect(saved.pages[0]?.blocks).toHaveLength(1);
+    expect(saved.pages[0]?.blocks[0]?.id).toBe("edited-block");
+    expect(saved.pages[0]?.blocks[0]?.translatedText).toBe("수정됨");
+  });
 });
 
 async function createTempLibrary(): Promise<string> {
@@ -228,7 +396,7 @@ function makeChapter(rootDir: string, chapterId: string, title: string, pageId: 
         blocks: [
           {
             id: blockId,
-            type: "solid",
+            type: "nonsolid",
             bbox: { x: 10, y: 10, w: 100, h: 100 },
             bboxSpace: "normalized_1000",
             sourceText: "こんにちは",

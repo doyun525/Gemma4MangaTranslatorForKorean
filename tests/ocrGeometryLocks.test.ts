@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyOcrCandidateGeometryLocks, isOcrResultNoTextDetected } from "../src/main/wholePagePipeline";
+import { isOcrResultNoTextDetected } from "../src/main/pipeline/noText";
+import { applyOcrCandidateGeometryLocks } from "../src/main/pipeline/overlayItems";
 
 const page = {
   id: "page-1",
@@ -20,7 +21,7 @@ describe("OCR candidate geometry locks", () => {
       [
         {
           id: 1,
-          type: "solid",
+          type: "nonsolid",
           bbox: { x: 104, y: 106, w: 88, h: 86 },
           jp: "jp",
           ko: "ko"
@@ -58,7 +59,7 @@ describe("OCR candidate geometry locks", () => {
       [
         {
           id: 9,
-          type: "solid",
+          type: "nonsolid",
           bbox: originalBbox,
           jp: "jp",
           ko: "ko"

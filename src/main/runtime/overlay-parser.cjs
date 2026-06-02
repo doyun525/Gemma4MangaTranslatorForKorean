@@ -73,7 +73,7 @@ function hasStructuredItems(parsed) {
 function repairBrokenJson(candidate) {
   let repaired = candidate.trim();
   repaired = repaired.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
-  repaired = repaired.replace(/"?(id|type|bbox|jp|ko|direction|angle|fontSize|confidence|x1|y1|x2|y2)(?::|\s*:)/gi, (_, key) => `"${key === "fontSize" ? "fontSize" : key.toLowerCase()}":`);
+  repaired = repaired.replace(/"?(id|type|textRole|text_role|bbox|jp|ko|direction|angle|fontSize|confidence|x1|y1|x2|y2)(?::|\s*:)/gi, (_, key) => `"${key === "fontSize" ? "fontSize" : key === "textRole" || key === "text_role" ? "textRole" : key.toLowerCase()}":`);
   repaired = repaired.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, (_, prefix, key) => `${prefix}"${key}":`);
   repaired = repaired.replace(/:\s*'([^']*)'/g, ': "$1"');
   repaired = repaired.replace(/("id"\s*:\s*)([A-Za-z]+)(\s*[,\n}])/g, '$1"$2"$3');
@@ -148,10 +148,11 @@ function parseLooseItemList(rawText, options = {}) {
         : {};
       items.push({
         id: current.id ?? items.length + 1,
-        type: current.type || "nonsolid",
+        type: normalizeParsedType(current.type),
         ...bboxFields,
         jp: current.jp || "",
         ko: current.ko.trim(),
+        ...(current.textRole ? { textRole: current.textRole } : {}),
         ...(current.direction ? { direction: current.direction } : {}),
         ...(Number.isFinite(current.angle) ? { angle: current.angle } : {}),
         ...(Number.isFinite(current.fontSize) ? { fontSize: current.fontSize } : {}),
@@ -186,6 +187,13 @@ function parseLooseItemList(rawText, options = {}) {
     if (typeMatch) {
       currentTextKey = null;
       current.type = typeMatch[1];
+      continue;
+    }
+
+    const textRoleMatch = line.match(/^"?(?:textRole|text_role|role)"?\s*:\s*["']?([^"',}]+)["']?/i);
+    if (textRoleMatch) {
+      currentTextKey = null;
+      current.textRole = textRoleMatch[1];
       continue;
     }
 
@@ -285,6 +293,23 @@ function normalizeDirection(value) {
   return text === "vertical" ? "vertical" : "horizontal";
 }
 
+function normalizeTextRole(value) {
+  const text = String(value ?? "").trim().toLowerCase().replace(/[_\s-]+/g, "");
+  if (!text) {
+    return "";
+  }
+  if (["sound", "sfx", "soundeffect", "effect", "reaction", "onomatopoeia"].includes(text)) {
+    return "sound";
+  }
+  if (["ordinary", "speech", "dialogue", "dialog", "bubble", "caption", "narration", "label", "sign", "note", "title"].includes(text)) {
+    return "ordinary";
+  }
+  if (["nontext", "nottext", "reject", "decoration", "texture", "ornament"].includes(text)) {
+    return "nontext";
+  }
+  return "";
+}
+
 function normalizeAngle(value) {
   const parsed = toNumber(value);
   if (parsed === null) {
@@ -310,7 +335,7 @@ function normalizeConfidence(value) {
     return null;
   }
   const normalized = parsed > 1 && parsed <= 100 ? parsed / 100 : parsed;
-  return Math.min(1, Math.max(0, Math.round(normalized * 100) / 100));
+  return Math.min(1, Math.max(0, normalized));
 }
 
 function normalizeBBox(item) {
@@ -342,6 +367,35 @@ function normalizeBBox(item) {
   });
 }
 
+function normalizePixelBBox(item) {
+  const box = item;
+  if (!box || typeof box !== "object") {
+    return null;
+  }
+
+  const cornerBbox = bboxFromPartial({
+    x1: toNumber(box.x1),
+    y1: toNumber(box.y1),
+    x2: toNumber(box.x2),
+    y2: toNumber(box.y2)
+  });
+  const x = toNumber(cornerBbox?.x);
+  const y = toNumber(cornerBbox?.y);
+  const w = toNumber(cornerBbox?.w);
+  const h = toNumber(cornerBbox?.h);
+
+  if (![x, y, w, h].every((value) => value !== null)) {
+    return null;
+  }
+
+  return {
+    x: Math.max(0, roundCoordinate(x)),
+    y: Math.max(0, roundCoordinate(y)),
+    w: Math.max(1, roundCoordinate(w)),
+    h: Math.max(1, roundCoordinate(h))
+  };
+}
+
 function normalizeItem(item, index) {
   const ko = [item?.ko, item?.korean, item?.translation, item?.translated, item?.text_ko].find((value) => typeof value === "string" && value.trim());
   const jp = [item?.jp, item?.japanese, item?.source, item?.ocr, item?.text_jp].find((value) => typeof value === "string" && value.trim()) || "";
@@ -359,7 +413,8 @@ function normalizeItem(item, index) {
 
   return {
     id: toNumber(item?.id) ?? index + 1,
-    type: typeof item?.type === "string" && item.type.trim() ? item.type.trim() : "nonsolid",
+    type: normalizeParsedType(item?.type),
+    ...(normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) ? { textRole: normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) } : {}),
     bbox,
     jp: normalizedJp,
     ko: normalizedKo,
@@ -375,6 +430,7 @@ function normalizeRetryItem(item, index) {
   const jp = [item?.jp, item?.japanese, item?.source, item?.ocr, item?.text_jp].find((value) => typeof value === "string" && value.trim()) || "";
   const normalizedKo = normalizeTextField(ko);
   const normalizedJp = normalizeTextField(jp);
+  const bbox = normalizePixelBBox(item);
 
   if (!normalizedKo) {
     return null;
@@ -382,7 +438,9 @@ function normalizeRetryItem(item, index) {
 
   return {
     id: toNumber(item?.id) ?? index + 1,
-    type: typeof item?.type === "string" && item.type.trim() ? item.type.trim() : "nonsolid",
+    type: normalizeParsedType(item?.type),
+    ...(bbox ? { bbox } : {}),
+    ...(normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) ? { textRole: normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) } : {}),
     jp: normalizedJp,
     ko: normalizedKo,
     direction: normalizeDirection(item?.direction ?? item?.sourceDirection ?? item?.writingDirection),
@@ -390,6 +448,10 @@ function normalizeRetryItem(item, index) {
     fontSize: normalizeFontSize(item?.fontSize ?? item?.font_size ?? item?.font),
     confidence: normalizeConfidence(item?.confidence ?? item?.score)
   };
+}
+
+function normalizeParsedType(value) {
+  return String(value ?? "").trim().toLowerCase() === "reject" ? "reject" : "nonsolid";
 }
 
 function normalizeTextField(value) {
@@ -432,10 +494,12 @@ function normalizeRetryItems(parsed) {
 }
 
 function parseRetryItems(rawText) {
+  const looseItems = normalizeRetryItems({ items: parseLooseItemList(rawText, { requireBbox: false }) });
   try {
-    return normalizeRetryItems(parseJsonLenient(rawText));
+    const parsedItems = normalizeRetryItems(parseJsonLenient(rawText));
+    return looseItems.length > parsedItems.length ? looseItems : parsedItems;
   } catch {
-    return normalizeRetryItems({ items: parseLooseItemList(rawText, { requireBbox: false }) });
+    return looseItems;
   }
 }
 

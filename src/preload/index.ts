@@ -1,12 +1,14 @@
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppSettings,
   ChapterSnapshot,
   CreateImportRequest,
   CreateImportResult,
-  ImportPreviewResult,
+  ImportPreviewSession,
   InpaintingColorSampleRequest,
   InpaintingColorSampleResult,
+  InpaintingExportRequest,
+  InpaintingExportResult,
   InpaintingRetouchRequest,
   InpaintingRetouchResult,
   InpaintingRevertRequest,
@@ -18,6 +20,9 @@ import type {
   ModelTestResult,
   RegionAnalysisRequest,
   RegionAnalysisResult,
+  SavePageBlocksRequest,
+  SetPageInpaintingResultRequest,
+  SetPageInpaintingResultResult,
   StartInpaintingRequest,
   StartInpaintingResult,
   StartAnalysisRequest,
@@ -30,12 +35,10 @@ import type {
 } from "../shared/types";
 
 const api = {
-  previewImagesImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-images"),
-  previewFolderImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-folder"),
-  previewZipImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-zip"),
-  previewZipFolderImport: (): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-zip-folder"),
-  previewDroppedImport: (filePaths: string[]): Promise<ImportPreviewResult | null> => ipcRenderer.invoke("import:preview-dropped", filePaths),
-  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  previewImagesImport: (): Promise<ImportPreviewSession | null> => ipcRenderer.invoke("import:preview-images"),
+  previewFolderImport: (): Promise<ImportPreviewSession | null> => ipcRenderer.invoke("import:preview-folder"),
+  previewZipImport: (): Promise<ImportPreviewSession | null> => ipcRenderer.invoke("import:preview-zip"),
+  previewZipFolderImport: (): Promise<ImportPreviewSession | null> => ipcRenderer.invoke("import:preview-zip-folder"),
   createImport: (request: CreateImportRequest): Promise<CreateImportResult> => ipcRenderer.invoke("import:create", request),
   exportWorkShare: (request: WorkShareExportRequest): Promise<WorkShareExportResult | null> => ipcRenderer.invoke("share:export-work", request),
   previewWorkShareImport: (): Promise<WorkShareImportPreview | null> => ipcRenderer.invoke("share:preview-import"),
@@ -44,7 +47,7 @@ const api = {
   openLibraryFolder: () => ipcRenderer.invoke("library:open-folder"),
   openChapter: (chapterId: string): Promise<ChapterSnapshot> => ipcRenderer.invoke("library:open-chapter", chapterId),
   getPageImageDataUrl: (imagePath: string): Promise<string> => ipcRenderer.invoke("library:get-page-image-data-url", imagePath),
-  saveChapter: (chapter: ChapterSnapshot): Promise<ChapterSnapshot> => ipcRenderer.invoke("library:save-chapter", chapter),
+  savePageBlocks: (request: SavePageBlocksRequest): Promise<ChapterSnapshot> => ipcRenderer.invoke("library:save-page-blocks", request),
   renameWork: (workId: string, title: string): Promise<LibraryIndex> => ipcRenderer.invoke("library:rename-work", workId, title),
   renameChapter: (chapterId: string, title: string): Promise<LibraryIndex> => ipcRenderer.invoke("library:rename-chapter", chapterId, title),
   deleteWork: (workId: string): Promise<LibraryIndex> => ipcRenderer.invoke("library:delete-work", workId),
@@ -68,9 +71,14 @@ const api = {
   startInpainting: (request: StartInpaintingRequest): Promise<StartInpaintingResult> => ipcRenderer.invoke("job:start-inpainting", request),
   applyInpaintingRetouch: (request: InpaintingRetouchRequest): Promise<InpaintingRetouchResult> =>
     ipcRenderer.invoke("inpainting:apply-retouch", request),
+  setPageInpaintingResult: (request: SetPageInpaintingResultRequest): Promise<SetPageInpaintingResultResult> =>
+    ipcRenderer.invoke("inpainting:set-page-result", request),
   revertInpainting: (request: InpaintingRevertRequest): Promise<InpaintingRevertResult> => ipcRenderer.invoke("inpainting:revert", request),
   sampleInpaintingColor: (request: InpaintingColorSampleRequest): Promise<InpaintingColorSampleResult> =>
     ipcRenderer.invoke("inpainting:sample-color", request),
+  exportInpaintingResults: (request: InpaintingExportRequest): Promise<InpaintingExportResult> =>
+    ipcRenderer.invoke("inpainting:export-results", request),
+  disposeInpaintingEngine: (): Promise<{ disposed: boolean }> => ipcRenderer.invoke("inpainting:dispose-engine"),
   cancelJob: () => ipcRenderer.invoke("job:cancel"),
   onJobEvent: (callback: (event: JobEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: JobEvent) => callback(payload);

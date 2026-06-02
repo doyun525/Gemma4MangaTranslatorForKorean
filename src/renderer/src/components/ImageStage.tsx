@@ -1,9 +1,9 @@
 import React from "react";
-import type { BBox, MangaPage, TranslationBlock } from "../../../shared/types";
+import type { BBox, InpaintingMaskStroke, MangaPage, TranslationBlock } from "../../../shared/types";
 import type { ViewportSize } from "../lib/overlayLayout";
 import { OverlayBlock } from "./OverlayBlock";
 
-type ImageStageProps = {
+export type ImageStageProps = {
   page: MangaPage;
   imageDataUrl: string;
   imageRef: React.RefObject<HTMLImageElement | null>;
@@ -12,21 +12,22 @@ type ImageStageProps = {
   selectedBlockId: string | null;
   showTextBlocks: boolean;
   showBlockChrome: boolean;
-  highlightBlockType: TranslationBlock["type"] | null;
+  inpaintingMode?: boolean;
   blockPointerDisabled?: boolean;
   retouchCursor?: {
     point: { x: number; y: number } | null;
     radiusPx: number;
-    mode: "brush" | "eraser";
+    mode: "brush" | "eraser" | "mask";
     color: string;
   } | null;
   retouchPreview?: {
-    mode: "brush" | "eraser";
+    mode: "brush" | "eraser" | "mask";
     points: Array<{ x: number; y: number }>;
     radiusPx: number;
     color: string;
     originalImageDataUrl: string;
   } | null;
+  maskStrokes?: InpaintingMaskStroke[];
   regionSelectionActive: boolean;
   regionSelectionRect: BBox | null;
   fileDropActive?: boolean;
@@ -35,6 +36,7 @@ type ImageStageProps = {
   onStagePointerDown: (event: React.PointerEvent) => void;
   onStagePointerLeave?: (event: React.PointerEvent) => void;
   onBlockPointerDown: (event: React.PointerEvent, block: TranslationBlock, mode: "move" | "resize") => void;
+  onToggleBlockExcluded?: (blockId: string) => void;
 };
 
 export function ImageStage({
@@ -46,10 +48,11 @@ export function ImageStage({
   selectedBlockId,
   showTextBlocks,
   showBlockChrome,
-  highlightBlockType,
+  inpaintingMode = false,
   blockPointerDisabled = false,
   retouchCursor = null,
   retouchPreview = null,
+  maskStrokes = [],
   regionSelectionActive,
   regionSelectionRect,
   fileDropActive = false,
@@ -57,7 +60,8 @@ export function ImageStage({
   onStagePointerUp,
   onStagePointerDown,
   onStagePointerLeave,
-  onBlockPointerDown
+  onBlockPointerDown,
+  onToggleBlockExcluded
 }: ImageStageProps): React.JSX.Element {
   const clipId = React.useId();
   const cursorVisible = Boolean(retouchCursor?.point && stageSize);
@@ -66,6 +70,12 @@ export function ImageStage({
   const cursorRadius = retouchCursor ? Math.max(3, retouchCursor.radiusPx * Math.min(cursorScaleX, cursorScaleY)) : 0;
   const previewPath = retouchPreview?.points.length ? pointsToPath(retouchPreview.points) : "";
   const previewStrokeWidth = retouchPreview ? Math.max(1, retouchPreview.radiusPx * 2) : 0;
+  const maskStrokePaths = maskStrokes
+    .map((stroke) => ({
+      path: pointsToPath(stroke.points),
+      width: Math.max(1, stroke.radiusPx * 2)
+    }))
+    .filter((stroke) => stroke.path);
 
   return (
     <div className="stage-wrap">
@@ -103,13 +113,27 @@ export function ImageStage({
                 stageSize={stageSize}
                 selected={block.id === selectedBlockId}
                 showChrome={showBlockChrome}
-                highlightType={highlightBlockType}
+                showExcluded={inpaintingMode}
                 pointerDisabled={blockPointerDisabled}
                 onPointerDown={(event) => onBlockPointerDown(event, block, "move")}
                 onResizePointerDown={(event) => onBlockPointerDown(event, block, "resize")}
+                onToggleExcluded={onToggleBlockExcluded ? () => onToggleBlockExcluded(block.id) : undefined}
               />
             ))
           : null}
+        {imageDataUrl && stageSize && maskStrokePaths.length > 0 ? (
+          <svg
+            className="retouch-preview-layer retouch-preview-mask retouch-preview-committed-mask"
+            viewBox={`0 0 ${page.width} ${page.height}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+            focusable="false"
+          >
+            {maskStrokePaths.map((stroke, index) => (
+              <path key={index} d={stroke.path} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+            ))}
+          </svg>
+        ) : null}
         {imageDataUrl && stageSize && retouchPreview && previewPath ? (
           <svg
             className={`retouch-preview-layer retouch-preview-${retouchPreview.mode}`}

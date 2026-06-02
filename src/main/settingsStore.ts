@@ -1,9 +1,10 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppSettings } from "../shared/types";
 import { getAppPaths, type AppPaths } from "./appPaths";
 import { normalizeAppSettings, parseStoredAppSettings, resolveDefaultAppSettings } from "./appSettings";
 import { detectBestGpuInfo } from "./gpuInfo";
+import { writeJsonFile } from "./libraryStore/storage";
 
 export async function getAppSettings(paths = getAppPaths(), env: NodeJS.ProcessEnv = process.env): Promise<AppSettings> {
   const defaults = resolveDefaultAppSettings(env, await detectBestGpuInfo());
@@ -46,7 +47,7 @@ export async function resetAppSettings(paths = getAppPaths(), env: NodeJS.Proces
 }
 
 async function persistAppSettings(settings: AppSettings, paths: AppPaths): Promise<void> {
-  await writeFile(paths.settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  await writeJsonFile(paths.settingsPath, settings);
 }
 
 async function readExistingSettings(paths: AppPaths, defaults: AppSettings): Promise<AppSettings | null> {
@@ -85,6 +86,9 @@ function mergeSettingsForSave(settings: AppSettings, existing: AppSettings | nul
   }
   if (!hasOwn(rawOcr, "engine")) {
     merged.ocr.engine = existing.ocr.engine;
+  }
+  if (!hasOwn(rawOcr, "gpuCudaTag") && existing.ocr.gpuCudaTag) {
+    merged.ocr.gpuCudaTag = existing.ocr.gpuCudaTag;
   }
   if (!hasOwn(rawStorage, "modelCacheDir") && existing.storage?.modelCacheDir) {
     merged.storage = {

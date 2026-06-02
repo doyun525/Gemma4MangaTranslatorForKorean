@@ -2,7 +2,6 @@ import React from "react";
 import type {
   AppSettings,
   CodexReasoningEffort,
-  GemmaCustomModelPreset,
   GemmaVramMode,
   ModelTestProgressEvent,
   ModelProvider,
@@ -11,75 +10,30 @@ import type {
   OcrEngine,
   TranslationMode
 } from "../../../shared/types";
-
-const MIN_MAX_TOKENS = 300;
-const MAX_MAX_TOKENS = 12000;
-const MIN_OCR_BBOX_EXPAND_PERCENT = 0;
-const MAX_OCR_BBOX_EXPAND_PERCENT = 100;
-const DEFAULT_OCR_BBOX_EXPAND_X_PERCENT = 20;
-const DEFAULT_OCR_BBOX_EXPAND_Y_PERCENT = 10;
-const DEFAULT_TEXT_OUTLINE_WIDTH_PX = 1.4;
-const DEFAULT_TRANSLATION_MODE: TranslationMode = "image";
-const MIN_TEXT_OUTLINE_WIDTH_PX = 0;
-const MAX_TEXT_OUTLINE_WIDTH_PX = 8;
-const DEFAULT_GEMMA_MODEL_REPO =
-  "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-i1-GGUF";
-const DEFAULT_GEMMA_MMPROJ_REPO =
-  "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-GGUF";
-const DEFAULT_GEMMA_MMPROJ_FILE =
-  "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.mmproj-f16.gguf";
-const MODEL_PRESETS = {
-  iq3s: {
-    label: "IQ3_S",
-    modelRepo: DEFAULT_GEMMA_MODEL_REPO,
-    modelFile: "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.i1-IQ3_S.gguf",
-    mmprojRepo: DEFAULT_GEMMA_MMPROJ_REPO,
-    mmprojFile: DEFAULT_GEMMA_MMPROJ_FILE
-  }
-} as const;
-
-type ModelPresetId = keyof typeof MODEL_PRESETS | "custom";
-type ModelSourceOption = {
-  id: ModelSource;
-  label: string;
-  description: string;
-};
-
-type ModelProviderOption = {
-  id: ModelProvider;
-  label: string;
-  description: string;
-};
-
-type CodexReasoningOption = {
-  id: CodexReasoningEffort;
-  label: string;
-  description: string;
-};
-
-type OcrDeviceOption = {
-  id: OcrDevice;
-  label: string;
-  description: string;
-};
-
-type OcrEngineOption = {
-  id: OcrEngine;
-  label: string;
-  description: string;
-};
-
-type TranslationModeOption = {
-  id: TranslationMode;
-  label: string;
-  description: string;
-};
-
-type GemmaVramModeOption = {
-  id: GemmaVramMode;
-  label: string;
-  description: string;
-};
+import {
+  CODEX_REASONING_OPTIONS,
+  DEFAULT_GEMMA_MODEL_REPO,
+  DEFAULT_OCR_BBOX_EXPAND_X_PERCENT,
+  DEFAULT_OCR_BBOX_EXPAND_Y_PERCENT,
+  DEFAULT_TEXT_OUTLINE_WIDTH_PX,
+  DEFAULT_TRANSLATION_MODE,
+  GEMMA_VRAM_MODE_OPTIONS,
+  MAX_MAX_TOKENS,
+  MAX_OCR_BBOX_EXPAND_PERCENT,
+  MAX_TEXT_OUTLINE_WIDTH_PX,
+  MIN_MAX_TOKENS,
+  MIN_OCR_BBOX_EXPAND_PERCENT,
+  MIN_TEXT_OUTLINE_WIDTH_PX,
+  MODEL_PRESETS,
+  MODEL_PROVIDER_OPTIONS,
+  MODEL_SOURCE_OPTIONS,
+  OCR_DEVICE_OPTIONS,
+  OCR_ENGINE_OPTIONS,
+  TRANSLATION_MODE_OPTIONS,
+  resolveModelPreset,
+  type ModelPresetId
+} from "./settingsOptions";
+import { Button, Modal } from "./ui";
 
 type TestState =
   | {
@@ -92,117 +46,6 @@ type TestState =
       message: string;
       detail: string | null;
     };
-
-const MODEL_SOURCE_OPTIONS: ModelSourceOption[] = [
-  {
-    id: "huggingface",
-    label: "HF repo",
-    description: "기본 프리셋이나 Hugging Face repo/GGUF 파일명을 사용합니다."
-  },
-  {
-    id: "local",
-    label: "로컬 파일",
-    description: "이미 가지고 있는 GGUF 모델과 mmproj를 직접 지정합니다."
-  }
-];
-
-const MODEL_PROVIDER_OPTIONS: ModelProviderOption[] = [
-  {
-    id: "gemma",
-    label: "Gemma 4",
-    description: "로컬 llama-server로 Gemma 4 비전 모델을 실행합니다."
-  },
-  {
-    id: "openai-codex",
-    label: "OpenAI Codex",
-    description: "Codex 로그인 토큰을 쓰는 openai-oauth 엔드포인트로 요청합니다."
-  }
-];
-
-const TRANSLATION_MODE_OPTIONS: TranslationModeOption[] = [
-  {
-    id: "image",
-    label: "이미지 직접 분석",
-    description: "현재 방식입니다. 페이지 이미지를 함께 보내 정확도를 우선합니다."
-  },
-  {
-    id: "ocr-text",
-    label: "OCR 텍스트만",
-    description: "이미지를 보내지 않고 OCR 텍스트와 bbox만 번역합니다."
-  },
-  {
-    id: "ocr-text-with-image-retry",
-    label: "OCR 우선",
-    description: "먼저 OCR 텍스트만 번역하고, 낮은 신뢰도 항목만 crop 이미지로 재시도합니다."
-  }
-];
-
-const CODEX_REASONING_OPTIONS: CodexReasoningOption[] = [
-  {
-    id: "none",
-    label: "없음",
-    description: "생각 예산을 쓰지 않고 가장 빠르게 응답합니다."
-  },
-  {
-    id: "low",
-    label: "낮음",
-    description: "가벼운 추론으로 처리합니다."
-  },
-  {
-    id: "medium",
-    label: "보통",
-    description: "기본 균형 설정입니다."
-  },
-  {
-    id: "high",
-    label: "높음",
-    description: "더 오래 생각해서 까다로운 페이지를 처리합니다."
-  },
-  {
-    id: "xhigh",
-    label: "최고",
-    description: "가장 넉넉한 생각 예산을 사용합니다."
-  }
-];
-
-const OCR_DEVICE_OPTIONS: OcrDeviceOption[] = [
-  {
-    id: "cpu",
-    label: "CPU",
-    description: "기본값입니다. 느리지만 별도 GPU Paddle 런타임 없이 가장 안정적으로 동작합니다."
-  },
-  {
-    id: "gpu",
-    label: "GPU",
-    description: "PaddleOCR를 GPU로 실행합니다. GPU용 Paddle 런타임/CUDA가 맞지 않으면 OCR 단계가 실패할 수 있습니다."
-  }
-];
-
-const OCR_ENGINE_OPTIONS: OcrEngineOption[] = [
-  {
-    id: "paddleocr-vl",
-    label: "PaddleOCR-VL",
-    description: "문서/레이아웃 분석까지 포함합니다. 정확도 우선이지만 페이지당 시간이 더 걸릴 수 있습니다."
-  },
-  {
-    id: "paddleocr-v5",
-    label: "PP-OCRv5",
-    description: "일반 OCR 검출/인식만 사용합니다. 더 빠르고 가볍지만 말풍선 단위 그룹 품질은 페이지에 따라 다를 수 있습니다."
-  }
-];
-
-const GEMMA_VRAM_MODE_OPTIONS: GemmaVramModeOption[] = [
-  {
-    id: "full",
-    label: "풀로드",
-    description: "현재 품질 기준입니다. 이미지 토큰은 그대로 쓰고, 넉넉한 VRAM에서 가장 여유 있게 실행합니다."
-  },
-  {
-    id: "economy",
-    label: "절약",
-    description: "이미지 토큰 1024는 유지하고 batch/ubatch와 KV GPU 사용을 줄입니다. 16GB급 VRAM에서 더 안전하지만 조금 느릴 수 있습니다."
-  }
-];
 
 type SettingsModalProps = {
   initialSettings: AppSettings;
@@ -230,16 +73,6 @@ export function SettingsModal({
   );
   const [customModelRepo, setCustomModelRepo] = React.useState(initialSettings.gemma.modelRepo);
   const [customModelFile, setCustomModelFile] = React.useState(initialSettings.gemma.modelFile);
-  const [customModelPresets, setCustomModelPresets] = React.useState<GemmaCustomModelPreset[]>(
-    initialSettings.gemma.customModelPresets ?? []
-  );
-  const [selectedCustomPresetId, setSelectedCustomPresetId] = React.useState(() =>
-    resolveInitialCustomPresetId(
-      initialSettings.gemma.customModelPresets ?? [],
-      initialSettings.gemma.modelRepo,
-      initialSettings.gemma.modelFile
-    )
-  );
   const [localModelPath, setLocalModelPath] = React.useState(initialSettings.gemma.localModelPath ?? "");
   const [localMmprojPath, setLocalMmprojPath] = React.useState(initialSettings.gemma.localMmprojPath ?? "");
   const [vramMode, setVramMode] = React.useState<GemmaVramMode>(initialSettings.gemma.vramMode);
@@ -250,7 +83,7 @@ export function SettingsModal({
   const [codexOauthPort, setCodexOauthPort] = React.useState(String(initialSettings.codex.oauthPort));
   const [ocrDevice, setOcrDevice] = React.useState<OcrDevice>(initialSettings.ocr.device);
   const [ocrEngine, setOcrEngine] = React.useState<OcrEngine>(initialSettings.ocr.engine ?? "paddleocr-vl");
-  const [translationMode, setTranslationMode] = React.useState<TranslationMode>(() =>
+  const [translationMode, setTranslationMode] = React.useState<TranslationMode>(
     resolveTranslationMode(initialSettings.translation?.mode)
   );
   const [includeSoundEffects, setIncludeSoundEffects] = React.useState(initialSettings.translation.includeSoundEffects);
@@ -277,14 +110,6 @@ export function SettingsModal({
     setSelectedPreset(resolveModelPreset(initialSettings.gemma.modelRepo, initialSettings.gemma.modelFile));
     setCustomModelRepo(initialSettings.gemma.modelRepo);
     setCustomModelFile(initialSettings.gemma.modelFile);
-    setCustomModelPresets(initialSettings.gemma.customModelPresets ?? []);
-    setSelectedCustomPresetId(
-      resolveInitialCustomPresetId(
-        initialSettings.gemma.customModelPresets ?? [],
-        initialSettings.gemma.modelRepo,
-        initialSettings.gemma.modelFile
-      )
-    );
     setLocalModelPath(initialSettings.gemma.localModelPath ?? "");
     setLocalMmprojPath(initialSettings.gemma.localMmprojPath ?? "");
     setVramMode(initialSettings.gemma.vramMode);
@@ -335,35 +160,6 @@ export function SettingsModal({
   const trimmedModelFile = (activePreset?.modelFile ?? customModelFile).trim();
   const trimmedMmprojRepo = activePreset?.mmprojRepo;
   const trimmedMmprojFile = activePreset?.mmprojFile;
-  const normalizedCustomModelPresets = React.useMemo(
-    () => normalizeCustomModelPresetsForSettings(customModelPresets),
-    [customModelPresets]
-  );
-  const customModelPresetsForSave = React.useMemo(() => {
-    const modelRepo = customModelRepo.trim();
-    const modelFile = customModelFile.trim();
-    if (modelSource !== "huggingface" || selectedPreset !== "custom" || !modelRepo || !modelFile) {
-      return normalizedCustomModelPresets;
-    }
-
-    const existingPreset =
-      normalizedCustomModelPresets.find((preset) => preset.id === selectedCustomPresetId) ??
-      normalizedCustomModelPresets.find((preset) => sameCustomModelPreset(preset, modelRepo, modelFile));
-    const currentPreset: GemmaCustomModelPreset = {
-      id: existingPreset?.id ?? createCustomPresetId(modelRepo, modelFile, normalizedCustomModelPresets),
-      label: existingPreset?.label ?? buildCustomPresetLabel(modelRepo, modelFile),
-      modelRepo,
-      modelFile
-    };
-    return normalizeCustomModelPresetsForSettings(upsertCustomModelPreset(normalizedCustomModelPresets, currentPreset));
-  }, [
-    customModelFile,
-    customModelRepo,
-    modelSource,
-    normalizedCustomModelPresets,
-    selectedCustomPresetId,
-    selectedPreset
-  ]);
   const trimmedLocalModelPath = localModelPath.trim();
   const trimmedLocalMmprojPath = localMmprojPath.trim();
   const trimmedCodexModel = codexModel.trim();
@@ -390,6 +186,20 @@ export function SettingsModal({
       (modelProvider === "openai-codex" ? trimmedCodexModel && codexOauthPortValid : gemmaSettingsReady)
   );
 
+  const buildOcrSettings = () => ({
+    device: ocrDevice,
+    engine: ocrEngine,
+    ...(initialSettings.ocr.gpuCudaTag ? { gpuCudaTag: initialSettings.ocr.gpuCudaTag } : {})
+  });
+
+  const buildTranslationSettings = () => ({
+    mode: resolveTranslationMode(translationMode),
+    includeSoundEffects,
+    ocrBboxExpandXRatio: parsedOcrBboxExpandXPercent / 100,
+    ocrBboxExpandYRatio: parsedOcrBboxExpandYPercent / 100,
+    textOutlineWidthPx: parsedTextOutlineWidthPx
+  });
+
   const buildSettings = React.useCallback((): AppSettings | null => {
     if (!maxTokensValid || !ocrBboxExpandValid || !textOutlineWidthValid) {
       return null;
@@ -410,7 +220,6 @@ export function SettingsModal({
           ...(trimmedMmprojFile ? { mmprojFile: trimmedMmprojFile } : {}),
           ...(trimmedLocalModelPath ? { localModelPath: trimmedLocalModelPath } : {}),
           ...(trimmedLocalMmprojPath ? { localMmprojPath: trimmedLocalMmprojPath } : {}),
-          customModelPresets: customModelPresetsForSave,
           vramMode
         },
         codex: {
@@ -418,17 +227,8 @@ export function SettingsModal({
           reasoningEffort: codexReasoningEffort,
           oauthPort: parsedCodexOauthPort
         },
-        ocr: {
-          device: ocrDevice,
-          engine: ocrEngine
-        },
-        translation: {
-          mode: resolveTranslationMode(translationMode),
-          includeSoundEffects,
-          ocrBboxExpandXRatio: parsedOcrBboxExpandXPercent / 100,
-          ocrBboxExpandYRatio: parsedOcrBboxExpandYPercent / 100,
-          textOutlineWidthPx: parsedTextOutlineWidthPx
-        },
+        ocr: buildOcrSettings(),
+        translation: buildTranslationSettings(),
         ...(initialSettings.storage ? { storage: initialSettings.storage } : {}),
         maxTokens: parsedMaxTokens
       };
@@ -444,7 +244,6 @@ export function SettingsModal({
         ...(trimmedMmprojFile ? { mmprojFile: trimmedMmprojFile } : {}),
         ...(trimmedLocalModelPath ? { localModelPath: trimmedLocalModelPath } : {}),
         ...(trimmedLocalMmprojPath ? { localMmprojPath: trimmedLocalMmprojPath } : {}),
-        customModelPresets: customModelPresetsForSave,
         vramMode
       },
       codex: {
@@ -452,17 +251,8 @@ export function SettingsModal({
         reasoningEffort: codexReasoningEffort,
         oauthPort: codexOauthPortValid ? parsedCodexOauthPort : initialSettings.codex.oauthPort
       },
-      ocr: {
-        device: ocrDevice,
-        engine: ocrEngine
-      },
-      translation: {
-        mode: resolveTranslationMode(translationMode),
-        includeSoundEffects,
-        ocrBboxExpandXRatio: parsedOcrBboxExpandXPercent / 100,
-        ocrBboxExpandYRatio: parsedOcrBboxExpandYPercent / 100,
-        textOutlineWidthPx: parsedTextOutlineWidthPx
-      },
+      ocr: buildOcrSettings(),
+      translation: buildTranslationSettings(),
       ...(initialSettings.storage ? { storage: initialSettings.storage } : {}),
       maxTokens: parsedMaxTokens
     };
@@ -476,7 +266,6 @@ export function SettingsModal({
     trimmedMmprojFile,
     trimmedLocalModelPath,
     trimmedLocalMmprojPath,
-    customModelPresetsForSave,
     trimmedCodexModel,
     parsedCodexOauthPort,
     parsedMaxTokens,
@@ -493,6 +282,7 @@ export function SettingsModal({
     textOutlineWidthValid,
     initialSettings.codex.model,
     initialSettings.codex.oauthPort,
+    initialSettings.ocr.gpuCudaTag,
     initialSettings.storage,
     maxTokensValid
   ]);
@@ -501,37 +291,6 @@ export function SettingsModal({
     setTestState({ status: "idle", message: null, detail: null });
     setTestLogLines([]);
   }, []);
-
-  const saveCurrentCustomPreset = React.useCallback(() => {
-    const modelRepo = customModelRepo.trim();
-    const modelFile = customModelFile.trim();
-    if (!modelRepo || !modelFile) {
-      return;
-    }
-
-    const existingPreset =
-      customModelPresets.find((preset) => preset.id === selectedCustomPresetId) ??
-      customModelPresets.find((preset) => sameCustomModelPreset(preset, modelRepo, modelFile));
-    const nextPreset: GemmaCustomModelPreset = {
-      id: existingPreset?.id ?? createCustomPresetId(modelRepo, modelFile, customModelPresets),
-      label: existingPreset?.label ?? buildCustomPresetLabel(modelRepo, modelFile),
-      modelRepo,
-      modelFile
-    };
-
-    setCustomModelPresets((current) => upsertCustomModelPreset(current, nextPreset));
-    setSelectedCustomPresetId(nextPreset.id);
-    clearTestState();
-  }, [clearTestState, customModelFile, customModelPresets, customModelRepo, selectedCustomPresetId]);
-
-  const deleteSelectedCustomPreset = React.useCallback(() => {
-    if (!selectedCustomPresetId) {
-      return;
-    }
-    setCustomModelPresets((current) => current.filter((preset) => preset.id !== selectedCustomPresetId));
-    setSelectedCustomPresetId("");
-    clearTestState();
-  }, [clearTestState, selectedCustomPresetId]);
 
   const appendTestLogLine = React.useCallback((line: string) => {
     const normalized = line.trim();
@@ -634,15 +393,29 @@ export function SettingsModal({
   };
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-card settings-modal">
-        <div className="modal-header">
-          <h2>설정</h2>
-          <button className="ghost-button" onClick={onCancel} disabled={controlsBusy}>
-            닫기
-          </button>
-        </div>
-
+    <Modal
+      width="min(680px, 100%)"
+      ariaLabel="설정"
+      title="설정"
+      onClose={onCancel}
+      closeDisabled={controlsBusy}
+      footer={
+        <>
+          <Button variant="ghost" style={{ marginRight: "auto" }} onClick={onOpenLogFolder} disabled={controlsBusy}>
+            로그 폴더 열기
+          </Button>
+          <Button onClick={onReset} disabled={controlsBusy}>
+            기본값 복원
+          </Button>
+          <Button variant="ghost" onClick={onCancel} disabled={controlsBusy}>
+            취소
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={controlsBusy || !canSubmit}>
+            저장
+          </Button>
+        </>
+      }
+    >
         <section className="modal-section">
           <p className="muted-line modal-note">다음 번 번역 실행부터 적용됩니다.</p>
           <div className="settings-field-stack">
@@ -718,8 +491,8 @@ export function SettingsModal({
           </div>
 
           <div className="settings-field-stack">
-            <span>OCR 엔진</span>
-            <div className="settings-mode-group" role="tablist" aria-label="OCR 엔진">
+            <span>Paddle OCR 엔진</span>
+            <div className="settings-mode-group" role="tablist" aria-label="Paddle OCR 엔진">
               {OCR_ENGINE_OPTIONS.map((option) => (
                 <button
                   key={option.id}
@@ -751,15 +524,12 @@ export function SettingsModal({
                 setIncludeSoundEffects(event.target.checked);
               }}
             />
-            효과음/배경음 번역 포함
+            <span>효과음/의성어 번역 포함</span>
           </label>
-          <p className="muted-line modal-note">
-            끄면 말풍선 대사와 캡션 중심으로 번역하고, 의성어·효과음·배경 반응음은 무시합니다.
-          </p>
 
           <div className="settings-field-stack">
-            <span>LLM 번역 구조</span>
-            <div className="settings-preset-group" role="tablist" aria-label="LLM 번역 구조">
+            <span>번역 방식</span>
+            <div className="settings-mode-group" role="tablist" aria-label="번역 방식">
               {TRANSLATION_MODE_OPTIONS.map((option) => (
                 <button
                   key={option.id}
@@ -783,10 +553,10 @@ export function SettingsModal({
           </div>
 
           <div className="settings-field-stack">
-            <span>OCR bbox 텍스트 블록 확장</span>
+            <span>OCR bbox 후보 블록 확장</span>
             <div className="settings-number-grid">
               <label>
-                좌우 확장 (%)
+                가로 (%)
                 <input
                   type="number"
                   min={MIN_OCR_BBOX_EXPAND_PERCENT}
@@ -801,7 +571,7 @@ export function SettingsModal({
                 />
               </label>
               <label>
-                위아래 확장 (%)
+                세로 (%)
                 <input
                   type="number"
                   min={MIN_OCR_BBOX_EXPAND_PERCENT}
@@ -816,13 +586,10 @@ export function SettingsModal({
                 />
               </label>
             </div>
-            <p className="muted-line modal-note">
-              OCR 후보 bbox를 텍스트 블록으로 쓸 때 적용합니다. 기본값은 좌우 20%, 위아래 10%입니다.
-            </p>
           </div>
 
           <label>
-            기본 외곽선 두께(px)
+            텍스트 외곽선 두께 (px)
             <input
               type="number"
               min={MIN_TEXT_OUTLINE_WIDTH_PX}
@@ -836,9 +603,6 @@ export function SettingsModal({
               }}
             />
           </label>
-          <p className="muted-line modal-note">
-            새로 생성되는 텍스트 블록의 기본 외곽선 두께입니다. 개별 블록에서도 조절할 수 있습니다.
-          </p>
 
           {modelProvider === "gemma" ? (
             <>
@@ -894,30 +658,6 @@ export function SettingsModal({
               {selectedPreset === "custom" ? (
                 <>
                   <label>
-                    저장된 커스텀
-                    <select
-                      value={selectedCustomPresetId}
-                      disabled={controlsBusy || customModelPresets.length === 0}
-                      onChange={(event) => {
-                        clearTestState();
-                        const presetId = event.target.value;
-                        setSelectedCustomPresetId(presetId);
-                        const preset = customModelPresets.find((candidate) => candidate.id === presetId);
-                        if (preset) {
-                          setCustomModelRepo(preset.modelRepo);
-                          setCustomModelFile(preset.modelFile);
-                        }
-                      }}
-                    >
-                      <option value="">직접 입력</option>
-                      {customModelPresets.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
                     HF repo
                     <input
                       ref={modelRepoInputRef}
@@ -925,7 +665,6 @@ export function SettingsModal({
                       disabled={controlsBusy}
                       onChange={(event) => {
                         clearTestState();
-                        setSelectedCustomPresetId("");
                         setCustomModelRepo(event.target.value);
                       }}
                       onKeyDown={(event) => {
@@ -942,7 +681,6 @@ export function SettingsModal({
                       disabled={controlsBusy}
                       onChange={(event) => {
                         clearTestState();
-                        setSelectedCustomPresetId("");
                         setCustomModelFile(event.target.value);
                       }}
                       onKeyDown={(event) => {
@@ -952,26 +690,6 @@ export function SettingsModal({
                       }}
                     />
                   </label>
-                  <div className="settings-inline-actions">
-                    <button
-                      type="button"
-                      onClick={saveCurrentCustomPreset}
-                      disabled={controlsBusy || !customModelRepo.trim() || !customModelFile.trim()}
-                    >
-                      현재 커스텀 저장
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={deleteSelectedCustomPreset}
-                      disabled={controlsBusy || !selectedCustomPresetId}
-                    >
-                      선택 항목 삭제
-                    </button>
-                  </div>
-                  <p className="muted-line modal-note">
-                    하단 저장 버튼을 누르면 현재 커스텀도 드롭다운 목록에 함께 저장됩니다.
-                  </p>
                 </>
               ) : null}
             </>
@@ -1158,50 +876,16 @@ export function SettingsModal({
             <p className="muted-line">최대 출력 토큰은 {MIN_MAX_TOKENS} 이상 {MAX_MAX_TOKENS} 이하의 정수여야 합니다.</p>
           ) : null}
           {!ocrBboxExpandValid ? (
-            <p className="muted-line">
-              OCR bbox 확장값은 {MIN_OCR_BBOX_EXPAND_PERCENT} 이상 {MAX_OCR_BBOX_EXPAND_PERCENT} 이하의 숫자여야 합니다.
-            </p>
+            <p className="muted-line">OCR bbox 확장 비율은 {MIN_OCR_BBOX_EXPAND_PERCENT}~{MAX_OCR_BBOX_EXPAND_PERCENT}% 사이여야 합니다.</p>
           ) : null}
           {!textOutlineWidthValid ? (
             <p className="muted-line">
-              기본 외곽선 두께는 {MIN_TEXT_OUTLINE_WIDTH_PX} 이상 {MAX_TEXT_OUTLINE_WIDTH_PX} 이하의 숫자여야 합니다.
+              텍스트 외곽선 두께는 {MIN_TEXT_OUTLINE_WIDTH_PX}~{MAX_TEXT_OUTLINE_WIDTH_PX}px 사이여야 합니다.
             </p>
           ) : null}
         </section>
-
-        <div className="modal-actions settings-actions">
-          <button className="ghost-button" onClick={onOpenLogFolder} disabled={controlsBusy}>
-            로그 폴더 열기
-          </button>
-          <button onClick={onReset} disabled={controlsBusy}>
-            기본값 복원
-          </button>
-          <button onClick={onCancel} disabled={controlsBusy}>
-            취소
-          </button>
-          <button className="primary" onClick={submit} disabled={controlsBusy || !canSubmit}>
-            저장
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
-}
-
-function ratioToPercentInput(value: unknown, fallbackPercent: number): string {
-  const ratio = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(ratio)) {
-    return String(fallbackPercent);
-  }
-  return String(Math.round(ratio * 100));
-}
-
-function numberToInput(value: unknown, fallback: number): string {
-  const number = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(number)) {
-    return String(fallback);
-  }
-  return String(Math.round(number * 10) / 10);
 }
 
 function resolveTranslationMode(value: unknown): TranslationMode {
@@ -1214,102 +898,17 @@ function isValidPercent(value: number): boolean {
   return Number.isFinite(value) && value >= MIN_OCR_BBOX_EXPAND_PERCENT && value <= MAX_OCR_BBOX_EXPAND_PERCENT;
 }
 
-function resolveModelPreset(modelRepo: string, modelFile: string): ModelPresetId {
-  const trimmedModelRepo = modelRepo.trim();
-  const trimmedModelFile = modelFile.trim();
-
-  if (matchesPreset(MODEL_PRESETS.iq3s, trimmedModelRepo, trimmedModelFile)) {
-    return "iq3s";
+function ratioToPercentInput(value: unknown, fallbackPercent: number): string {
+  const ratio = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(ratio)) {
+    return String(fallbackPercent);
   }
-
-  return "custom";
+  return String(Math.round(ratio * 100));
 }
 
-function matchesPreset(
-  preset: (typeof MODEL_PRESETS)[keyof typeof MODEL_PRESETS],
-  modelRepo: string,
-  modelFile: string
-): boolean {
-  return preset.modelRepo === modelRepo && preset.modelFile === modelFile;
-}
-
-function resolveInitialCustomPresetId(
-  presets: GemmaCustomModelPreset[],
-  modelRepo: string,
-  modelFile: string
-): string {
-  const matchingPreset = presets.find((preset) => sameCustomModelPreset(preset, modelRepo.trim(), modelFile.trim()));
-  return matchingPreset?.id ?? "";
-}
-
-function normalizeCustomModelPresetsForSettings(presets: GemmaCustomModelPreset[]): GemmaCustomModelPreset[] {
-  const seen = new Set<string>();
-  return presets
-    .map((preset) => ({
-      ...preset,
-      id: preset.id.trim(),
-      label: preset.label.trim(),
-      modelRepo: preset.modelRepo.trim(),
-      modelFile: preset.modelFile.trim(),
-      mmprojRepo: preset.mmprojRepo?.trim(),
-      mmprojFile: preset.mmprojFile?.trim()
-    }))
-    .filter((preset) => {
-      if (!preset.id || !preset.modelRepo || !preset.modelFile) {
-        return false;
-      }
-      if (seen.has(preset.id)) {
-        return false;
-      }
-      seen.add(preset.id);
-      return true;
-    })
-    .map((preset) => ({
-      id: preset.id,
-      label: preset.label || buildCustomPresetLabel(preset.modelRepo, preset.modelFile),
-      modelRepo: preset.modelRepo,
-      modelFile: preset.modelFile,
-      ...(preset.mmprojRepo ? { mmprojRepo: preset.mmprojRepo } : {}),
-      ...(preset.mmprojFile ? { mmprojFile: preset.mmprojFile } : {})
-    }));
-}
-
-function sameCustomModelPreset(preset: GemmaCustomModelPreset, modelRepo: string, modelFile: string): boolean {
-  return preset.modelRepo.trim() === modelRepo.trim() && preset.modelFile.trim() === modelFile.trim();
-}
-
-function createCustomPresetId(modelRepo: string, modelFile: string, presets: GemmaCustomModelPreset[]): string {
-  const base = `${modelRepo}-${modelFile}`
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 56);
-  const fallbackBase = base || `custom-${Date.now()}`;
-  const usedIds = new Set(presets.map((preset) => preset.id));
-  let candidate = fallbackBase;
-  let suffix = 2;
-  while (usedIds.has(candidate)) {
-    candidate = `${fallbackBase}-${suffix}`;
-    suffix += 1;
-  }
-  return candidate;
-}
-
-function buildCustomPresetLabel(modelRepo: string, modelFile: string): string {
-  const repoName = modelRepo.split("/").filter(Boolean).pop() ?? modelRepo;
-  const fileName = modelFile.replace(/\.gguf$/i, "");
-  return `${repoName} / ${fileName}`.slice(0, 120);
-}
-
-function upsertCustomModelPreset(
-  presets: GemmaCustomModelPreset[],
-  nextPreset: GemmaCustomModelPreset
-): GemmaCustomModelPreset[] {
-  const existingIndex = presets.findIndex((preset) => preset.id === nextPreset.id);
-  if (existingIndex < 0) {
-    return [...presets, nextPreset];
-  }
-  return presets.map((preset, index) => (index === existingIndex ? nextPreset : preset));
+function numberToInput(value: unknown, fallback: number): string {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : String(fallback);
 }
 
 function buildTestDetail(

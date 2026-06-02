@@ -7,6 +7,7 @@ describe("overlay parser", () => {
     const raw = String.raw`
 id: 1
 type: solid
+textRole: speech
 x1: 120
 y1: 80
 x2: 280
@@ -33,6 +34,7 @@ ko: 리드
 
     expect(items).toHaveLength(2);
     expect(items[0].bbox).toEqual({ x: 120, y: 80, w: 160, h: 240 });
+    expect(items[0].textRole).toBe("ordinary");
     expect(items[0].direction).toBe("vertical");
     expect(items[0].fontSize).toBe(24);
     expect(items[0].confidence).toBe(0.83);
@@ -133,6 +135,37 @@ ko: 삭
     expect(items[0].fontSize).toBe(29);
   });
 
+  it("normalizes text roles and keeps sub-100 sound confidence below 1", () => {
+    const items = normalizeItems(parseJsonLenient(String.raw`
+id: 1
+type: nonsolid
+textRole: sfx
+x1: 120
+y1: 80
+x2: 280
+y2: 200
+confidence: 99.9
+jp: ザッ
+ko: 잣
+
+id: 2
+type: nonsolid
+textRole: caption
+x1: 320
+y1: 80
+x2: 420
+y2: 200
+confidence: 1
+jp: その日
+ko: 그날
+`));
+
+    expect(items).toHaveLength(2);
+    expect(items[0].textRole).toBe("sound");
+    expect(items[0].confidence).toBeLessThan(1);
+    expect(items[1].textRole).toBe("ordinary");
+  });
+
   it("preserves sparse model ids so OCR candidate geometry can stay locked", () => {
     const items = normalizeItems(parseJsonLenient(String.raw`
 id: 6
@@ -161,6 +194,11 @@ ko: 생긋
     const items = parseRetryItems(String.raw`
 id: 6
 type: solid
+textRole: sound
+x1: 12
+y1: 18
+x2: 88
+y2: 96
 direction: horizontal
 angle: 0
 fontSize: 22
@@ -181,7 +219,14 @@ ko: [non-text]
     expect(items).toHaveLength(2);
     expect(items[0]).toMatchObject({
       id: 6,
-      type: "solid",
+      type: "nonsolid",
+      textRole: "sound",
+      bbox: {
+        x: 12,
+        y: 18,
+        w: 76,
+        h: 78
+      },
       direction: "horizontal",
       angle: 0,
       fontSize: 22,

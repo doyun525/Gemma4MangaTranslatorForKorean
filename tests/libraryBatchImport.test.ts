@@ -3,9 +3,19 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+vi.hoisted(() => {
+  (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath = `${process.cwd()}\\resources`;
+});
+
 vi.mock("electron", () => ({
   app: {
-    isPackaged: false
+    isPackaged: false,
+    getPath: (name: string) => {
+      if (name === "exe") {
+        return process.execPath;
+      }
+      return join(process.cwd(), "tmp-electron", name);
+    }
   },
   nativeImage: {
     createFromPath: () => ({

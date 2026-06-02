@@ -8,15 +8,10 @@ export type BlockVisualStyle = {
 };
 
 export const BLOCK_VISUAL_STYLES: Record<BlockType, BlockVisualStyle> = {
-  solid: {
-    borderColor: "#22c55e00",
-    backgroundColor: "#dcfce7",
-    defaultOpacity: 0.96
-  },
   nonsolid: {
     borderColor: "#f59e0b",
     backgroundColor: "#fef3c7",
-    defaultOpacity: 0.3
+    defaultOpacity: 0.5
   }
 };
 

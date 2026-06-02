@@ -1,0 +1,250 @@
+﻿    if (!nextSettings || !canSubmit) {
+      return;
+    }
+    onSubmit(nextSettings);
+  };
+
+  const pickLocalModelFile = async () => {
+    setLocalActionBusy(true);
+    try {
+      const picked = await window.mangaApi.pickLocalModelFile();
+      if (!picked) {
+        return;
+      }
+      clearTestState();
+      setLocalModelPath(picked.modelPath);
+      if (picked.detectedMmprojPath) {
+        setLocalMmprojPath(picked.detectedMmprojPath);
+      }
+    } finally {
+      setLocalActionBusy(false);
+    }
+  };
+
+  const pickLocalMmprojFile = async () => {
+    setLocalActionBusy(true);
+    try {
+      const picked = await window.mangaApi.pickLocalMmprojFile();
+      if (!picked) {
+        return;
+      }
+      clearTestState();
+      setLocalMmprojPath(picked);
+    } finally {
+      setLocalActionBusy(false);
+    }
+  };
+
+  const runModelTest = async () => {
+    const nextSettings = buildSettings();
+    if (!nextSettings || !canSubmit || jobActive) {
+      return;
+    }
+
+    const testId = `settings-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTestLogLines(["紐⑤뜽 ?뚯뒪?몃? ?쒖옉?⑸땲??"]);
+    setTestState({
+      status: "running",
+      message: "紐⑤뜽??遺덈윭?ㅺ퀬 媛꾨떒???띿뒪???묐떟???뺤씤?섎뒗 以묒엯?덈떎...",
+      detail: "???뚯뒪?몃뒗 紐⑤뜽 濡쒕뱶? ?띿뒪???묐떟留??뺤씤?⑸땲??"
+    });
+    const unsubscribe = window.mangaApi.onModelTestEvent((event) => {
+      if (event.id !== testId) {
+        return;
+      }
+      appendTestLogLine(formatModelTestProgressLine(event));
+      setTestState((current) =>
+        current.status === "running"
+          ? {
+              status: "running",
+              message: event.progressText,
+              detail: event.detail ?? current.detail
+            }
+          : current
+      );
+    });
+    try {
+      const result = await window.mangaApi.testModelSettings(nextSettings, testId);
+      appendTestLogLine(result.ok ? "紐⑤뜽 ?뚯뒪?멸? ?꾨즺?섏뿀?듬땲??" : "紐⑤뜽 ?뚯뒪?멸? ?ㅽ뙣?덉뒿?덈떎.");
+      setTestState({
+        status: result.ok ? "success" : "error",
+        message: result.message,
+        detail: buildTestDetail(result.resolvedModelPath, result.resolvedMmprojPath, result.resolvedEndpoint)
+      });
+    } catch (error) {
+      appendTestLogLine("紐⑤뜽 ?뚯뒪???붿껌 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
+      setTestState({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+        detail: null
+      });
+    } finally {
+      unsubscribe();
+    }
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card settings-modal">
+        <div className="modal-header">
+          <h2>?ㅼ젙</h2>
+          <button className="ghost-button" onClick={onCancel} disabled={controlsBusy}>
+            ?リ린
+          </button>
+        </div>
+
+        <section className="modal-section">
+          <p className="muted-line modal-note">?ㅼ쓬 踰?踰덉뿭 ?ㅽ뻾遺???곸슜?⑸땲??</p>
+          <div className="settings-field-stack">
+            <span>踰덉뿭 ?붿쭊</span>
+            <div className="settings-mode-group" role="tablist" aria-label="踰덉뿭 ?붿쭊">
+              {MODEL_PROVIDER_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`settings-preset-button ${modelProvider === option.id ? "active" : ""}`}
+                  onClick={() => {
+                    clearTestState();
+                    setModelProvider(option.id);
+                  }}
+                  disabled={controlsBusy}
+                  aria-pressed={modelProvider === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted-line modal-note">
+              {MODEL_PROVIDER_OPTIONS.find((option) => option.id === modelProvider)?.description}
+            </p>
+          </div>
+
+          <label>
+            理쒕? 異쒕젰 ?좏겙
+            <input
+              type="number"
+              min={MIN_MAX_TOKENS}
+              max={MAX_MAX_TOKENS}
+              step={100}
+              value={maxTokens}
+              disabled={controlsBusy}
+              onChange={(event) => {
+                clearTestState();
+                setMaxTokens(event.target.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  submit();
+                }
+              }}
+            />
+          </label>
+          <p className="muted-line modal-note">
+            異쒕젰??湲몄뼱吏???섏씠吏?먯꽌 留먰뭾???꾨씫??以꾩엯?덈떎. 湲곕낯媛믪? 12000?낅땲??
+          </p>
+
+          <div className="settings-field-stack">
+            <span>Paddle OCR ?μ튂</span>
+            <div className="settings-mode-group" role="tablist" aria-label="Paddle OCR ?μ튂">
+              {OCR_DEVICE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`settings-preset-button ${ocrDevice === option.id ? "active" : ""}`}
+                  onClick={() => {
+                    clearTestState();
+                    setOcrDevice(option.id);
+                  }}
+                  disabled={controlsBusy}
+                  aria-pressed={ocrDevice === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted-line modal-note">
+              {OCR_DEVICE_OPTIONS.find((option) => option.id === ocrDevice)?.description}
+            </p>
+          </div>
+
+          <div className="settings-field-stack">
+            <span>OCR ?붿쭊</span>
+            <div className="settings-mode-group" role="tablist" aria-label="OCR ?붿쭊">
+              {OCR_ENGINE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`settings-preset-button ${ocrEngine === option.id ? "active" : ""}`}
+                  onClick={() => {
+                    clearTestState();
+                    setOcrEngine(option.id);
+                  }}
+                  disabled={controlsBusy}
+                  aria-pressed={ocrEngine === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted-line modal-note">
+              {OCR_ENGINE_OPTIONS.find((option) => option.id === ocrEngine)?.description}
+            </p>
+          </div>
+
+          <label className="settings-checkbox-row">
+            <input
+              type="checkbox"
+              checked={includeSoundEffects}
+              disabled={controlsBusy}
+              onChange={(event) => {
+                clearTestState();
+                setIncludeSoundEffects(event.target.checked);
+              }}
+            />
+            ?④낵??諛곌꼍??踰덉뿭 ?ы븿
+          </label>
+          <p className="muted-line modal-note">
+            ?꾨㈃ 留먰뭾????ъ? 罹≪뀡 以묒떖?쇰줈 踰덉뿭?섍퀬, ?섏꽦?는룻슚怨쇱쓬쨌諛곌꼍 諛섏쓳?뚯? 臾댁떆?⑸땲??
+          </p>
+
+          <div className="settings-field-stack">
+            <span>LLM 踰덉뿭 援ъ“</span>
+            <div className="settings-preset-group" role="tablist" aria-label="LLM 踰덉뿭 援ъ“">
+              {TRANSLATION_MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`settings-preset-button ${translationMode === option.id ? "active" : ""}`}
+                  onClick={() => {
+                    clearTestState();
+                    setTranslationMode(option.id);
+                  }}
+                  disabled={controlsBusy}
+                  aria-pressed={translationMode === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted-line modal-note">
+              {TRANSLATION_MODE_OPTIONS.find((option) => option.id === translationMode)?.description ??
+                TRANSLATION_MODE_OPTIONS.find((option) => option.id === DEFAULT_TRANSLATION_MODE)?.description}
+            </p>
+          </div>
+
+          <div className="settings-field-stack">
+            <span>OCR bbox ?띿뒪??釉붾줉 ?뺤옣</span>
+            <div className="settings-number-grid">
+              <label>
+                醫뚯슦 ?뺤옣 (%)
+                <input
+                  type="number"
+                  min={MIN_OCR_BBOX_EXPAND_PERCENT}
+                  max={MAX_OCR_BBOX_EXPAND_PERCENT}
+                  step={1}
+                  value={ocrBboxExpandXPercent}
+                  disabled={controlsBusy}
+                  onChange={(event) => {
+                    clearTestState();
+                    setOcrBboxExpandXPercent(event.target.value);
+                  }}

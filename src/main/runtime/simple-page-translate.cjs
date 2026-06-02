@@ -1,28 +1,79 @@
 const { spawn } = require("node:child_process");
 const { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } = require("node:fs");
-const { mkdir, readFile, rename, rm, writeFile } = require("node:fs/promises");
+const { mkdir, open, readFile, rename, rm, writeFile } = require("node:fs/promises");
 const path = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 
 const { resolveBundledServerPath } = require("./resolve-llama-runtime.cjs");
-
-const DEFAULT_MODEL_HF = "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-i1-GGUF";
-const DEFAULT_HF_FILE = "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.i1-IQ3_S.gguf";
-const DEFAULT_MMPROJ_HF = "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-GGUF";
-const DEFAULT_MMPROJ_FILE = "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.mmproj-f16.gguf";
-const DEFAULT_CODEX_MODEL = "gpt-5.5";
-const DEFAULT_CODEX_REASONING_EFFORT = "low";
-const DEFAULT_API_KEY = "local-llama-server";
-const DEFAULT_OCR_CPU_PIP_PACKAGES = ["paddlepaddle==3.3.1", "paddleocr==3.5.0", "paddlex[ocr]==3.5.2"];
-const DEFAULT_OCR_GPU_PADDLE_PACKAGE = "paddlepaddle-gpu==3.3.1";
-const DEFAULT_OCR_GPU_EXTRA_PACKAGES = ["paddleocr==3.5.0", "paddlex[ocr]==3.5.2"];
-const DEFAULT_OCR_GPU_CUDA_TAG = "cu126";
-const OCR_INSTALL_MARKER_FILE = "install-complete.json";
-const MAX_LOG_PREVIEW_LENGTH = 8000;
-const MM_PROJ_CANDIDATE_NAMES = ["mmproj-BF16.gguf", "mmproj-F16.gguf", "mmproj-F32.gguf", "mmproj.gguf"];
-const CROP_RETRY_MIN_SIDE_PX = 192;
-const CROP_RETRY_MIN_MARGIN_PX = 64;
-const CROP_RETRY_MARGIN_RATIO = 0.5;
+const {
+  CROP_RETRY_MARGIN_RATIO,
+  CROP_RETRY_MIN_MARGIN_PX,
+  CROP_RETRY_MIN_SIDE_PX,
+  DEFAULT_API_KEY,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  DEFAULT_DOWNLOAD_METADATA_TIMEOUT_MS,
+  DEFAULT_DOWNLOAD_RETRY_COUNT,
+  DEFAULT_DOWNLOAD_STALL_TIMEOUT_MS,
+  DEFAULT_HF_FILE,
+  DEFAULT_MMPROJ_FILE,
+  DEFAULT_MMPROJ_HF,
+  DEFAULT_MODEL_HF,
+  DEFAULT_OCR_BBOX_PAGE_TIMEOUT_MS,
+  DEFAULT_OCR_BBOX_TIMEOUT_MS,
+  DEFAULT_OCR_CPU_PIP_PACKAGES,
+  DEFAULT_OCR_GPU_CUDA_TAG,
+  DEFAULT_OCR_GPU_EXTRA_PACKAGES,
+  DEFAULT_OCR_GPU_PADDLE_PACKAGE,
+  HF_DOWNLOAD_CHUNK_SIZE,
+  MAX_LOG_PREVIEW_LENGTH,
+  MM_PROJ_CANDIDATE_NAMES,
+  OCR_INSTALL_MARKER_FILE,
+  PADDLE_OCR_MODEL_DOWNLOADS
+} = require("./simple-page-defaults.cjs");
+const {
+  buildSystemPrompt,
+  getOverlayPrompt,
+  PROMPT_KO_BBOX_LINES_MULTIVIEW,
+  readOcrCandidateText,
+  readPositiveInteger,
+  resolvePromptCoordinateFrame,
+  sanitizeHintLabel,
+  sanitizeOcrTextForPrompt
+} = require("./simple-page-prompts.cjs");
+const {
+  extractJsonText,
+  normalizeOcrBboxHintPayload
+} = require("./simple-page-ocr-hints.cjs");
+const {
+  clampProgressRatio,
+  createOcrBatchProgressFilePoller,
+  formatBytes,
+  formatPaddleModelFetchProgress,
+  parseOcrBatchProgressLine,
+  parsePaddleModelFetchProgress,
+  parsePipRawProgress,
+  resolveOcrBboxTimeoutMs,
+  sanitizeInstallLogLine
+} = require("./simple-page-progress.cjs");
+const {
+  isOpenAICodexProvider,
+  resolveConfiguredCodexModel,
+  resolveConfiguredCodexReasoningEffort,
+  resolveConfiguredLocalMmprojPath,
+  resolveConfiguredLocalModelPath,
+  resolveConfiguredModelFile,
+  resolveConfiguredModelRepo,
+  resolveConfiguredModelSource,
+  resolveModelProvider,
+  resolveProviderDisplayName
+} = require("./simple-page-model-config.cjs");
+const {
+  calculateOpenAIOriginalDetailSize,
+  enhanceBitmapBuffer,
+  getScaledSize,
+  mimeFromPath
+} = require("./simple-page-image-utils.cjs");
 
 function nowMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -105,9 +156,13 @@ function buildOptionSummary(options = {}) {
     codexOauthPort: options.codexOauthPort,
     translationMode: resolveTranslationMode(options),
     includeSoundEffects: shouldIncludeSoundEffects(options),
+    ocrBboxExpandXRatio: options.ocrBboxExpandXRatio,
+    ocrBboxExpandYRatio: options.ocrBboxExpandYRatio,
+    textOutlineWidthPx: options.textOutlineWidthPx,
     ocrBboxProvider: resolveOcrBboxProvider(options),
+    ocrEngine: options.ocrEngine ?? resolveOcrBboxProvider(options),
     ocrDevice: resolveOcrDevice(options),
-    ocrEngine: options.ocrEngine ?? process.env.MANGA_TRANSLATOR_OCR_ENGINE ?? null,
+    ocrGpuCudaTag: resolveOcrGpuCudaTag(options),
     ocrRuntimeDir: resolveOcrRuntimeDir(options),
     launchMode: launchTarget.launchMode,
     hfHomeDir: resolveHfHomeDir(options),
@@ -185,49 +240,6 @@ function buildEnhancedVariantFailureDetail(error, options = {}) {
     format: path.extname(options.imagePath || "").toLowerCase() || null,
     reason: "enhanced-variant-unavailable"
   };
-}
-
-function getScaledSize(width, height, maxLongSide) {
-  const longSide = Math.max(width, height);
-  if (longSide <= 0 || longSide <= maxLongSide) {
-    return { width, height };
-  }
-
-  const scale = maxLongSide / longSide;
-  return {
-    width: Math.max(1, Math.round(width * scale)),
-    height: Math.max(1, Math.round(height * scale))
-  };
-}
-
-function clampByte(value) {
-  return Math.max(0, Math.min(255, Math.round(value)));
-}
-
-function enhanceBitmapBuffer(bitmap, contrast = 1, grayscale = false) {
-  const output = Buffer.from(bitmap);
-  const translation = ((1 - contrast) / 2) * 255;
-
-  for (let offset = 0; offset < output.length; offset += 4) {
-    const blue = output[offset];
-    const green = output[offset + 1];
-    const red = output[offset + 2];
-
-    if (grayscale) {
-      const luminance = red * 0.299 + green * 0.587 + blue * 0.114;
-      const adjusted = clampByte(luminance * contrast + translation);
-      output[offset] = adjusted;
-      output[offset + 1] = adjusted;
-      output[offset + 2] = adjusted;
-      continue;
-    }
-
-    output[offset] = clampByte(blue * contrast + translation);
-    output[offset + 1] = clampByte(green * contrast + translation);
-    output[offset + 2] = clampByte(red * contrast + translation);
-  }
-
-  return output;
 }
 
 function resolveElectronNativeImage() {
@@ -615,6 +627,110 @@ async function ensureHfModelAssetsDownloaded(options = {}, launchTarget = inspec
   });
 }
 
+function collectRequiredPaddleOcrModelDownloads(options = {}, runtime = null) {
+  const runtimeDir = runtime?.runtimeDir || resolveOcrRuntimeDir(options);
+  const endpoint = String(process.env.PADDLE_PDX_HUGGING_FACE_ENDPOINT || "https://huggingface.co").replace(/\/+$/, "");
+  const tasks = [];
+  for (const model of PADDLE_OCR_MODEL_DOWNLOADS) {
+    const modelDir = resolvePaddleOcrModelCacheDir(runtimeDir, model.name);
+    for (const file of model.files) {
+      tasks.push({
+        kind: "paddle-ocr-model",
+        label: `Paddle OCR ${model.name}`,
+        repo: model.repo,
+        file,
+        url: buildHfResolveUrl(endpoint, model.repo, file),
+        destination: path.join(modelDir, safeHfRelativePath(file)),
+        progressPhase: "ocr_downloading",
+        progressTitle: "Paddle OCR 모델 파일 다운로드 중",
+        completeTitle: "Paddle OCR 모델 파일 다운로드 완료"
+      });
+    }
+  }
+  return tasks;
+}
+
+async function ensurePaddleOcrModelAssetsDownloaded(options = {}, runtime = null) {
+  if (isTruthy(process.env.MANGA_TRANSLATOR_SKIP_PADDLE_MODEL_PREFETCH ?? "false")) {
+    return;
+  }
+
+  const allTasks = collectRequiredPaddleOcrModelDownloads(options, runtime);
+  const pending = [];
+  const totals = new Map();
+  let knownTotalBytes = 0;
+
+  for (const task of allTasks) {
+    const totalBytes = await probeContentLength(task.url, options.abortSignal);
+    const existingSize = getFileSize(task.destination);
+    if (totalBytes > 0 && existingSize === totalBytes) {
+      continue;
+    }
+    if (totalBytes <= 0 && existingSize > 0) {
+      continue;
+    }
+    if (existingSize > 0 && totalBytes > 0 && existingSize !== totalBytes) {
+      await rm(task.destination, { force: true }).catch(() => {});
+    }
+    pending.push(task);
+    if (totalBytes > 0) {
+      totals.set(task.destination, totalBytes);
+      knownTotalBytes += totalBytes;
+    }
+  }
+
+  if (pending.length === 0) {
+    return;
+  }
+
+  const hasKnownAggregate = knownTotalBytes > 0 && totals.size === pending.length;
+  let completedBytes = 0;
+  emitRuntimeProgress(options, "ocr_downloading", "Paddle OCR 모델 파일 다운로드 중", `${pending.length}개 파일 준비`, {
+    progressMode: hasKnownAggregate ? "determinate" : "log-only",
+    progressPercent: hasKnownAggregate ? 0 : undefined,
+    progressBytes: 0,
+    progressTotalBytes: hasKnownAggregate ? knownTotalBytes : undefined,
+    installLogLine: `Paddle OCR 모델 다운로드 대상 ${pending.length}개 파일을 확인했습니다.`
+  });
+
+  for (const task of pending) {
+    const totalBytes = totals.get(task.destination) || 0;
+    await downloadHfFileWithProgress(task, options, {
+      totalBytes,
+      knownAggregateBytes: hasKnownAggregate ? knownTotalBytes : 0,
+      completedBytes,
+      onComplete: (bytesWritten) => {
+        completedBytes += hasKnownAggregate ? totalBytes : bytesWritten;
+      }
+    });
+  }
+
+  emitRuntimeProgress(options, "ocr_downloading", "Paddle OCR 모델 파일 다운로드 완료", "모든 Paddle OCR 모델 파일을 로컬 캐시에 저장했습니다.", {
+    progressMode: hasKnownAggregate ? "determinate" : "log-only",
+    progressPercent: hasKnownAggregate ? 1 : undefined,
+    progressBytes: hasKnownAggregate ? knownTotalBytes : undefined,
+    progressTotalBytes: hasKnownAggregate ? knownTotalBytes : undefined,
+    installLogLine: "Paddle OCR 모델 파일 다운로드가 완료되었습니다."
+  });
+}
+
+function resolvePaddleOcrModelCacheDir(runtimeDir, modelName) {
+  return path.join(runtimeDir, "paddlex-cache", "official_models", modelName);
+}
+
+function buildHfResolveUrl(endpoint, repo, file) {
+  const filePath = String(file ?? "").replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/");
+  return `${String(endpoint || "https://huggingface.co").replace(/\/+$/, "")}/${repo}/resolve/main/${filePath}`;
+}
+
+function getFileSize(filePath) {
+  try {
+    return statSync(filePath).size;
+  } catch {
+    return 0;
+  }
+}
+
 function isUsableFile(filePath) {
   try {
     return Boolean(filePath) && statSync(filePath).isFile() && statSync(filePath).size > 0;
@@ -624,57 +740,266 @@ function isUsableFile(filePath) {
 }
 
 async function probeContentLength(url, signal) {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+  const timeoutMs = readPositiveInteger(process.env.MANGA_TRANSLATOR_DOWNLOAD_METADATA_TIMEOUT_MS) || DEFAULT_DOWNLOAD_METADATA_TIMEOUT_MS;
+  const linked = createLinkedAbortController(signal);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    linked.controller.abort();
+  }, timeoutMs);
   try {
-    const response = await fetch(url, { method: "HEAD", signal });
+    const response = await fetch(url, { method: "HEAD", signal: linked.controller.signal });
     if (!response.ok) {
       return 0;
     }
     return readContentLength(response);
   } catch {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    if (timedOut) {
+      return 0;
+    }
     return 0;
+  } finally {
+    clearTimeout(timeout);
+    linked.cleanup();
   }
 }
 
 async function downloadHfFileWithProgress(task, options = {}, progress = {}) {
+  const maxAttempts = resolveDownloadRetryCount();
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await downloadHfFileWithProgressAttempt(task, options, progress, { attempt, maxAttempts });
+    } catch (error) {
+      if (options.abortSignal?.aborted || isAbortError(error)) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt >= maxAttempts) {
+        break;
+      }
+      emitDownloadRetryProgress(options, task, error, attempt + 1, maxAttempts);
+      await delay(Math.min(30000, 1000 * 2 ** (attempt - 1)), undefined, { signal: options.abortSignal });
+    }
+  }
+  throw lastError || createDetailedError(`${task.label} 다운로드에 실패했습니다.`, { url: task.url, file: task.file });
+}
+
+async function downloadHfFileWithProgressAttempt(task, options = {}, progress = {}, attemptState = {}) {
   const partPath = `${task.destination}.part`;
   await mkdir(path.dirname(task.destination), { recursive: true });
   await rm(partPath, { force: true });
 
-  emitRuntimeProgress(options, "model_downloading", "Gemma 모델 다운로드 중", `${task.label}: ${task.file}`, {
+  emitRuntimeProgress(options, task.progressPhase || "model_downloading", resolveDownloadProgressTitle(task, false), `${task.label}: ${task.file}`, {
     progressMode: progress.knownAggregateBytes || progress.totalBytes ? "determinate" : "log-only",
     progressPercent: progress.knownAggregateBytes ? progress.completedBytes / progress.knownAggregateBytes : progress.totalBytes ? 0 : undefined,
     progressBytes: progress.knownAggregateBytes ? progress.completedBytes : progress.totalBytes ? 0 : undefined,
     progressTotalBytes: progress.knownAggregateBytes || progress.totalBytes || undefined,
-    installLogLine: `${task.label} 다운로드 시작: ${task.file}`
+    installLogLine: attemptState.attempt > 1
+      ? `${task.label} 다운로드 재시도 ${attemptState.attempt}/${attemptState.maxAttempts}: ${task.file}`
+      : `${task.label} 다운로드 시작: ${task.file}`
   });
 
-  const response = await fetch(task.url, { signal: options.abortSignal });
-  if (!response.ok || !response.body) {
-    throw createDetailedError(`${task.label} 다운로드에 실패했습니다 (${response.status}).`, {
-      status: response.status,
-      statusText: response.statusText,
-      url: task.url,
-      file: task.file
-    });
-  }
-
-  const totalBytes = progress.totalBytes || readContentLength(response);
-  const knownAggregateBytes = progress.knownAggregateBytes || 0;
-  const reader = response.body.getReader();
-  const writer = createWriteStream(partPath, { flags: "wx" });
-  let receivedBytes = 0;
-  let lastEmitAt = 0;
   const startedAt = Date.now();
+  const totalBytes = progress.totalBytes || 0;
+  const knownAggregateBytes = progress.knownAggregateBytes || 0;
 
   try {
+    const receivedBytes = totalBytes > 0
+      ? await downloadHfFileByRanges(task, options, progress, partPath, totalBytes, startedAt)
+      : await downloadHfFileByStream(task, options, progress, partPath, startedAt);
+    await rm(task.destination, { force: true });
+    await rename(partPath, task.destination);
+    progress.onComplete?.(receivedBytes);
+    emitHfDownloadProgress(options, task, {
+      receivedBytes,
+      totalBytes,
+      knownAggregateBytes,
+      aggregateCompletedBytes: progress.completedBytes || 0,
+      startedAt,
+      completed: true
+    });
+  } catch (error) {
+    await rm(partPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function downloadHfFileByRanges(task, options, progress, partPath, totalBytes, startedAt) {
+  let file = null;
+  try {
+    file = await open(partPath, "w");
+    await file.truncate(totalBytes);
+    const knownAggregateBytes = progress.knownAggregateBytes || 0;
+    let receivedBytes = 0;
+    let lastEmitAt = 0;
+
+    for (let start = 0; start < totalBytes; start += HF_DOWNLOAD_CHUNK_SIZE) {
+      const end = Math.min(totalBytes - 1, start + HF_DOWNLOAD_CHUNK_SIZE - 1);
+      let chunk = null;
+      try {
+        chunk = await fetchRangeBufferWithRetry(task, options, start, end);
+      } catch (error) {
+        if (error?.rangeUnsupported && start === 0) {
+          await file.close();
+          file = null;
+          await rm(partPath, { force: true }).catch(() => {});
+          return await downloadHfFileByStream(task, options, progress, partPath, startedAt);
+        }
+        throw error;
+      }
+      const expectedLength = end - start + 1;
+      if (chunk.length !== expectedLength) {
+        throw createDetailedError(`${task.label} 다운로드 조각 크기가 올바르지 않습니다.`, {
+          url: task.url,
+          file: task.file,
+          rangeStart: start,
+          rangeEnd: end,
+          expectedLength,
+          receivedLength: chunk.length
+        });
+      }
+      await file.write(chunk, 0, chunk.length, start);
+      receivedBytes += chunk.length;
+      const now = Date.now();
+      if (now - lastEmitAt > 500 || receivedBytes >= totalBytes) {
+        lastEmitAt = now;
+        emitHfDownloadProgress(options, task, {
+          receivedBytes,
+          totalBytes,
+          knownAggregateBytes,
+          aggregateCompletedBytes: progress.completedBytes || 0,
+          startedAt
+        });
+      }
+    }
+    return receivedBytes;
+  } finally {
+    if (file) {
+      await file.close().catch(() => {});
+    }
+  }
+}
+
+async function fetchRangeBufferWithRetry(task, options, start, end) {
+  const maxAttempts = resolveDownloadRetryCount();
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fetchRangeBuffer(task, options, start, end);
+    } catch (error) {
+      if (options.abortSignal?.aborted || isAbortError(error) || error?.rangeUnsupported) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt >= maxAttempts) {
+        break;
+      }
+      emitDownloadRetryProgress(options, task, error, attempt + 1, maxAttempts, `bytes=${start}-${end}`);
+      await delay(Math.min(30000, 1000 * 2 ** (attempt - 1)), undefined, { signal: options.abortSignal });
+    }
+  }
+  throw lastError || createDetailedError(`${task.label} 다운로드 조각에 실패했습니다.`, { url: task.url, file: task.file, rangeStart: start, rangeEnd: end });
+}
+
+async function fetchRangeBuffer(task, options, start, end) {
+  const range = `bytes=${start}-${end}`;
+  const stallTimeoutMs = resolveDownloadStallTimeoutMs();
+  const linked = createLinkedAbortController(options.abortSignal);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    linked.controller.abort();
+  }, stallTimeoutMs);
+  try {
+    const response = await fetch(task.url, {
+      headers: { Range: range },
+      signal: linked.controller.signal
+    });
+    if (response.status === 200) {
+      throw createDetailedError(`${task.label} 서버가 범위 다운로드를 지원하지 않습니다.`, {
+        rangeUnsupported: true,
+        status: response.status,
+        url: task.url,
+        file: task.file
+      });
+    }
+    if (response.status !== 206 || !response.ok) {
+      throw createDetailedError(`${task.label} 다운로드 조각에 실패했습니다 (${response.status}).`, {
+        status: response.status,
+        statusText: response.statusText,
+        url: task.url,
+        file: task.file,
+        range
+      });
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    if (timedOut) {
+      throw createDetailedError(`${task.label} 다운로드가 ${Math.round(stallTimeoutMs / 1000)}초 동안 응답하지 않았습니다.`, {
+        url: task.url,
+        file: task.file,
+        range,
+        stallTimeoutMs
+      }, error);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    linked.cleanup();
+  }
+}
+
+async function downloadHfFileByStream(task, options, progress, partPath, startedAt) {
+  const stallTimeoutMs = resolveDownloadStallTimeoutMs();
+  const linked = createLinkedAbortController(options.abortSignal);
+  let timedOut = false;
+  let timeout = null;
+  const resetTimeout = () => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    timeout = setTimeout(() => {
+      timedOut = true;
+      linked.controller.abort();
+    }, stallTimeoutMs);
+  };
+  resetTimeout();
+
+  const writer = createWriteStream(partPath, { flags: "wx" });
+  try {
+    const response = await fetch(task.url, { signal: linked.controller.signal });
+    if (!response.ok || !response.body) {
+      throw createDetailedError(`${task.label} 다운로드에 실패했습니다 (${response.status}).`, {
+        status: response.status,
+        statusText: response.statusText,
+        url: task.url,
+        file: task.file
+      });
+    }
+
+    const totalBytes = progress.totalBytes || readContentLength(response);
+    const knownAggregateBytes = progress.knownAggregateBytes || 0;
+    const reader = response.body.getReader();
+    let receivedBytes = 0;
+    let lastEmitAt = 0;
+
     while (true) {
       if (options.abortSignal?.aborted) {
         throw createAbortError();
       }
+      resetTimeout();
       const { done, value } = await reader.read();
       if (done) {
         break;
       }
+      resetTimeout();
       await writeStreamChunk(writer, Buffer.from(value));
       receivedBytes += value.byteLength;
       const now = Date.now();
@@ -690,22 +1015,31 @@ async function downloadHfFileWithProgress(task, options = {}, progress = {}) {
       }
     }
     await finishWriteStream(writer);
-    await rm(task.destination, { force: true });
-    await rename(partPath, task.destination);
-    progress.onComplete?.(receivedBytes);
-    emitHfDownloadProgress(options, task, {
-      receivedBytes,
-      totalBytes,
-      knownAggregateBytes,
-      aggregateCompletedBytes: progress.completedBytes || 0,
-      startedAt,
-      completed: true
-    });
+    return receivedBytes;
   } catch (error) {
     writer.destroy();
-    await rm(partPath, { force: true }).catch(() => {});
+    if (timedOut) {
+      throw createDetailedError(`${task.label} 다운로드가 ${Math.round(stallTimeoutMs / 1000)}초 동안 응답하지 않았습니다.`, {
+        url: task.url,
+        file: task.file,
+        stallTimeoutMs
+      }, error);
+    }
     throw error;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    linked.cleanup();
   }
+}
+
+function emitDownloadRetryProgress(options, task, error, nextAttempt, maxAttempts, range = "") {
+  const suffix = range ? ` (${range})` : "";
+  emitRuntimeProgress(options, task.progressPhase || "model_downloading", resolveDownloadProgressTitle(task, false), `${task.label}: ${task.file}`, {
+    progressMode: "log-only",
+    installLogLine: `${task.label} 다운로드 재시도 ${nextAttempt}/${maxAttempts}${suffix}: ${error instanceof Error ? error.message : String(error)}`
+  });
 }
 
 function emitHfDownloadProgress(options, task, state) {
@@ -724,7 +1058,7 @@ function emitHfDownloadProgress(options, task, state) {
   const fileProgress = state.totalBytes
     ? `${formatBytes(state.receivedBytes)} / ${formatBytes(state.totalBytes)}`
     : `${formatBytes(state.receivedBytes)} 받음`;
-  emitRuntimeProgress(options, "model_downloading", state.completed ? "Gemma 모델 다운로드 완료" : "Gemma 모델 다운로드 중", `${task.label}: ${task.file}`, {
+  emitRuntimeProgress(options, task.progressPhase || "model_downloading", resolveDownloadProgressTitle(task, Boolean(state.completed)), `${task.label}: ${task.file}`, {
     progressMode: knownAggregateBytes || state.totalBytes ? "determinate" : "log-only",
     progressPercent,
     progressBytes: aggregateBytes ?? fileBytes,
@@ -734,6 +1068,39 @@ function emitHfDownloadProgress(options, task, state) {
       ? `${task.label} 다운로드 완료: ${task.file} (${fileProgress})`
       : `${task.label} 다운로드 중: ${task.file} (${fileProgress})`
   });
+}
+
+function resolveDownloadProgressTitle(task, completed) {
+  if (completed) {
+    return task.completeTitle || `${task.label} 다운로드 완료`;
+  }
+  return task.progressTitle || `${task.label} 다운로드 중`;
+}
+
+function resolveDownloadRetryCount() {
+  return readPositiveInteger(process.env.MANGA_TRANSLATOR_DOWNLOAD_RETRY_COUNT ?? process.env.MANGA_TRANSLATOR_DOWNLOAD_RETRIES) || DEFAULT_DOWNLOAD_RETRY_COUNT;
+}
+
+function resolveDownloadStallTimeoutMs() {
+  return readPositiveInteger(process.env.MANGA_TRANSLATOR_DOWNLOAD_STALL_TIMEOUT_MS) || DEFAULT_DOWNLOAD_STALL_TIMEOUT_MS;
+}
+
+function createLinkedAbortController(parentSignal) {
+  const controller = new AbortController();
+  if (parentSignal?.aborted) {
+    controller.abort();
+    return { controller, cleanup: () => {} };
+  }
+  const onAbort = () => controller.abort();
+  parentSignal?.addEventListener?.("abort", onAbort, { once: true });
+  return {
+    controller,
+    cleanup: () => parentSignal?.removeEventListener?.("abort", onAbort)
+  };
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
 }
 
 function readContentLength(response) {
@@ -789,44 +1156,6 @@ function resolveCachedConfiguredDraftModelPath(options = {}) {
     }
   }
   return findNamedFile(repoDir, file);
-}
-
-function resolveConfiguredModelSource(options = {}) {
-  return String(options.modelSource ?? "").trim() === "local" ? "local" : "huggingface";
-}
-
-function resolveModelProvider(options = {}) {
-  return String(options.modelProvider ?? "").trim() === "openai-codex" ? "openai-codex" : "gemma";
-}
-
-function isOpenAICodexProvider(options = {}) {
-  return resolveModelProvider(options) === "openai-codex";
-}
-
-function resolveProviderDisplayName(options = {}) {
-  return isOpenAICodexProvider(options) ? "OpenAI Codex" : "Gemma";
-}
-
-function resolveConfiguredCodexModel(options = {}) {
-  return String(options.codexModel ?? process.env.MANGA_TRANSLATOR_CODEX_MODEL ?? "").trim() || DEFAULT_CODEX_MODEL;
-}
-
-function resolveConfiguredCodexReasoningEffort(options = {}) {
-  const value = String(process.env.MANGA_TRANSLATOR_CODEX_REASONING_EFFORT ?? options.codexReasoningEffort ?? "").trim();
-  if (value === "minimal") {
-    return "low";
-  }
-  return ["none", "low", "medium", "high", "xhigh"].includes(value) ? value : DEFAULT_CODEX_REASONING_EFFORT;
-}
-
-function resolveConfiguredLocalModelPath(options = {}) {
-  const value = String(options.localModelPath ?? "").trim();
-  return value ? path.resolve(value) : null;
-}
-
-function resolveConfiguredLocalMmprojPath(options = {}) {
-  const value = String(options.localMmprojPath ?? "").trim();
-  return value ? path.resolve(value) : null;
 }
 
 function resolveCachedModelAssets(options = {}) {
@@ -988,477 +1317,6 @@ function isModelCached(options = {}) {
   return launchTarget.launchMode === "cached-hf" && !launchTarget.requiresDownload;
 }
 
-const OVERLAY_OUTPUT_SCHEMA = [
-  "id: 1",
-  "type: solid",
-  "x1: 120",
-  "y1: 80",
-  "x2: 280",
-  "y2: 320",
-  "direction: horizontal",
-  "angle: 0",
-  "fontSize: 28",
-  "confidence: 0.86",
-  "jp: 馬鹿者… 無理をするな",
-  "ko: 바보 같은 녀석… 무리하지 마라."
-].join("\n");
-
-const OVERLAY_PROMPT_SECTIONS = [
-  [
-    "Task",
-    "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English.",
-    "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page.",
-    "Detect every visible Japanese or English text group and translate it into concise Korean.",
-    "Scan the entire page before writing records; do not stop after the first obvious text.",
-    "First identify the exact source glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
-    "Before reading dialogue text, segment the visible speech balloons themselves. Each distinct balloon lobe and each separated dialogue text cluster becomes a separate dialogue record.",
-    "Only output real Japanese or English text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
-  ],
-  [
-    "Output",
-    "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
-    "Use exactly these keys, one per line: id, type, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.",
-    "Do not blindly copy the example values. Estimate fontSize and direction from the actual glyphs in Image 1.",
-    "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese or English text, correctly read, correctly typed, and correctly translated.",
-    "Use confidence below 0.72 when the crop is hard to read, partly clipped, possibly decorative, or the translation may be uncertain.",
-    "The jp field stores the original source text even when the source language is English. If jp has multiple visible source lines, put every readable source line in jp. Continuation lines after jp: belong to jp until the ko: key.",
-    "The ko field MUST be Korean written in Hangul. Never write English, Chinese, romaji, pinyin, or source-language text in ko except unavoidable names, numbers, or short symbols.",
-    "If you are unsure, still write the best concise Korean translation in ko. Do not copy jp into ko and do not translate ko into English.",
-    "Write ko as natural Korean for horizontal reading. Do not mirror source line breaks; use commas or short Korean phrases unless a real list or dialogue pause needs a line break.",
-    "When the Korean translation would be too long for the bbox, insert natural Korean line breaks inside ko so it fits the same visual text area. Prefer 1-3 short lines for dialogue and captions.",
-    "For OCR candidate records, use that candidate's x1, y1, x2, y2 rectangle as the available text box when deciding ko line breaks.",
-    "If the entire jp or ko would be only [?], skip that record instead of outputting an unreadable placeholder.",
-    "Put one blank line between records.",
-    "Example:",
-    OVERLAY_OUTPUT_SCHEMA
-  ],
-  [
-    "Geometry",
-    "Coordinates are integers in the coordinate frame described above, with top-left origin.",
-    "x1, y1, x2, y2 describe the tight rectangle corners of the visible source glyph ink and its outline.",
-    "For each item, first find the four extremes of the complete jp text: leftmost visible glyph/outline pixel, topmost pixel, rightmost pixel, and bottommost pixel. Then output x1 = left, y1 = top, x2 = right, y2 = bottom.",
-    "The rectangle must cover every visible stroke, outline, dakuten mark, punctuation mark, small kana, long vowel mark, and trailing kana belonging to jp.",
-    "A tight rectangle may still have a tiny 1-3 px safety margin around glyph ink; missing any stroke outside the box is worse than including a hair of surrounding paper.",
-    "For vertical Japanese text, the rectangle should cover the union of all vertical glyph columns, from the rightmost visible stroke to the leftmost visible stroke and from the topmost glyph to the bottommost punctuation.",
-    "For multi-column vertical text, do not box only the first column, center column, or top half. The bbox is invalid if any character from jp would remain outside x1..x2 or y1..y2.",
-    "For one or two vertical text columns, keep w close to the actual glyph-column width, but never make it narrower than the full visible strokes.",
-    "Never include the whole speech bubble, caption plate, panel, background art, motion lines, or blank margin.",
-    "Never enlarge, shift, or reshape the rectangle to make Korean easier to fit.",
-    "fontSize is the apparent source glyph size in Image 1 pixels.",
-    "fontSize is the height of one normal full-size source character, not the Korean overlay size and not the example default.",
-    "For mixed handwriting, use the main readable glyph size; do not reduce fontSize because small furigana, punctuation, or thin strokes are present.",
-    "direction is the original source glyph writing direction: horizontal or vertical. This is about the source text, not the Korean rendering.",
-    "angle is the visible glyph slant in degrees from -30 to 30. Use 0 for upright text.",
-    "Before final output, mentally fill each bbox with translucent color: no source glyph from jp should remain visible outside that filled area.",
-    "Then check tightness: if the filled area covers large blank bubble paper or caption-box padding on any side, redraw the bbox tighter around the glyph ink.",
-    "Then check placement: the center of the bbox must lie on or very near the jp glyph ink cluster, not on adjacent background art or empty panel space.",
-    "Decorative hearts, bubble tails, panel borders, box borders, background textures, and motion effects are not source glyph ink."
-  ],
-  [
-    "Segmentation",
-    "Each speech bubble is one dialogue item. Adjacent or touching speech bubbles must stay separate.",
-    "If two white balloon lobes touch, overlap, stack vertically, or connect through a narrow neck, still treat them as separate dialogue items.",
-    "If one visible outline contains upper and lower lobes with a narrow waist, large blank gap, or two separate text clusters, split it into one record per lobe/text cluster.",
-    "Do not create one tall dialogue bbox spanning stacked upper/lower bubbles.",
-    "Do not merge two speech bubbles just because the sentence continues across them; split jp and ko by the visible balloon/lobe that contains each text group.",
-    "Inside one speech bubble, group all source glyph lines from that same bubble into one item.",
-    "Process panels and bubbles exhaustively from top to bottom and right to left.",
-    "For captions and narration boxes, box only the printed glyphs, not the surrounding box.",
-    "For SFX, box only the sound-effect glyph strokes and their visible outline, not speed lines or impact effects.",
-    "For long horizontal SFX, include the entire sound from first glyph through final kana, including stretched lines, detached outline tips, and the last small/isolated character.",
-    "For outlined SFX, the bbox follows the outermost visible contour of the outline, not only the dark center stroke.",
-    "SFX is often gray, slanted, outlined, partly behind characters, or outside OCR candidates. Do a separate SFX pass after dialogue/captions and add every clear kana sound effect.",
-    "Do not invent SFX from vertical panel trim, furniture lines, wall patterns, or isolated non-character strokes.",
-    "Include meaningful short interjections, names, captions, and SFX."
-  ],
-  [
-    "Rendering hints",
-    "type is one of solid or nonsolid.",
-    "Use type solid only when the source glyphs sit on a plain, flat, single-color speech-bubble or caption background where an opaque Korean text box is appropriate.",
-    "Use type nonsolid when the source glyphs sit on artwork, screentone, gradient, texture, transparent or gray bubble fill, SFX lettering, labels, handwriting, or any uncertain/mixed background.",
-    "If unsure whether the background is truly flat and single-color, choose nonsolid.",
-    "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
-    "For sound-effect or reaction lettering, translate the visual sound/reaction text itself, not the character's motion or the scene description.",
-    "Use angle 0 for ordinary upright speech and captions; use a nonzero angle only when the source glyphs are visibly slanted.",
-    "Keep Korean short enough for an on-image overlay while preserving meaning.",
-    "For handwritten diagrams and search-word lists, translate the whole note as one compact Korean phrase or comma-separated list when possible.",
-    "If OCR is uncertain, write [?] only for the uncertain fragment and still output the item."
-  ]
-];
-
-const PROMPT_KO_BBOX_LINES_MULTIVIEW = buildOverlayPrompt();
-
-function buildSystemPrompt(options = {}) {
-  const lines = [
-    "너는 만화 OCR 및 번역 엔진이다. 모든 번역 결과는 반드시 한국어 한글로 작성한다.",
-    "ko 필드에는 영어, 중국어, 일본어, 로마자, 병음을 쓰지 않는다. ko는 한국어 번역문이어야 한다.",
-    "You are an OCR and manga-translation engine.",
-    "Translate all Japanese and English source text into natural Korean.",
-    "Every ko field must be Korean Hangul. Never answer ko in English, Chinese, Japanese, romaji, or pinyin.",
-    "Return only the machine-readable record format requested by the user prompt.",
-    "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
-    "Never merge separate speech bubbles, including touching or stacked balloon lobes."
-  ];
-
-  if (!shouldIncludeSoundEffects(options)) {
-    lines.push(
-      "Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX. Translate dialogue, narration captions, and readable UI/sign text only."
-    );
-  } else {
-    lines.push(
-      "For SFX records, output bare Korean effect lettering only; do not wrap it in parentheses/brackets/quotes or turn it into a stage direction."
-    );
-  }
-
-  if (options.regionCropMode) {
-    lines.push(
-      "Selected-region mode: group by visual text container, not by line or column. One speech bubble or one caption plate is one item even when the source text is split across multiple vertical columns or lines."
-    );
-  }
-
-  return lines.join("\n\n");
-}
-
-function buildOverlayPrompt(options = {}, imageVariants = []) {
-  const sections = OVERLAY_PROMPT_SECTIONS.map(([title, ...lines]) => [title, ...lines]);
-  applySoundEffectPreference(sections, options);
-  sections[0] = buildTaskSection(options, imageVariants);
-  const regionCropSection = buildRegionCropSection(options);
-  if (regionCropSection.length > 1) {
-    sections.splice(1, 0, regionCropSection);
-  }
-  const coordinateSection = buildCoordinateCalibrationSection(options, imageVariants);
-  if (coordinateSection.length > 1) {
-    sections.splice(2, 0, coordinateSection);
-  }
-  const ocrHintSection = buildOcrBboxHintSection(options, imageVariants);
-  if (ocrHintSection.length > 1) {
-    const coordinateIndex = sections.findIndex((section) => section[0] === "Coordinate calibration");
-    sections.splice(coordinateIndex === -1 ? 2 : coordinateIndex + 1, 0, ocrHintSection);
-  }
-
-  return sections
-    .map(([title, ...lines]) => [`# ${title}`, ...lines].join("\n"))
-    .join("\n\n");
-}
-
-function getOverlayPrompt(options = {}, imageVariants = []) {
-  return buildOverlayPrompt(options, imageVariants);
-}
-
-function shouldIncludeSoundEffects(options = {}) {
-  return options.includeSoundEffects !== false;
-}
-
-function applySoundEffectPreference(sections, options = {}) {
-  if (shouldIncludeSoundEffects(options)) {
-    return;
-  }
-
-  const segmentation = sections.find((section) => section[0] === "Segmentation");
-  if (segmentation) {
-    const kept = segmentation.filter((line, index) => index === 0 || !/\bSFX\b|sound-effect|kana sound effect/i.test(line));
-    kept.push(
-      "Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX, even when they are readable.",
-      "Include dialogue in speech bubbles, narration captions, signs, labels, and UI text when they carry semantic meaning."
-    );
-    segmentation.splice(0, segmentation.length, ...kept);
-  }
-
-  const renderingHints = sections.find((section) => section[0] === "Rendering hints");
-  if (renderingHints) {
-    const kept = renderingHints.filter((line, index) => index === 0 || !/\bSFX\b|sound-effect|reaction lettering/i.test(line));
-    kept.push("When sound-effect or reaction lettering is present, ignore it instead of translating it.");
-    renderingHints.splice(0, renderingHints.length, ...kept);
-  }
-}
-
-function buildTaskSection(options = {}, imageVariants = []) {
-  const hasAssistImages = imageVariants.length > 1;
-  const regionCropMode = Boolean(options.regionCropMode);
-  const textOnlyMode = !shouldSendInitialImages(options);
-  return [
-    "Task",
-    "중요: 모든 번역 결과는 반드시 한국어 한글로 작성한다. ko 필드에는 영어, 중국어, 일본어, 로마자, 병음을 쓰지 않는다.",
-    textOnlyMode
-      ? "You are given OCR candidate records from a manga page. No image is included in this request."
-      : hasAssistImages
-      ? "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English."
-      : regionCropMode
-        ? "You are given one user-selected crop from a manga page. Source text may be Japanese, English, or mixed Japanese/English."
-        : "You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.",
-    textOnlyMode
-      ? "Use the OCR text and bbox candidates as the only source of evidence."
-      : hasAssistImages
-      ? "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page."
-      : regionCropMode
-        ? "Image 1 is the coordinate-authority selected crop."
-        : "Image 1 is the coordinate-authority full page.",
-    "Detect every visible Japanese or English text group and translate it into concise Korean.",
-    "일본어/영어 원문을 모두 자연스러운 한국어로 번역한다. ko: 뒤에는 반드시 한글 한국어 문장만 쓴다.",
-    shouldIncludeSoundEffects(options)
-      ? "Include dialogue, narration captions, meaningful labels/signs, and sound-effect lettering."
-      : "Translate dialogue, narration captions, and meaningful labels/signs only. Do not output sound effects, background sound lettering, reaction lettering, or decorative SFX.",
-    "Scan the entire page before writing records; do not stop after the first obvious text.",
-    "First identify the exact source glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
-    "Before reading dialogue text, segment the visible speech balloons themselves. Each distinct balloon lobe and each separated dialogue text cluster becomes a separate dialogue record.",
-    "Only output real Japanese or English text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
-  ];
-}
-
-function buildRegionCropSection(options = {}) {
-  if (!options.regionCropMode) {
-    return [];
-  }
-
-  return [
-    "Selected region grouping",
-    shouldIncludeSoundEffects(options)
-      ? "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or SFX inside it."
-      : "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or ignored SFX inside it.",
-    shouldIncludeSoundEffects(options)
-      ? "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate containers: separate speech bubbles/lobes, separate caption plates, or separate SFX glyph groups."
-      : "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate dialogue or caption containers; ignore SFX glyph groups.",
-    "If the crop contains one speech bubble or one caption plate, output exactly one record for all readable Japanese or English text in that container.",
-    "Inside one speech bubble, never split by source text column, text line, word, sentence fragment, punctuation gap, or line break.",
-    "For vertical dialogue in one bubble, jp must include all columns in natural Japanese reading order, and ko must be one coherent Korean translation for that bubble.",
-    "Only split a dialogue item when there is a visible separate speech bubble/lobe or clearly separate dialogue container, not merely because columns are separated by blank paper.",
-    "The bbox for that one record should tightly cover the union of all visible source glyph ink belonging to the same bubble/caption, not the whole bubble paper."
-  ];
-}
-
-function buildCoordinateCalibrationSection(options = {}, imageVariants = []) {
-  const originalWidth = readPositiveInteger(options.imageWidth);
-  const originalHeight = readPositiveInteger(options.imageHeight);
-  const geometryVariant = imageVariants.find((variant) => variant.role === "openai-vision") || imageVariants[0];
-  const sentWidth = readPositiveInteger(geometryVariant?.width);
-  const sentHeight = readPositiveInteger(geometryVariant?.height);
-  const coordinateFrame = resolvePromptCoordinateFrame(options, imageVariants);
-  if (!originalWidth || !originalHeight) {
-    return [];
-  }
-
-  const lines = ["Coordinate calibration", `The original page is ${originalWidth}x${originalHeight} px.`];
-
-  if (coordinateFrame.space === "pixels") {
-    lines.push(
-      `Image 1 was prepared before the API call to match the OpenAI detail: original vision frame, so the model sees Image 1 as ${coordinateFrame.frame.width}x${coordinateFrame.frame.height} px.`,
-      `Return x1, y1, x2, y2 as integer pixel coordinates in that ${coordinateFrame.frame.width}x${coordinateFrame.frame.height} Image 1 frame.`,
-      "Do not return width/height, original-page pixels, normalized 0..1000 coordinates, viewport coordinates, crop coordinates, tile coordinates, or model-internal coordinates.",
-      `Use the full visible Image 1 frame as the coordinate frame: left edge 0, top edge 0, right edge ${coordinateFrame.frame.width}, bottom edge ${coordinateFrame.frame.height}.`,
-      "The app will map these sent-image pixels back to the original page after the model response."
-    );
-    return lines;
-  }
-
-  lines.push(
-    "Return x1, y1, x2, y2 as normalized 0..1000 corner coordinates over Image 1, not viewport, crop, tile, or model-internal coordinates.",
-    "Use the full visible Image 1 frame as the coordinate frame: left edge 0, top edge 0, right edge 1000, bottom edge 1000.",
-    "Because Image 1 preserves the original aspect ratio, these normalized coordinates map directly back to the original page."
-  );
-
-  if (sentWidth && sentHeight && (sentWidth !== originalWidth || sentHeight !== originalHeight)) {
-    lines.push(
-      `For OpenAI vision, Image 1 was pre-scaled to ${sentWidth}x${sentHeight} px for detail: original before sending so the coordinate frame matches what the model sees.`,
-      `If measuring in sent pixels, convert directly with x1 = round(left * 1000 / ${sentWidth}), y1 = round(top * 1000 / ${sentHeight}), x2 = round(right * 1000 / ${sentWidth}), y2 = round(bottom * 1000 / ${sentHeight}).`
-    );
-  }
-
-  return lines;
-}
-
-function buildOcrBboxHintSection(options = {}, imageVariants = []) {
-  const hints = Array.isArray(options.ocrBboxHints) ? options.ocrBboxHints : [];
-  if (hints.length === 0) {
-    return [];
-  }
-
-  const frame = resolvePromptCoordinateFrame(options, imageVariants);
-  const originalWidth = readPositiveInteger(options.imageWidth);
-  const originalHeight = readPositiveInteger(options.imageHeight);
-  const formattedHints = hints
-    .slice(0, 80)
-    .map((hint, index) => formatOcrBboxHintForPrompt(hint, index + 1, frame, originalWidth, originalHeight))
-    .filter(Boolean);
-  const candidateIds = hints
-    .slice(0, formattedHints.length)
-    .map((hint, index) => readPositiveInteger(hint.id) || index + 1);
-  const maxCandidateId = Math.max(...candidateIds, 0);
-
-  if (formattedHints.length === 0) {
-    return [];
-  }
-
-  if (!shouldSendInitialImages(options)) {
-    return [
-      "OCR text-only mode",
-      "중요: 이 요청은 OCR 텍스트를 한국어로 번역하는 작업이다. ko 필드는 반드시 한글 한국어여야 한다.",
-      "No page image is included in this request. Use only the OCR candidate records below.",
-      "Translate each candidate's ocrText into natural Korean and keep the exact candidate id and x1, y1, x2, y2.",
-      "Every ko value must contain Korean Hangul for translatable dialogue/caption text. Do not output English explanations or Chinese translations in ko.",
-      "ko에 영어 번역, 중국어 번역, 일본어 원문 복사, 로마자 표기를 쓰면 실패한 출력이다.",
-      "Because the image is unavailable, do not invent missing text outside candidates.",
-      "Use type solid for ocr_textbox, speech, bubble, caption, or dialogue labels. Use type nonsolid for ocr_textline, ocr_textgroup, handwriting, label, or uncertain labels.",
-      shouldIncludeSoundEffects(options)
-        ? "Translate readable sound-effect text only when the OCR text itself is clearly an effect word."
-        : "Skip candidates that are only sound effects, background sound lettering, reaction lettering, or decorative effects.",
-      "If ocrText is empty, unreadable, or only symbols, skip that candidate.",
-      "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
-      "",
-      ...formattedHints
-    ];
-  }
-
-  return [
-    "OCR bbox candidates",
-    "중요: 각 후보의 OCR 텍스트를 한국어로 번역한다. ko 필드는 반드시 한글 한국어만 사용한다.",
-    "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
-    "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
-    "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when solid-background and nonsolid-background candidates are close together.",
-    "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
-    "For every translatable record, ko must be Korean Hangul. If the source text is Japanese, English, or mixed, translate it into Korean only.",
-    "ko에 영어, 중국어, 일본어, 로마자, 병음을 출력하지 않는다. 이름/숫자/짧은 기호를 제외하면 ko에는 한글이 포함되어야 한다.",
-    shouldIncludeSoundEffects(options)
-      ? `Required candidate ids: ${candidateIds.join(", ")}.`
-      : `Required candidate ids for dialogue, captions, signs, labels, and UI text: ${candidateIds.join(", ")}. Skip candidates that are only SFX, background sound lettering, reaction lettering, or decorative effects.`,
-    "Read and translate only the text inside that candidate rectangle plus a tiny visual margin; do not move the rectangle to a different nearby text group.",
-    "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
-    "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
-    "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the source line breaks.",
-    "For ocr_textline and ocr_textgroup candidates, use type nonsolid unless the text is clearly on a flat single-color bubble or caption background.",
-    "Labels, handwriting, captions on texture, diagram text, search terms, and sound-effect lettering are nonsolid.",
-    "You may change a candidate bbox only when Image 1 clearly proves the candidate clips visible glyph strokes or includes non-text art; then change the minimum amount needed.",
-    "Do not merge two candidates into one record, even when the sentence continues across them. Candidate rectangles are separate output records.",
-    "If two candidates are stacked or touching speech bubbles, output two separate dialogue records with their original ids.",
-    "OCR candidates are a floor, not a ceiling. After processing candidates, inspect the whole Image 1 again for missing Japanese or English text.",
-    `If the detector missed visible Japanese or English text, add a new record with id greater than ${maxCandidateId}. Never reuse a candidate id for missing text outside that candidate rectangle.`,
-    "New records are allowed only for clear Japanese or English glyphs that are not covered by any candidate.",
-    shouldIncludeSoundEffects(options)
-      ? "For new missing SFX records, search especially near character bodies, panel edges, and lower panels where OCR often misses gray or outlined kana. The bbox must visibly cover kana/SFX glyph strokes."
-      : "Do not add new missing SFX, background sound lettering, reaction lettering, or decorative effect records.",
-    "Never add SFX on panel trim, furniture lines, wall patterns, or isolated vertical strokes.",
-    "The candidate coordinates below are already converted into the same coordinate frame required for your output.",
-    "",
-    ...formattedHints
-  ];
-}
-
-function formatOcrBboxHintForPrompt(hint, fallbackId, frame, originalWidth, originalHeight) {
-  const x1 = Number(hint?.x1);
-  const y1 = Number(hint?.y1);
-  const x2 = Number(hint?.x2);
-  const y2 = Number(hint?.y2);
-  if (![x1, y1, x2, y2].every(Number.isFinite)) {
-    return "";
-  }
-
-  const id = readPositiveInteger(hint.id) || fallbackId;
-  const label = sanitizeHintLabel(hint.label);
-  const converted = convertOriginalPixelBoxToPromptFrame({ x1, y1, x2, y2 }, frame, originalWidth, originalHeight);
-  const score = Number.isFinite(hint.score) ? ` score:${Math.round(hint.score * 100) / 100}` : "";
-  const ocrText = sanitizeOcrTextForPrompt(readOcrCandidateText(hint));
-  const textHint = ocrText ? ` ocrText:${JSON.stringify(ocrText)}` : "";
-  return `candidate ${id}: label:${label} x1:${converted.x1} y1:${converted.y1} x2:${converted.x2} y2:${converted.y2}${score}${textHint}`;
-}
-
-function convertOriginalPixelBoxToPromptFrame(box, frame, originalWidth, originalHeight) {
-  if (frame.space === "pixels" && originalWidth && originalHeight) {
-    const xScale = frame.frame.width / originalWidth;
-    const yScale = frame.frame.height / originalHeight;
-    return {
-      x1: Math.round(Math.min(box.x1, box.x2) * xScale),
-      y1: Math.round(Math.min(box.y1, box.y2) * yScale),
-      x2: Math.round(Math.max(box.x1, box.x2) * xScale),
-      y2: Math.round(Math.max(box.y1, box.y2) * yScale)
-    };
-  }
-
-  if (originalWidth && originalHeight) {
-    return {
-      x1: Math.round((Math.min(box.x1, box.x2) / originalWidth) * 1000),
-      y1: Math.round((Math.min(box.y1, box.y2) / originalHeight) * 1000),
-      x2: Math.round((Math.max(box.x1, box.x2) / originalWidth) * 1000),
-      y2: Math.round((Math.max(box.y1, box.y2) / originalHeight) * 1000)
-    };
-  }
-
-  return {
-    x1: Math.round(Math.min(box.x1, box.x2)),
-    y1: Math.round(Math.min(box.y1, box.y2)),
-    x2: Math.round(Math.max(box.x1, box.x2)),
-    y2: Math.round(Math.max(box.y1, box.y2))
-  };
-}
-
-function sanitizeHintLabel(value) {
-  const text = String(value ?? "text").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
-  return text || "text";
-}
-
-function readOcrCandidateText(candidate) {
-  if (!candidate || typeof candidate !== "object") {
-    return "";
-  }
-  for (const key of ["ocrText", "ocr_text", "text", "content", "block_content", "rec_text", "transcription"]) {
-    const text = normalizeOcrTextValue(candidate[key]);
-    if (text) {
-      return text;
-    }
-  }
-  return "";
-}
-
-function normalizeOcrTextValue(value) {
-  if (typeof value === "string") {
-    return value.replace(/\s+/g, " ").trim();
-  }
-  if (Array.isArray(value)) {
-    return value.map(normalizeOcrTextValue).filter(Boolean).join(" ").trim();
-  }
-  if (value && typeof value === "object") {
-    for (const key of ["text", "content", "value", "rec_text", "transcription"]) {
-      const text = normalizeOcrTextValue(value[key]);
-      if (text) {
-        return text;
-      }
-    }
-  }
-  return "";
-}
-
-function sanitizeOcrTextForPrompt(value) {
-  return truncateText(normalizeOcrTextValue(value).replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim(), 160);
-}
-
-function resolvePromptCoordinateFrame(options = {}, imageVariants = []) {
-  if (isOpenAICodexProvider(options)) {
-    const geometryVariant = imageVariants.find((variant) => variant.role === "openai-vision") || imageVariants[0];
-    const width = readPositiveInteger(geometryVariant?.width) || readPositiveInteger(options.imageWidth) || 1000;
-    const height = readPositiveInteger(geometryVariant?.height) || readPositiveInteger(options.imageHeight) || 1000;
-    return {
-      space: "pixels",
-      frame: { width, height }
-    };
-  }
-
-  return {
-    space: "normalized_1000",
-    frame: { width: 1000, height: 1000 }
-  };
-}
-
-function readPositiveInteger(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
-}
-
-function mimeFromPath(filePath) {
-  const lower = filePath.toLowerCase();
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-  if (lower.endsWith(".webp")) return "image/webp";
-  return "image/png";
-}
-
 async function convertImageToPngBufferWithFfmpeg(filePath, options = {}) {
   const ffmpegPath = resolveFfmpegPath(options);
   return new Promise((resolve, reject) => {
@@ -1593,47 +1451,6 @@ async function buildEnhancedVariant(options) {
       error
     );
   }
-}
-
-const OPENAI_ORIGINAL_DETAIL_PATCH_SIZE = 32;
-const OPENAI_ORIGINAL_DETAIL_PATCH_BUDGET = 10000;
-const OPENAI_ORIGINAL_DETAIL_MAX_DIMENSION = 6000;
-
-function calculateOpenAIOriginalDetailSize(width, height) {
-  if (!width || !height) {
-    return { width, height };
-  }
-
-  const patchCount = (imageWidth, imageHeight) =>
-    Math.ceil(imageWidth / OPENAI_ORIGINAL_DETAIL_PATCH_SIZE) * Math.ceil(imageHeight / OPENAI_ORIGINAL_DETAIL_PATCH_SIZE);
-
-  const maxDimensionScale = Math.min(
-    1,
-    OPENAI_ORIGINAL_DETAIL_MAX_DIMENSION / width,
-    OPENAI_ORIGINAL_DETAIL_MAX_DIMENSION / height
-  );
-  const patchBudgetScale = Math.sqrt(
-    (OPENAI_ORIGINAL_DETAIL_PATCH_BUDGET * OPENAI_ORIGINAL_DETAIL_PATCH_SIZE * OPENAI_ORIGINAL_DETAIL_PATCH_SIZE) /
-      (width * height)
-  );
-  let scale = Math.min(maxDimensionScale, patchBudgetScale, 1);
-  let targetWidth = Math.max(1, Math.floor(width * scale));
-  let targetHeight = Math.max(1, Math.floor(height * scale));
-
-  while (
-    targetWidth > OPENAI_ORIGINAL_DETAIL_MAX_DIMENSION ||
-    targetHeight > OPENAI_ORIGINAL_DETAIL_MAX_DIMENSION ||
-    patchCount(targetWidth, targetHeight) > OPENAI_ORIGINAL_DETAIL_PATCH_BUDGET
-  ) {
-    scale *= 0.999;
-    targetWidth = Math.max(1, Math.floor(width * scale));
-    targetHeight = Math.max(1, Math.floor(height * scale));
-  }
-
-  return {
-    width: targetWidth,
-    height: targetHeight
-  };
 }
 
 function resolveImageSize(options = {}) {
@@ -1881,7 +1698,8 @@ async function prepareImageVariants(options) {
 
 function buildMessages(options, imageVariants) {
   const promptText = options.promptOverrideText || getOverlayPrompt(options, imageVariants);
-  const imageParts = shouldSendInitialImages(options) ? imageVariants.flatMap((variant, index) => ([
+  const imageParts = shouldSendInitialImages(options)
+    ? imageVariants.flatMap((variant, index) => ([
     {
       type: "image_url",
       image_url: {
@@ -1892,7 +1710,8 @@ function buildMessages(options, imageVariants) {
       type: "text",
       text: describeImageVariant(variant, index, options)
     }
-  ])) : [];
+  ]))
+    : [];
 
   return [
     {
@@ -1907,7 +1726,8 @@ function buildMessages(options, imageVariants) {
 }
 
 function buildResponsesInput(options, imageVariants, promptText = options.promptOverrideText || getOverlayPrompt(options, imageVariants)) {
-  const content = shouldSendInitialImages(options) ? imageVariants.flatMap((variant, index) => ([
+  const content = shouldSendInitialImages(options)
+    ? imageVariants.flatMap((variant, index) => ([
     {
       type: "input_image",
       image_url: variant.dataUrl,
@@ -1917,7 +1737,8 @@ function buildResponsesInput(options, imageVariants, promptText = options.prompt
       type: "input_text",
       text: describeImageVariant(variant, index, options)
     }
-  ])) : [];
+  ]))
+    : [];
 
   return [
     {
@@ -1944,7 +1765,11 @@ function describeImageVariant(variant, index, options = {}) {
   }
 
   if (variant.role === "crop-retry") {
-    const idText = Number.isFinite(Number(variant.itemId)) ? ` item id ${variant.itemId}` : " one low-confidence item";
+    const idText = Array.isArray(variant.itemIds) && variant.itemIds.length > 0
+      ? ` item ids ${variant.itemIds.join(", ")}`
+      : Number.isFinite(Number(variant.itemId))
+        ? ` item id ${variant.itemId}`
+        : " one low-confidence item";
     const box = variant.cropBox
       ? ` Crop on original page: x=${variant.cropBox.x}, y=${variant.cropBox.y}, w=${variant.cropBox.w}, h=${variant.cropBox.h}.`
       : "";
@@ -1954,43 +1779,56 @@ function describeImageVariant(variant, index, options = {}) {
   return `Image ${index + 1}: the original full manga page. Use it as the geometry authority.${sizeText}${originalSizeText}`;
 }
 
-function buildCropRetryPrompt(targets = [], options = {}) {
+function buildCropRetryPrompt(targets = []) {
   const targetLines = targets.map((target, index) => {
-    const cropImageIndex = index + 2;
+    const cropImageIndex = Number.isFinite(Number(target.cropImageIndex)) ? Number(target.cropImageIndex) : index + 2;
     const confidence = Number.isFinite(Number(target.confidence)) ? Number(target.confidence).toFixed(2) : "unknown";
     const bbox = target.bbox
       ? `bbox x=${target.bbox.x} y=${target.bbox.y} w=${target.bbox.w} h=${target.bbox.h}`
       : "bbox unchanged";
+    const cropSize = target.cropBox
+      ? `cropSize:${Math.round(Number(target.cropBox.w) || 0)}x${Math.round(Number(target.cropBox.h) || 0)}`
+      : "cropSize:unknown";
     return [
       `target ${target.id}: cropImage:${cropImageIndex}`,
-      `type:${target.type || "nonsolid"} direction:${target.direction || "horizontal"} angle:${Number.isFinite(Number(target.angle)) ? target.angle : 0} fontSize:${Number.isFinite(Number(target.fontSize)) ? target.fontSize : ""} confidence:${confidence}`,
+      `reason:${target.reason || "low-confidence"}`,
+      target.cropGroupId ? `cropGroup:${target.cropGroupId}` : "",
+      cropSize,
+      `type:${target.type || "nonsolid"} textRole:${target.textRole || ""} direction:${target.direction || "horizontal"} angle:${Number.isFinite(Number(target.angle)) ? target.angle : 0} fontSize:${Number.isFinite(Number(target.fontSize)) ? target.fontSize : ""} confidence:${confidence}`,
       bbox
-    ].join(" ");
+    ].filter(Boolean).join(" ");
   });
 
   return [
     "# Task",
-    "중요: 아래 crop 안의 일본어/영어 원문을 한국어 한글로 번역한다. ko 필드는 반드시 한국어여야 한다.",
-    "You are directly OCR-reading and translating only the low-confidence manga crop images listed below.",
+    "You are directly OCR-reading and translating only the listed manga crop images.",
     "Image 1 is the full page for context only. Each following image is an expanded crop for exactly one target id.",
-    "Do not detect new text, do not output extra ids, and do not change any bbox geometry.",
+    "Do not detect new ids or output extra ids.",
     "For each target, ignore any previous model OCR/translation. The crop image itself is the authority.",
-    "Read all real Japanese or English text inside that crop for the same target id, then translate it naturally into Korean.",
-    "Every ko field must be Korean Hangul. Do not output English, Chinese, Japanese, romaji, or pinyin in ko.",
-    shouldIncludeSoundEffects(options)
-      ? "Sound-effect or reaction lettering may be translated only when the target itself is a real SFX item."
-      : "If the target is sound-effect lettering, background sound lettering, reaction lettering, or decorative SFX, output type: reject, confidence: 1, jp: [non-text], ko: [non-text].",
+    "Read the real Japanese text inside that crop for the same target id. If the crop contains the target text, return the tight crop-coordinate bbox for the visible Japanese glyphs.",
+    "Several target ids may point to the same crop image. In that case, use the larger crop as context and return separate records for the separate visible Japanese lettering groups represented by those target ids.",
+    "If a large sound effect was split into nearby target ids, keep those ids separate when the visible lettering groups are separate. Do not create one giant combined translation over the whole crop.",
+    "For sound-check targets, decide whether the crop is standalone printed sound/reaction lettering, ordinary language, or non-text. Sound/reaction lettering should become compact Korean effect lettering, not a scene description and not a mechanical kana transliteration.",
+    "If the crop text is inside a speech bubble, caption, note, sign, or label, treat it as ordinary language unless the visible lettering is unmistakably standalone sound/reaction lettering.",
     "",
     "# Output",
     "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
-    "Output exactly one record for each target id, using exactly these keys: id, type, direction, angle, fontSize, confidence, jp, ko.",
-    "Do not output x1, y1, x2, y2, bbox, width, or height.",
+    "Output exactly one record for each target id, using exactly these keys: id, type, textRole, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.",
+    "x1, y1, x2, y2 are integer crop image pixel coordinates around the visible Japanese glyph ink for that target, not full-page coordinates.",
+    "Crop coordinates start at 0,0 in the top-left corner of the crop image. x1 and x2 must be within the crop image width; y1 and y2 must be within the crop image height.",
+    "Never copy the target bbox or crop origin numbers into x1/y1/x2/y2; those are page coordinates, not crop coordinates.",
+    "textRole is one of sound, ordinary, or nontext.",
     "confidence is 0.00 to 1.00 for the corrected OCR+translation.",
-    "If the crop is decoration, panel trim, texture, non-Japanese/non-English art, or otherwise not real Japanese or English text, output type: reject, confidence: 1, jp: [non-text], ko: [non-text].",
-    "If the crop still has readable Japanese or English, never output only [?]; give the best OCR and concise natural Korean.",
-    "Use type solid only for flat single-color bubble/caption backgrounds; use type nonsolid for artwork, screentone, texture, handwriting, labels, SFX, or uncertainty.",
-    "Keep ordinary dialogue and caption Korean horizontal and natural unless the source is actual SFX/reaction lettering.",
+    "If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real Japanese text and every glyph, including final/trailing kana, is read correctly. If there is any doubt, use confidence below 1.00.",
+    "If the crop is decoration, panel trim, texture, non-Japanese art, or otherwise not real Japanese text, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text].",
+    "If the crop still has readable Japanese, never output only [?]; give the best OCR and concise natural Korean.",
+    "Use type nonsolid for every accepted text target.",
+    "If textRole is ordinary, keep dialogue/caption/label Korean natural, horizontally readable, and do not apply sound-effect rules.",
+    "For ordinary textRole, translate the Japanese lexical meaning. Never replace an ordinary word, noun, label, or dialogue fragment with a Korean sound effect.",
+    "Short kana, handwritten words, or tall vertical bbox shapes are not enough to make textRole sound.",
     "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
+    "If textRole is sound, choose compact Korean effect lettering that fits the scene and visible rhythm. Do not mechanically transliterate Japanese kana when that would sound awkward in Korean.",
+    "If textRole is sound, avoid Korean grammar endings, particles, connective endings, explanatory spacing, adverbs, and action descriptions.",
     "",
     "# Targets",
     ...targetLines
@@ -2039,8 +1877,8 @@ async function buildCropRetryVariants(options, targets = [], sourceSize = {}) {
   await mkdir(outputDir, { recursive: true });
 
   const variants = [];
-  for (const target of targets) {
-    const cropBox = normalizeCropBox(target.cropBox, pageWidth, pageHeight);
+  for (const group of groupCropRetryTargets(targets)) {
+    const cropBox = normalizeCropBox(group.cropBox, pageWidth, pageHeight);
     if (!cropBox) {
       continue;
     }
@@ -2048,11 +1886,17 @@ async function buildCropRetryVariants(options, targets = [], sourceSize = {}) {
     if (!cropped || cropped.isEmpty()) {
       continue;
     }
-    const outputPath = path.join(outputDir, `item-${target.id}.png`);
+    const imageIndex = variants.length + 2;
+    for (const target of group.targets) {
+      target.cropImageIndex = imageIndex;
+    }
+
+    const outputPath = path.join(outputDir, `${group.id}.png`);
     await writeFile(outputPath, cropped.toPNG());
     variants.push({
       role: "crop-retry",
-      itemId: target.id,
+      itemId: group.id,
+      itemIds: group.targets.map((target) => target.id),
       cropBox,
       path: outputPath,
       width: cropBox.width,
@@ -2062,6 +1906,24 @@ async function buildCropRetryVariants(options, targets = [], sourceSize = {}) {
     });
   }
   return variants;
+}
+
+function groupCropRetryTargets(targets = []) {
+  const groups = new Map();
+  for (const target of targets) {
+    const key = target.cropGroupId || `item-${target.id}`;
+    const previous = groups.get(key);
+    if (previous) {
+      previous.targets.push(target);
+      continue;
+    }
+    groups.set(key, {
+      id: key.replace(/[^A-Za-z0-9_.-]+/g, "-"),
+      cropBox: target.cropBox,
+      targets: [target]
+    });
+  }
+  return [...groups.values()];
 }
 
 async function loadNativeImageForCropping(nativeImage, filePath) {
@@ -2087,27 +1949,6 @@ function normalizeCropBox(box, pageWidth, pageHeight) {
     width: right - x,
     height: bottom - y
   };
-}
-
-function resolveConfiguredModelRepo(options = {}) {
-  return String(options.modelRepo ?? process.env.MANGA_TRANSLATOR_MODEL_HF ?? "").trim() || DEFAULT_MODEL_HF;
-}
-
-function resolveConfiguredModelFile(options = {}) {
-  return String(options.modelFile ?? process.env.LLAMA_ARG_HF_FILE ?? "").trim() || DEFAULT_HF_FILE;
-}
-
-function shouldUseChatmlTemplate(options = {}) {
-  const explicit = String(process.env.MANGA_TRANSLATOR_CHAT_TEMPLATE ?? "").trim().toLowerCase();
-  if (explicit === "chatml") {
-    return true;
-  }
-  if (explicit === "model" || explicit === "jinja") {
-    return false;
-  }
-
-  const modelId = `${resolveConfiguredModelRepo(options)} ${resolveConfiguredModelFile(options)}`.toLowerCase();
-  return modelId.includes("translategemma");
 }
 
 function resolveRequestModelName(options = {}) {
@@ -2167,6 +2008,27 @@ function buildResponsesRequestBody(options, imageVariants, promptText, systemPro
     stream: true,
     store: false
   };
+}
+
+function resolveTranslationMode(options = {}) {
+  const mode = String(options.translationMode ?? process.env.MANGA_TRANSLATOR_TRANSLATION_MODE ?? "image").trim();
+  return mode === "ocr-text" || mode === "ocr-text-with-image-retry" ? mode : "image";
+}
+
+function shouldSendInitialImages(options = {}) {
+  if (options.forceImageInput) {
+    return true;
+  }
+  return resolveTranslationMode(options) === "image";
+}
+
+function shouldUseImageRetry(options = {}) {
+  const mode = resolveTranslationMode(options);
+  return mode === "image" || mode === "ocr-text-with-image-retry";
+}
+
+function shouldIncludeSoundEffects(options = {}) {
+  return options.includeSoundEffects !== false;
 }
 
 function resolveOcrBboxProvider(options = {}) {
@@ -2256,10 +2118,11 @@ async function collectOcrBboxHints(options = {}) {
   } catch (error) {
     const diagnostic = buildOcrBboxDiagnostic(provider, error);
     diagnostics.push(diagnostic);
-    if (isPaddleOcrProvider(provider) && isOcrGpuRequested(options)) {
-      emitRuntimeProgress(options, "ocr_running", "Paddle OCR GPU 실행 실패", diagnostic.message);
+    if (provider === "paddleocr-vl" && isOcrGpuRequested(options)) {
+      const failureMessage = buildPaddleOcrGpuFailureMessage(error, options);
+      emitRuntimeProgress(options, "ocr_running", "Paddle OCR GPU 실행 실패", failureMessage);
       throw createOcrRuntimeError(
-        "Paddle OCR GPU 실행에 실패했습니다. GPU 설정을 쓰려면 CUDA가 보이는 GPU Paddle 런타임이 필요합니다. CPU로 바꾸면 계속 진행할 수 있습니다.",
+        failureMessage,
         { diagnostics },
         error
       );
@@ -2284,31 +2147,11 @@ function buildOcrBboxResult(hints = [], diagnostics = [], options = {}) {
 }
 
 function countOcrTextEvidence(hints = []) {
-  return hints.reduce((count, hint) => count + (hasTranslatableTextEvidence(readOcrCandidateText(hint)) ? 1 : 0), 0);
+  return hints.reduce((count, hint) => count + (hasJapaneseTextEvidence(readOcrCandidateText(hint)) ? 1 : 0), 0);
 }
 
-function resolveTranslationMode(options = {}) {
-  const mode = String(options.translationMode ?? process.env.MANGA_TRANSLATOR_TRANSLATION_MODE ?? "image").trim();
-  return mode === "ocr-text" || mode === "ocr-text-with-image-retry" ? mode : "image";
-}
-
-function shouldSendInitialImages(options = {}) {
-  if (options.forceImageInput) {
-    return true;
-  }
-  return resolveTranslationMode(options) === "image";
-}
-
-function shouldUseImageRetry(options = {}) {
-  const mode = resolveTranslationMode(options);
-  return mode === "image" || mode === "ocr-text-with-image-retry";
-}
-
-function hasTranslatableTextEvidence(value) {
+function hasJapaneseTextEvidence(value) {
   const text = String(value ?? "");
-  if (/[A-Za-z]{2,}/.test(text) || /(^|[^A-Za-z])[AIai]([^A-Za-z]|$)/.test(text)) {
-    return true;
-  }
   for (const char of text) {
     const code = char.codePointAt(0);
     if (
@@ -2330,7 +2173,7 @@ function buildOcrBboxDiagnostic(provider, error, extra = {}) {
   return {
     provider,
     reason: "ocr-bbox-unavailable",
-    message: error instanceof Error ? error.message : String(error),
+    message: summarizeOcrErrorMessage(error),
     ...extra
   };
 }
@@ -2338,13 +2181,17 @@ function buildOcrBboxDiagnostic(provider, error, extra = {}) {
 async function runOcrBboxCommand(options = {}, provider = "external-command") {
   await mkdir(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, "ocr-bbox-hints.json");
-  const runtime = isPaddleOcrProvider(provider) ? await ensurePaddleOcrRuntime(options) : null;
+  const runtime = provider === "paddleocr-vl" ? await ensurePaddleOcrRuntime(options) : null;
   const command = buildOcrBboxCommand(options, provider, outputPath, runtime);
   emitRuntimeProgress(options, "ocr_running", "Paddle OCR 모델 다운로드/위치 분석 중", `장치: ${resolveOcrDeviceLabel(options)}`);
+  const handleOcrOutput = createOcrCommandProgressHandler(options, {
+    progressText: "Paddle OCR 모델 다운로드/위치 분석 중"
+  });
   const { stdout, stderr } = await runShellCommand(command, {
-    timeoutMs: readPositiveInteger(process.env.MANGA_TRANSLATOR_OCR_BBOX_TIMEOUT_MS) || 600000,
+    timeoutMs: resolveOcrBboxTimeoutMs(1),
     env: buildOcrRuntimeEnv(options, runtime),
-    signal: options.abortSignal
+    signal: options.abortSignal,
+    onOutput: handleOcrOutput
   });
 
   let rawText = "";
@@ -2387,7 +2234,7 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
   const firstOptions = normalizedOptions[0] || {};
   const batchOptions = withoutPageProgressOptions(firstOptions);
   const provider = resolveOcrBboxProvider(firstOptions);
-  if (!isPaddleOcrProvider(provider)) {
+  if (provider !== "paddleocr-vl") {
     const results = [];
     for (const options of normalizedOptions) {
       results.push(await collectOcrBboxHints(options));
@@ -2420,9 +2267,15 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
     progressTotal: readPositiveInteger(firstOptions.ocrBatchTotal) || items.length
   });
   const seenProgressEvents = new Set();
+  const handleCommandOutput = createOcrCommandProgressHandler(batchOptions, {
+    progressText: "Paddle OCR 배치 위치 분석 중",
+    progressCurrent: readPositiveInteger(firstOptions.ocrBatchCompletedBefore) || 0,
+    progressTotal: readPositiveInteger(firstOptions.ocrBatchTotal) || items.length
+  });
   const handleProgressLine = (line) => {
       const progress = parseOcrBatchProgressLine(line);
       if (!progress) {
+        handleCommandOutput(line);
         return;
       }
       const phase = progress.phase || "done";
@@ -2458,7 +2311,7 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
   try {
     progressPoller.start();
     ({ stdout, stderr } = await runShellCommand(command, {
-      timeoutMs: readPositiveInteger(process.env.MANGA_TRANSLATOR_OCR_BBOX_TIMEOUT_MS) || Math.max(600000, items.length * 300000),
+      timeoutMs: resolveOcrBboxTimeoutMs(items.length),
       env: buildOcrRuntimeEnv(batchOptions, runtime),
       signal: batchOptions.abortSignal,
       onOutput: handleProgressLine
@@ -2515,7 +2368,7 @@ async function ensurePaddleOcrRuntime(options = {}) {
     ? await checkPaddleOcrImport(venvPython, options, { runtimeDir, includePackageDir: false })
     : { ok: false, message: "venv python is missing" };
   if (existsSync(venvPython) && importCheck.ok) {
-    return { runtimeDir, runtimeVariant, packageDir, pythonPath: venvPython, prepared: true, usesTargetPackageDir: false, diagnostics };
+    return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: venvPython, prepared: true, usesTargetPackageDir: false, diagnostics });
   }
 
   const bootstrapPython = resolveBootstrapPython(options);
@@ -2527,7 +2380,7 @@ async function ensurePaddleOcrRuntime(options = {}) {
     ? await checkPaddleOcrImport(bootstrapPython, options, { runtimeDir, packageDir, includePackageDir: true })
     : importCheck;
   if (!existsSync(venvPython) && importCheck.ok) {
-    return { runtimeDir, runtimeVariant, packageDir, pythonPath: bootstrapPython, prepared: true, usesTargetPackageDir: true, diagnostics: [{ step: "embedded-python-ready", packageDir }] };
+    return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: bootstrapPython, prepared: true, usesTargetPackageDir: true, diagnostics: [{ step: "embedded-python-ready", packageDir }] });
   }
 
   const targetInstallLooksBroken = hasOcrInstallMarker(packageDir, runtimeVariant) || hasExpectedOcrPackages(packageDir, options);
@@ -2634,7 +2487,12 @@ async function ensurePaddleOcrRuntime(options = {}) {
     installLogLine: "Paddle OCR 설치가 완료되었습니다."
   });
 
-  return { runtimeDir, runtimeVariant, packageDir, pythonPath: installPython, prepared: true, usesTargetPackageDir: Boolean(targetDir), diagnostics };
+  return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: installPython, prepared: true, usesTargetPackageDir: Boolean(targetDir), diagnostics });
+}
+
+async function finalizePaddleOcrRuntime(options, runtime) {
+  await ensurePaddleOcrModelAssetsDownloaded(options, runtime);
+  return runtime;
 }
 
 function ensureEmbeddedPythonPackagePath(pythonPath, packageDir, runtimeDir = null) {
@@ -2714,7 +2572,7 @@ async function installOcrPythonPackages(pythonPath, installBatches, targetDir, o
     endPercent: 0.86
   });
   try {
-    const pipProgressArgs = `--cache-dir ${quoteCommandArg(pipCacheDir)} --progress-bar ${resolvePipProgressBarMode()}`;
+    const pipProgressArgs = `--cache-dir ${quoteCommandArg(pipCacheDir)} --progress-bar raw`;
     monitor.setStep("pip 업데이트", 0.04, 0.1);
     await runShellCommand(`${quoteCommandArg(pythonPath)} -m pip install --upgrade ${pipProgressArgs} pip`, {
       timeoutMs: 300000,
@@ -2770,15 +2628,6 @@ function resolveOcrInstallBatchProgressRanges(installBatches, startPercent, endP
     cursor = next;
     return range;
   });
-}
-
-function isPaddleOcrProvider(provider) {
-  return provider === "paddleocr-vl" || provider === "paddleocr-v5";
-}
-
-function resolvePipProgressBarMode() {
-  const value = String(process.env.MANGA_TRANSLATOR_PIP_PROGRESS_BAR ?? "off").trim().toLowerCase();
-  return ["on", "off", "raw"].includes(value) ? value : "off";
 }
 
 function resolveInstallProgressDir(pythonPath) {
@@ -2889,7 +2738,7 @@ function summarizeOcrInstallBatches(installBatches, options = {}) {
   const packageNames = installBatches
     .flat()
     .filter((part) => !part.startsWith("-") && !/^https?:\/\//i.test(part));
-  const suffix = isOcrGpuRequested(options) ? ` (${resolveOcrGpuCudaTag()})` : "";
+  const suffix = isOcrGpuRequested(options) ? ` (${resolveOcrGpuCudaTag(options)})` : "";
   return `${packageNames.join(", ")}${suffix}`;
 }
 
@@ -2897,11 +2746,12 @@ function isOcrGpuRequested(options = {}) {
   return resolveOcrDevice(options).startsWith("gpu");
 }
 
-function resolveOcrGpuCudaTag() {
+function resolveOcrGpuCudaTag(options = {}) {
   const raw = String(
     process.env.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG
       ?? process.env.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG
       ?? process.env.MANGA_TRANSLATOR_OCR_GPU_CUDA
+      ?? options.ocrGpuCudaTag
       ?? DEFAULT_OCR_GPU_CUDA_TAG
   ).trim().toLowerCase();
   if (/^cu\d+$/.test(raw)) {
@@ -2911,11 +2761,11 @@ function resolveOcrGpuCudaTag() {
   return digits ? `cu${digits}` : DEFAULT_OCR_GPU_CUDA_TAG;
 }
 
-function resolveOcrGpuPackageIndexUrl() {
+function resolveOcrGpuPackageIndexUrl(options = {}) {
   return String(
     process.env.MANGA_TRANSLATOR_OCR_GPU_PADDLE_INDEX_URL
       ?? process.env.MANGA_TRANSLATOR_PADDLEOCR_GPU_INDEX_URL
-      ?? `https://www.paddlepaddle.org.cn/packages/stable/${resolveOcrGpuCudaTag()}/`
+      ?? `https://www.paddlepaddle.org.cn/packages/stable/${resolveOcrGpuCudaTag(options)}/`
   ).trim();
 }
 
@@ -2923,7 +2773,7 @@ function resolveOcrRuntimeVariant(options = {}) {
   if (!isOcrGpuRequested(options)) {
     return "cpu";
   }
-  return `gpu-${resolveOcrGpuCudaTag()}`.replace(/[^a-z0-9._-]+/gi, "-").toLowerCase();
+  return `gpu-${resolveOcrGpuCudaTag(options)}`.replace(/[^a-z0-9._-]+/gi, "-").toLowerCase();
 }
 
 function resolveOcrPythonPackageDir(runtimeDir, options = {}) {
@@ -2987,11 +2837,43 @@ async function checkPaddleOcrImport(pythonPath, options = {}, runtime = null) {
 }
 
 function buildPaddleOcrImportFailureMessage(importMessage, options = {}) {
+  if (isPaddleSm120UnsupportedText(importMessage)) {
+    return buildPaddleOcrSm120FailureMessage(importMessage, options);
+  }
   const suffix = isOcrGpuRequested(options)
     ? " GPU를 선택했지만 GPU Paddle/CUDA 검증에 실패했습니다. CPU로 바꾸거나 CUDA 드라이버와 GPU Paddle wheel을 확인하세요."
     : "";
   const detail = importMessage ? ` detail=${truncateText(importMessage, 1200)}` : "";
   return `PaddleOCR-VL runtime was installed but paddleocr/paddlex/paddle imports still fail.${suffix}${detail}`;
+}
+
+function buildPaddleOcrGpuFailureMessage(error, options = {}) {
+  const text = summarizeOcrErrorMessage(error);
+  if (isPaddleSm120UnsupportedText(text)) {
+    return buildPaddleOcrSm120FailureMessage(text, options);
+  }
+  return `Paddle OCR GPU 실행에 실패했습니다. GPU 설정을 쓰려면 CUDA가 보이는 GPU Paddle 런타임이 필요합니다. CPU로 바꾸면 계속 진행할 수 있습니다. detail=${truncateText(text, 1200)}`;
+}
+
+function buildPaddleOcrSm120FailureMessage(detail, options = {}) {
+  return `RTX 50번대/SM120에서 현재 Paddle OCR GPU 런타임이 맞지 않습니다. 이 버전은 RTX 50번대에서 OCR GPU CUDA 태그를 ${resolveOcrGpuCudaTag(options)}로 분리해 설치합니다. 기존 gpu-cu126 런타임이 남아 있으면 OCR 런타임을 삭제하고 다시 시도하세요. detail=${truncateText(detail, 1200)}`;
+}
+
+function isPaddleSm120UnsupportedText(value) {
+  return /not compiled for\s+SM\s*120|sm[_\s-]*120|compute capability:\s*12(?:\.0)?|mismatched gpu architecture/i.test(String(value ?? ""));
+}
+
+function summarizeOcrErrorMessage(error) {
+  if (!error || typeof error !== "object") {
+    return String(error ?? "");
+  }
+  const parts = [
+    error.message,
+    error.stderrPreview,
+    error.stdoutPreview,
+    error.cause instanceof Error ? error.cause.message : error.cause
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.map((part) => String(part)).join(" ") : String(error);
 }
 
 function createOcrRuntimeError(message, detail = {}, cause) {
@@ -3094,113 +2976,39 @@ function startTaskProgressMonitor(options = {}, config = {}) {
   };
 }
 
-function clampProgressRatio(value, fallback = 0) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return Math.max(0, Math.min(1, Number(fallback) || 0));
-  }
-  return Math.max(0, Math.min(1, number));
-}
+function createOcrCommandProgressHandler(options = {}, config = {}) {
+  let lastDetail = "";
+  let lastAt = 0;
+  return (line) => {
+    const logLine = sanitizeInstallLogLine(line);
+    if (!logLine || parseOcrBatchProgressLine(logLine)) {
+      return;
+    }
 
-function parsePipRawProgress(line) {
-  const text = String(line ?? "");
-  const progressMatch = text.match(/\bProgress\s+(\d+)\s+of\s+(\d+)\b/i);
-  if (progressMatch) {
-    const current = Number(progressMatch[1]);
-    const total = Number(progressMatch[2]);
-    if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
-      return { current: Math.max(0, Math.min(current, total)), total };
+    const fetchProgress = parsePaddleModelFetchProgress(logLine);
+    const isModelStatusLine = Boolean(fetchProgress) ||
+      /^(Creating model:|Checking connectivity|Using official model|Fetching \d+ files:)/i.test(logLine);
+    if (!isModelStatusLine) {
+      return;
     }
-  }
-  return null;
-}
 
-function parseOcrBatchProgressLine(line) {
-  const text = String(line ?? "").trim();
-  if (!text.startsWith("{") || !text.endsWith("}")) {
-    return null;
-  }
-  try {
-    const payload = JSON.parse(text);
-    const index = Number(payload?.index);
-    const total = Number(payload?.total);
-    if (!Number.isFinite(index) || !Number.isFinite(total) || index <= 0 || total <= 0) {
-      return null;
+    const detail = fetchProgress
+      ? formatPaddleModelFetchProgress(fetchProgress)
+      : logLine;
+    const now = Date.now();
+    if (detail === lastDetail && now - lastAt < 2000) {
+      return;
     }
-    const rawPhase = String(payload?.phase ?? "done").trim().toLowerCase();
-    const phase = rawPhase === "start" ? "start" : "done";
-    return {
-      phase,
-      index: Math.max(1, Math.min(Math.floor(index), Math.floor(total))),
-      total: Math.floor(total),
-      count: Number.isFinite(Number(payload?.count)) ? Math.max(0, Math.floor(Number(payload.count))) : 0
-    };
-  } catch {
-    return null;
-  }
-}
+    lastDetail = detail;
+    lastAt = now;
 
-function createOcrBatchProgressFilePoller(progressPath, onLine) {
-  let timer = null;
-  let consumedLines = 0;
-  const readProgressFile = () => {
-    if (!progressPath || !existsSync(progressPath)) {
-      return;
-    }
-    let raw = "";
-    try {
-      raw = readFileSync(progressPath, "utf8");
-    } catch {
-      return;
-    }
-    if (!raw) {
-      return;
-    }
-    const completeText = raw.endsWith("\n") || raw.endsWith("\r") ? raw : raw.replace(/[^\r\n]*$/, "");
-    if (!completeText) {
-      return;
-    }
-    const lines = completeText.split(/\r?\n/).filter(Boolean);
-    for (let index = consumedLines; index < lines.length; index += 1) {
-      onLine(lines[index]);
-    }
-    consumedLines = lines.length;
+    emitRuntimeProgress(options, "ocr_running", config.progressText || "Paddle OCR 모델 다운로드/위치 분석 중", detail, {
+      progressMode: "log-only",
+      progressCurrent: config.progressCurrent,
+      progressTotal: config.progressTotal,
+      installLogLine: logLine
+    });
   };
-
-  return {
-    start() {
-      readProgressFile();
-      timer = setInterval(readProgressFile, 500);
-    },
-    stop() {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-      readProgressFile();
-    }
-  };
-}
-
-function sanitizeInstallLogLine(line) {
-  const text = String(line ?? "")
-    .replace(/\u001b\[[0-9;]*m/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return truncateText(text, 220);
-}
-
-function formatBytes(bytes) {
-  const value = Math.max(0, Number(bytes) || 0);
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  const digits = unitIndex === 0 ? 0 : size >= 100 ? 0 : size >= 10 ? 1 : 2;
-  return `${size.toFixed(digits)} ${units[unitIndex]}`;
 }
 
 function buildPaddleOcrImportCheckScript(options = {}) {
@@ -3236,7 +3044,11 @@ function buildOcrRuntimeEnv(options = {}, runtime = null) {
     HF_HOME: hfHomeDir,
     HF_HUB_CACHE: hfHubCacheDir,
     HUGGINGFACE_HUB_CACHE: hfHubCacheDir,
+    HF_HUB_DISABLE_XET: process.env.HF_HUB_DISABLE_XET || "1",
+    HF_HUB_ETAG_TIMEOUT: process.env.HF_HUB_ETAG_TIMEOUT || "30",
+    HF_HUB_DOWNLOAD_TIMEOUT: process.env.HF_HUB_DOWNLOAD_TIMEOUT || "300",
     MANGA_TRANSLATOR_OCR_DEVICE: options.ocrDevice || process.env.MANGA_TRANSLATOR_OCR_DEVICE || "cpu",
+    MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG: resolveOcrGpuCudaTag(options),
     MANGA_TRANSLATOR_PADDLEOCR_DEVICE: ocrDevice,
     PYTHONPATH: pythonPath,
     PYTHONNOUSERSITE: "1",
@@ -3245,6 +3057,7 @@ function buildOcrRuntimeEnv(options = {}, runtime = null) {
     PADDLE_PDX_MODEL_SOURCE: process.env.PADDLE_PDX_MODEL_SOURCE || "huggingface",
     PADDLE_PDX_CACHE_HOME: process.env.PADDLE_PDX_CACHE_HOME || path.join(runtimeDir, "paddlex-cache"),
     PADDLE_PDX_HUGGING_FACE_ENDPOINT: process.env.PADDLE_PDX_HUGGING_FACE_ENDPOINT || "https://huggingface.co",
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: process.env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK || "True",
     PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT: process.env.PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT || "0",
     PIP_DISABLE_PIP_VERSION_CHECK: process.env.PIP_DISABLE_PIP_VERSION_CHECK || "1",
     TMP: tempDir,
@@ -3266,10 +3079,10 @@ function buildOcrBboxCommand(options = {}, provider, outputPath, runtime = null)
     return renderCommandTemplate(template, replacements);
   }
 
-  if (isPaddleOcrProvider(provider)) {
+  if (provider === "paddleocr-vl") {
     const python = quoteCommandArg(resolveOcrRuntimePythonPath(runtime, options));
     const scriptPath = quoteCommandArg(path.join(__dirname, "paddleocr-vl-bboxes.py"));
-    return `${python} -u ${scriptPath} --provider ${quoteCommandArg(provider)} --image ${quoteCommandArg(image)} --output ${quoteCommandArg(outputPath)} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
+    return `${python} -u ${scriptPath} --image ${quoteCommandArg(image)} --output ${quoteCommandArg(outputPath)} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
   }
 
   throw new Error("OCR bbox provider requires MANGA_TRANSLATOR_OCR_BBOX_CMD.");
@@ -3279,7 +3092,7 @@ function buildOcrBboxBatchCommand(options = {}, batchPath, runtime = null, progr
   const python = quoteCommandArg(resolveOcrRuntimePythonPath(runtime, options));
   const scriptPath = quoteCommandArg(path.join(__dirname, "paddleocr-vl-bboxes.py"));
   const progressArg = progressPath ? ` --progress ${quoteCommandArg(progressPath)}` : "";
-  return `${python} -u ${scriptPath} --provider ${quoteCommandArg(resolveOcrBboxProvider(options))} --batch ${quoteCommandArg(batchPath)}${progressArg} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
+  return `${python} -u ${scriptPath} --batch ${quoteCommandArg(batchPath)}${progressArg} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
 }
 
 function resolveOcrRuntimePythonPath(runtime = null, options = {}) {
@@ -3486,287 +3299,6 @@ function terminateChildProcessTree(child) {
   child.kill("SIGKILL");
 }
 
-function extractJsonText(rawText) {
-  const text = String(rawText ?? "").trim();
-  if (text.startsWith("{") || text.startsWith("[")) {
-    return text;
-  }
-
-  const firstObject = text.indexOf("{");
-  const lastObject = text.lastIndexOf("}");
-  const firstArray = text.indexOf("[");
-  const lastArray = text.lastIndexOf("]");
-  if (firstObject !== -1 && lastObject > firstObject && (firstArray === -1 || firstObject < firstArray)) {
-    return text.slice(firstObject, lastObject + 1);
-  }
-  if (firstArray !== -1 && lastArray > firstArray) {
-    return text.slice(firstArray, lastArray + 1);
-  }
-  return "";
-}
-
-function normalizeOcrBboxHintPayload(payload, options = {}) {
-  const originalWidth = readPositiveInteger(options.imageWidth);
-  const originalHeight = readPositiveInteger(options.imageHeight);
-  const candidates = collectOcrBboxCandidates(payload);
-  const hints = [];
-
-  for (const candidate of candidates) {
-    const box = normalizeOcrBboxCandidate(candidate, originalWidth, originalHeight, payload);
-    if (!box) {
-      continue;
-    }
-    const label = candidate.label ?? candidate.type ?? candidate.category ?? candidate.class ?? candidate.class_name ?? "text";
-    if (isIgnoredOcrLabel(label)) {
-      continue;
-    }
-    const ocrText = sanitizeOcrTextForPrompt(readOcrCandidateText(candidate));
-    if (!shouldIncludeSoundEffects(options) && isLikelySoundEffectOcrCandidate({ label, ocrText, box, originalWidth, originalHeight })) {
-      continue;
-    }
-    hints.push({
-      id: hints.length + 1,
-      label: sanitizeHintLabel(label),
-      ...box,
-      ...(Number.isFinite(Number(candidate.score ?? candidate.confidence)) ? { score: Number(candidate.score ?? candidate.confidence) } : {}),
-      ...(ocrText ? { ocrText } : {})
-    });
-  }
-
-  return hints.slice(0, 80);
-}
-
-function isLikelySoundEffectOcrCandidate({ label, ocrText, box, originalWidth, originalHeight }) {
-  const normalizedLabel = sanitizeHintLabel(label);
-  const text = normalizeOcrTextValue(ocrText);
-  const compact = text.replace(/\s+/g, "");
-  const width = Math.max(1, Number(box?.x2) - Number(box?.x1));
-  const height = Math.max(1, Number(box?.y2) - Number(box?.y1));
-  const pageArea = Math.max(1, Number(originalWidth || 0) * Number(originalHeight || 0));
-  const areaRatio = (width * height) / pageArea;
-  const looseTextLabel = /(?:ocr_textline|ocr_textgroup|textline|textgroup|handwriting|label|unknown|text)/i.test(normalizedLabel);
-
-  if (!looseTextLabel) {
-    return false;
-  }
-  if (!compact) {
-    return false;
-  }
-  if (isMostlySymbolicOcrText(compact)) {
-    return true;
-  }
-  if (isKatakanaSoundEffectText(compact)) {
-    return true;
-  }
-  if (areaRatio > 0.012 && isShortKanaReactionText(compact)) {
-    return true;
-  }
-  return false;
-}
-
-function isMostlySymbolicOcrText(text) {
-  const stripped = text.replace(/[!?！？…。、,.・~〜ー―\-－\s]/g, "");
-  if (!stripped) {
-    return true;
-  }
-  if ([...stripped].length <= 2 && !/[A-Za-z0-9一-龯ぁ-ゖァ-ヺ]/u.test(stripped)) {
-    return true;
-  }
-  return false;
-}
-
-function isKatakanaSoundEffectText(text) {
-  const letters = [...text].filter((char) => /[A-Za-z0-9一-龯ぁ-ゖァ-ヺ]/u.test(char));
-  if (letters.length === 0 || letters.length > 14) {
-    return false;
-  }
-  const katakanaLike = letters.filter((char) => /[ァ-ヺー]/u.test(char)).length;
-  const hiraganaLike = letters.filter((char) => /[ぁ-ゖ]/u.test(char)).length;
-  const kanjiLike = letters.filter((char) => /[一-龯]/u.test(char)).length;
-  if (kanjiLike > 0) {
-    return false;
-  }
-  if (katakanaLike >= Math.max(2, letters.length * 0.65)) {
-    return true;
-  }
-  return letters.length <= 5 && katakanaLike + hiraganaLike === letters.length && /[ッっーァ-ヺ]/u.test(text);
-}
-
-function isShortKanaReactionText(text) {
-  const letters = [...text].filter((char) => /[ぁ-ゖァ-ヺー]/u.test(char));
-  if (letters.length === 0 || letters.length > 8) {
-    return false;
-  }
-  return letters.length / Math.max(1, [...text].length) > 0.6 && !/[一-龯A-Za-z0-9]/u.test(text);
-}
-
-function collectOcrBboxCandidates(payload) {
-  if (!payload) {
-    return [];
-  }
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-  if (Array.isArray(payload.items)) return payload.items;
-  if (Array.isArray(payload.blocks)) return payload.blocks;
-  if (Array.isArray(payload.parsing_res_list)) return payload.parsing_res_list;
-  if (Array.isArray(payload.layout_det_res?.boxes)) return payload.layout_det_res.boxes;
-  if (Array.isArray(payload.pages)) return payload.pages.flatMap(collectOcrBboxCandidates);
-  if (Array.isArray(payload.results)) return payload.results.flatMap(collectOcrBboxCandidates);
-  if (payload.result && typeof payload.result === "object") return collectOcrBboxCandidates(payload.result);
-  if (payload.data && typeof payload.data === "object") return collectOcrBboxCandidates(payload.data);
-  return [];
-}
-
-function normalizeOcrBboxCandidate(candidate, originalWidth, originalHeight, payload) {
-  const rawBox = readRawOcrBox(candidate);
-  if (!rawBox) {
-    return null;
-  }
-
-  const payloadSpace = String(payload?.coordinateSpace ?? payload?.bboxCoordinateSpace ?? candidate.coordinateSpace ?? "").toLowerCase();
-  const sourceWidth = readPositiveInteger(payload?.width ?? payload?.imageWidth ?? candidate.imageWidth) || originalWidth;
-  const sourceHeight = readPositiveInteger(payload?.height ?? payload?.imageHeight ?? candidate.imageHeight) || originalHeight;
-  let { x1, y1, x2, y2 } = rawBox;
-
-  if (payloadSpace.includes("1000") && originalWidth && originalHeight) {
-    x1 = (x1 / 1000) * originalWidth;
-    x2 = (x2 / 1000) * originalWidth;
-    y1 = (y1 / 1000) * originalHeight;
-    y2 = (y2 / 1000) * originalHeight;
-  } else if (sourceWidth && sourceHeight && originalWidth && originalHeight && (sourceWidth !== originalWidth || sourceHeight !== originalHeight)) {
-    x1 = (x1 / sourceWidth) * originalWidth;
-    x2 = (x2 / sourceWidth) * originalWidth;
-    y1 = (y1 / sourceHeight) * originalHeight;
-    y2 = (y2 / sourceHeight) * originalHeight;
-  }
-
-  const left = Math.max(0, Math.round(Math.min(x1, x2)));
-  const top = Math.max(0, Math.round(Math.min(y1, y2)));
-  const right = originalWidth ? Math.min(originalWidth, Math.round(Math.max(x1, x2))) : Math.round(Math.max(x1, x2));
-  const bottom = originalHeight ? Math.min(originalHeight, Math.round(Math.max(y1, y2))) : Math.round(Math.max(y1, y2));
-  if (right - left < 2 || bottom - top < 2) {
-    return null;
-  }
-  return { x1: left, y1: top, x2: right, y2: bottom };
-}
-
-function readRawOcrBox(candidate) {
-  if (!candidate || typeof candidate !== "object") {
-    return null;
-  }
-
-  const direct = boxFromNumericFields(candidate);
-  if (direct) {
-    return direct;
-  }
-
-  for (const key of ["bbox", "box", "rect", "rectangle", "position"]) {
-    const box = boxFromArrayOrObject(candidate[key]);
-    if (box) {
-      return box;
-    }
-  }
-
-  for (const key of ["polygon", "poly", "points", "polygon_points", "rec_poly", "det_poly"]) {
-    const box = boxFromPolygon(candidate[key]);
-    if (box) {
-      return box;
-    }
-  }
-
-  return null;
-}
-
-function boxFromNumericFields(value) {
-  const x1 = Number(value.x1 ?? value.left);
-  const y1 = Number(value.y1 ?? value.top);
-  const x2 = Number(value.x2 ?? value.right);
-  const y2 = Number(value.y2 ?? value.bottom);
-  if ([x1, y1, x2, y2].every(Number.isFinite)) {
-    return { x1, y1, x2, y2 };
-  }
-
-  const x = Number(value.x);
-  const y = Number(value.y);
-  const w = Number(value.w ?? value.width);
-  const h = Number(value.h ?? value.height);
-  if ([x, y, w, h].every(Number.isFinite)) {
-    return { x1: x, y1: y, x2: x + w, y2: y + h };
-  }
-
-  return null;
-}
-
-function boxFromArrayOrObject(value) {
-  if (!value) {
-    return null;
-  }
-  if (Array.isArray(value)) {
-    if (value.length >= 4 && value.every((item) => typeof item === "number" || typeof item === "string")) {
-      const numbers = value.slice(0, 4).map(Number);
-      if (numbers.every(Number.isFinite)) {
-        return { x1: numbers[0], y1: numbers[1], x2: numbers[2], y2: numbers[3] };
-      }
-    }
-    return boxFromPolygon(value);
-  }
-  if (typeof value === "object") {
-    return boxFromNumericFields(value);
-  }
-  return null;
-}
-
-function boxFromPolygon(value) {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-  const points = [];
-  for (const point of value) {
-    if (Array.isArray(point) && point.length >= 2) {
-      const x = Number(point[0]);
-      const y = Number(point[1]);
-      if (Number.isFinite(x) && Number.isFinite(y)) {
-        points.push({ x, y });
-      }
-    } else if (point && typeof point === "object") {
-      const x = Number(point.x);
-      const y = Number(point.y);
-      if (Number.isFinite(x) && Number.isFinite(y)) {
-        points.push({ x, y });
-      }
-    }
-  }
-  if (points.length === 0) {
-    return null;
-  }
-  return {
-    x1: Math.min(...points.map((point) => point.x)),
-    y1: Math.min(...points.map((point) => point.y)),
-    x2: Math.max(...points.map((point) => point.x)),
-    y2: Math.max(...points.map((point) => point.y))
-  };
-}
-
-function isIgnoredOcrLabel(label) {
-  const normalized = sanitizeHintLabel(label);
-  return [
-    "image",
-    "header_image",
-    "footer_image",
-    "chart",
-    "table",
-    "figure",
-    "seal",
-    "formula",
-    "display_formula",
-    "inline_formula",
-    "number",
-    "footer",
-    "header"
-  ].includes(normalized);
-}
-
 function buildLaunchArgs(options) {
   const launchTarget = inspectModelLaunch(options);
   if (launchTarget.launchMode === "local" && !launchTarget.modelPath) {
@@ -3840,7 +3372,8 @@ function buildLaunchArgs(options) {
     "--frequency-penalty",
     "0",
     ...(useBeellamaGemmaLaunch ? [] : ["--fit", "on", "--fit-target", String(options.fitTargetMb)]),
-    ...resolveGpuLayerArgs(options),
+    "-ngl",
+    "all",
     "-fa",
     "on",
     "--temp",
@@ -3870,15 +3403,7 @@ function buildLaunchArgs(options) {
   ];
 
   if (useBeellamaGemmaLaunch) {
-    args.push("--kv-unified");
-  }
-  if (shouldUseChatmlTemplate(options)) {
-    args.push("--no-jinja", "--chat-template", "chatml");
-  } else if (useBeellamaGemmaLaunch) {
-    args.push("--jinja");
-  }
-  if (useBeellamaGemmaLaunch) {
-    args.push("--no-mmap", "--mlock", "--no-host");
+    args.push("--kv-unified", "--jinja", "--no-mmap", "--mlock", "--no-host");
   }
   if (typeof options.threads === "number" && Number.isFinite(options.threads) && options.threads > 0) {
     args.push("--threads", String(Math.round(options.threads)));
@@ -3939,14 +3464,6 @@ function buildLaunchArgs(options) {
   args.push("--log-timestamps", "--log-prefix", "--log-colors", "off");
 
   return args;
-}
-
-function resolveGpuLayerArgs(options = {}) {
-  const configured = process.env.MANGA_TRANSLATOR_N_GPU_LAYERS || process.env.LLAMA_ARG_N_GPU_LAYERS;
-  if (configured && String(configured).trim()) {
-    return ["-ngl", String(configured).trim()];
-  }
-  return ["-ngl", "all"];
 }
 
 function resolveDraftModelRepoArg(options = {}) {
@@ -4190,7 +3707,7 @@ async function requestTranslation(server, options) {
     if (ocrBboxResult.diagnostics.length > 0) {
       requestSummary.ocrBboxDiagnostics = ocrBboxResult.diagnostics;
     }
-    emitRuntimeProgress(promptOptions, "page_done", "페이지 텍스트 없음", "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다.");
+    emitRuntimeProgress(promptOptions, "page_done", "페이지 텍스트 없음", "Paddle OCR에서 일본어 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다.");
     return {
       requestBody: requestSummary,
       rawResponse: {
@@ -4204,7 +3721,7 @@ async function requestTranslation(server, options) {
   }
 
   const preparedVariants = shouldSendInitialImages(promptOptions)
-    ? await prepareImageVariants(options)
+    ? await prepareImageVariants(promptOptions)
     : { imageVariants: [], diagnostics: [] };
   const imageVariants = preparedVariants.imageVariants;
   const promptText = promptOptions.promptOverrideText || getOverlayPrompt(promptOptions, imageVariants);
@@ -4254,25 +3771,6 @@ async function requestTranslation(server, options) {
   };
 
   if (!response.ok) {
-    if (
-      isImageInputUnsupportedResponse(rawText) &&
-      shouldSendInitialImages(promptOptions) &&
-      ocrBboxResult.textEvidenceCount > 0
-    ) {
-      emitRuntimeProgress(
-        promptOptions,
-        "model_requesting",
-        "이미지 미지원 모델 감지",
-        "OCR 텍스트만 사용해 다시 번역합니다."
-      );
-      return requestTranslation(server, {
-        ...options,
-        label: `${options.label || "page"}-ocr-text-fallback`,
-        translationMode: "ocr-text",
-        promptOverrideText: undefined,
-        ocrBboxHints: ocrBboxResult.hints
-      });
-    }
     throw createDetailedError(`${resolveProviderDisplayName(promptOptions)} request failed (${response.status}).`, {
       requestSummary,
       status: response.status,
@@ -4311,10 +3809,6 @@ async function requestTranslation(server, options) {
   };
 }
 
-function isImageInputUnsupportedResponse(rawText = "") {
-  return /image input is not supported|image input.*unsupported|images?.*not supported/i.test(String(rawText));
-}
-
 async function requestCropRetryTranslation(server, options, targets = []) {
   const retryTargets = Array.isArray(targets) ? targets.filter((target) => Number.isFinite(Number(target?.id))) : [];
   if (retryTargets.length === 0) {
@@ -4335,12 +3829,11 @@ async function requestCropRetryTranslation(server, options, targets = []) {
     };
   }
 
-  const promptText = options.promptOverrideText || buildCropRetryPrompt(retryTargets, options);
+  const promptText = options.promptOverrideText || buildCropRetryPrompt(retryTargets);
   const promptOptions = {
     ...options,
     promptOverrideText: promptText,
-    ocrBboxHints: [],
-    forceImageInput: true
+    ocrBboxHints: []
   };
   const systemPrompt = buildSystemPrompt(promptOptions);
   const requestBody = isOpenAICodexProvider(promptOptions)
@@ -4735,8 +4228,6 @@ async function saveArtifacts(options, result) {
       codexModel: resolveConfiguredCodexModel(options),
       codexReasoningEffort: resolveConfiguredCodexReasoningEffort(options),
       codexOauthPort: options.codexOauthPort,
-      includeSoundEffects: shouldIncludeSoundEffects(options),
-      translationMode: resolveTranslationMode(options),
       fitTargetMb: options.fitTargetMb,
       imageMinTokens: options.imageMinTokens,
       imageMaxTokens: options.imageMaxTokens,
@@ -4760,8 +4251,10 @@ async function saveArtifacts(options, result) {
 module.exports = {
   buildMessages,
   buildLaunchArgs,
+  buildOcrRuntimeEnv,
   buildResponsesRequestBody,
   collectRequiredHfDownloads,
+  collectRequiredPaddleOcrModelDownloads,
   collectOcrBboxHints,
   collectOcrBboxHintsBatch,
   convertImageToPngBufferWithFfmpeg,
@@ -4770,8 +4263,12 @@ module.exports = {
   getOverlayPrompt,
   getScaledSize,
   parseOcrBatchProgressLine,
+  parsePaddleModelFetchProgress,
   parsePipRawProgress,
   resolveTranslationMode,
+  resolveOcrBboxTimeoutMs,
+  resolveOcrGpuCudaTag,
+  resolveOcrGpuPackageIndexUrl,
   resolveOcrInstallBatchProgressRanges,
   resolveFfmpegPath,
   resolveManagedHfFilePath,
