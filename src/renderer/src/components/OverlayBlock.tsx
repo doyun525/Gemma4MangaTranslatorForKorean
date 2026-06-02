@@ -47,8 +47,7 @@ export function OverlayBlock({
     padding: layout.paddingPx,
     overflow: "visible",
     color: block.textColor,
-    borderWidth: showChrome ? 2 : 0,
-    borderColor: showChrome ? visualStyle.borderColor : "transparent",
+    border: "none",
     backgroundColor: showChrome ? hexToRgba(block.backgroundColor || visualStyle.backgroundColor, block.opacity) : "transparent",
     fontFamily: resolveBlockFontFamily(block.fontFamily),
     fontSize: `${layout.fontSizePx}px`,
@@ -97,7 +96,7 @@ export function OverlayBlock({
         `block-${block.type}`,
         selected ? "selected" : "",
         excluded ? "excluded" : "",
-        showChrome ? "" : "chrome-hidden"
+        showChrome ? "chrome-visible" : "chrome-hidden"
       ]
         .filter(Boolean)
         .join(" ")}

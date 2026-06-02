@@ -32,6 +32,7 @@ import { InpaintingProvider, type InpaintingContextValue } from "./inpainting/In
 import type { ShareImportModalSubmit } from "./components/ShareImportModal";
 import type { TranslateSourceMode } from "./components/TranslateSourceModal";
 import { useConfirmDialog } from "./hooks/useConfirmDialog";
+import { useChapterEditHistory, type ChapterEditSnapshot } from "./hooks/useChapterEditHistory";
 import { useChapterPersistence } from "./hooks/useChapterPersistence";
 import { useJobEvents } from "./hooks/useJobEvents";
 import { usePageImageDataUrls } from "./hooks/usePageImageDataUrls";
@@ -158,6 +159,7 @@ export default function App(): React.JSX.Element {
     jobActive,
     setCurrentChapter
   });
+  const { recordEditHistory, undoEdit, redoEdit } = useChapterEditHistory(currentChapter?.id ?? null);
   const modalOpen = Boolean(
     translationSourceOpen || importPreview || shareExportOpen || shareImportPreview || renameTarget || settingsOpen || confirmDialog || inpaintingGuideOpen
   );
@@ -856,6 +858,73 @@ export default function App(): React.JSX.Element {
     });
   }, [markDirty]);
 
+  const getCurrentEditSnapshot = useCallback((): ChapterEditSnapshot | null => {
+    const chapter = currentChapterRef.current;
+    if (!chapter) {
+      return null;
+    }
+    return {
+      chapter,
+      selectedPageId: selectedPageIdRef.current,
+      selectedBlockId: selectedBlockIdRef.current
+    };
+  }, []);
+
+  const recordEditHistoryBeforeChange = useCallback(
+    (options?: { force?: boolean }) => {
+      const snapshot = getCurrentEditSnapshot();
+      if (snapshot) {
+        recordEditHistory(snapshot, options);
+      }
+    },
+    [getCurrentEditSnapshot, recordEditHistory]
+  );
+
+  const applyEditSnapshot = useCallback(
+    (snapshot: ChapterEditSnapshot) => {
+      currentChapterRef.current = snapshot.chapter;
+      setCurrentChapter(snapshot.chapter);
+      setSelectedPageId(snapshot.selectedPageId);
+      setSelectedBlockId(snapshot.selectedBlockId);
+      for (const page of snapshot.chapter.pages) {
+        markDirty(page.id);
+      }
+    },
+    [markDirty]
+  );
+
+  const undoChapterEdit = useCallback(() => {
+    if (jobActive) {
+      return;
+    }
+    const current = getCurrentEditSnapshot();
+    if (!current) {
+      return;
+    }
+    const previous = undoEdit(current);
+    if (!previous) {
+      return;
+    }
+    applyEditSnapshot(previous);
+    pushStatus("편집을 되돌렸습니다.");
+  }, [applyEditSnapshot, getCurrentEditSnapshot, jobActive, pushStatus, undoEdit]);
+
+  const redoChapterEdit = useCallback(() => {
+    if (jobActive) {
+      return;
+    }
+    const current = getCurrentEditSnapshot();
+    if (!current) {
+      return;
+    }
+    const next = redoEdit(current);
+    if (!next) {
+      return;
+    }
+    applyEditSnapshot(next);
+    pushStatus("편집을 다시 적용했습니다.");
+  }, [applyEditSnapshot, getCurrentEditSnapshot, jobActive, pushStatus, redoEdit]);
+
   const removePage = useCallback(
     async (pageId: string) => {
       if (!currentChapter) {
@@ -910,6 +979,7 @@ export default function App(): React.JSX.Element {
       return;
     }
 
+    recordEditHistoryBeforeChange();
     updateCurrentChapter(selectedPage.id, (current) => ({
       ...current,
       pages: current.pages.map((page) =>
@@ -948,6 +1018,7 @@ export default function App(): React.JSX.Element {
     if (!selectedPage || jobActive) {
       return;
     }
+    recordEditHistoryBeforeChange();
     updateCurrentChapter(selectedPage.id, (current) => ({
       ...current,
       pages: current.pages.map((page) =>
@@ -964,10 +1035,11 @@ export default function App(): React.JSX.Element {
     }));
   };
 
-  const deleteSelectedBlock = () => {
+  const deleteSelectedBlock = useCallback(() => {
     if (!selectedPage || !selectedBlock || selectedPageEditLocked) {
       return;
     }
+    recordEditHistoryBeforeChange({ force: true });
     updateCurrentChapter(selectedPage.id, (current) => ({
       ...current,
       pages: current.pages.map((page) =>
@@ -981,12 +1053,13 @@ export default function App(): React.JSX.Element {
       )
     }));
     setSelectedBlockId(null);
-  };
+  }, [recordEditHistoryBeforeChange, selectedBlock, selectedPage, selectedPageEditLocked, updateCurrentChapter]);
 
-  const duplicateSelectedBlock = () => {
+  const duplicateSelectedBlock = useCallback(() => {
     if (!selectedPage || !selectedBlock || selectedPageEditLocked) {
       return;
     }
+    recordEditHistoryBeforeChange({ force: true });
     const copy = {
       ...offsetBlockBboxes(selectedBlock, 16, 16, { width: selectedPage.width, height: selectedPage.height }),
       id: `${selectedBlock.id}-copy-${Date.now()}`
@@ -1004,7 +1077,7 @@ export default function App(): React.JSX.Element {
       )
     }));
     setSelectedBlockId(copy.id);
-  };
+  }, [recordEditHistoryBeforeChange, selectedBlock, selectedPage, selectedPageEditLocked, updateCurrentChapter]);
 
   const applyBackgroundSamples = useCallback(
     (samples: Array<{ id: string; flat: boolean; backgroundColor?: string }>, scopeLabel: string) => {
@@ -1014,6 +1087,7 @@ export default function App(): React.JSX.Element {
 
       const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
       let appliedCount = 0;
+      recordEditHistoryBeforeChange();
       updateCurrentChapter(selectedPage.id, (current) => ({
         ...current,
         pages: current.pages.map((page) =>
@@ -1044,7 +1118,7 @@ export default function App(): React.JSX.Element {
         pushStatus(`${scopeLabel}: 단색 배경을 찾지 못했습니다.`);
       }
     },
-    [pushStatus, selectedPage, updateCurrentChapter]
+    [pushStatus, recordEditHistoryBeforeChange, selectedPage, updateCurrentChapter]
   );
 
   const sampleSelectedBlockBackground = useCallback(async () => {
@@ -1277,6 +1351,7 @@ export default function App(): React.JSX.Element {
     }
     event.preventDefault();
     event.stopPropagation();
+    recordEditHistoryBeforeChange({ force: true });
     setSelectedBlockId(block.id);
     const pageSize = selectedPage ? { width: selectedPage.width, height: selectedPage.height } : null;
     const displayText = block.translatedText || block.sourceText || "...";
@@ -1465,19 +1540,39 @@ export default function App(): React.JSX.Element {
       const pageIds = currentChapterRef.current?.pages.map((page) => page.id) ?? [];
       const activeElement = typeof document !== "undefined" ? document.activeElement : null;
       const editableTarget = isEditableTarget(event.target);
-      if (inpaintingMode && !modalOpen && !editableTarget && (event.ctrlKey || event.metaKey)) {
-        const key = event.key.toLowerCase();
-        if (key === "z" && !event.shiftKey) {
+
+      if (!modalOpen && !editableTarget) {
+        if ((event.key === "Delete" || event.key === "Backspace") && selectedBlockIdRef.current && !selectedPageEditLocked && !inpaintingToolActive) {
           event.preventDefault();
-          void undoRetouch();
+          deleteSelectedBlock();
           return;
         }
-        if (key === "y" || (key === "z" && event.shiftKey)) {
-          event.preventDefault();
-          void redoRetouch();
-          return;
+
+        if (event.ctrlKey || event.metaKey) {
+          const key = event.key.toLowerCase();
+          if (inpaintingMode && inpaintingToolActive && key === "z" && !event.shiftKey) {
+            event.preventDefault();
+            void undoRetouch();
+            return;
+          }
+          if (inpaintingMode && inpaintingToolActive && (key === "y" || (key === "z" && event.shiftKey))) {
+            event.preventDefault();
+            void redoRetouch();
+            return;
+          }
+          if (key === "z" && !event.shiftKey) {
+            event.preventDefault();
+            undoChapterEdit();
+            return;
+          }
+          if (key === "y" || (key === "z" && event.shiftKey)) {
+            event.preventDefault();
+            redoChapterEdit();
+            return;
+          }
         }
       }
+
       const navigation = resolveKeyboardPageNavigation({
         key: event.key,
         hasPages: pageIds.length > 0,
@@ -1503,7 +1598,18 @@ export default function App(): React.JSX.Element {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [inpaintingMode, modalOpen, redoRetouch, selectAdjacentPageForReading, undoRetouch]);
+  }, [
+    deleteSelectedBlock,
+    inpaintingMode,
+    inpaintingToolActive,
+    modalOpen,
+    redoChapterEdit,
+    redoRetouch,
+    selectAdjacentPageForReading,
+    selectedPageEditLocked,
+    undoChapterEdit,
+    undoRetouch
+  ]);
 
   const onWorkspaceWheel = useCallback(
     (event: React.WheelEvent<HTMLElement>) => {

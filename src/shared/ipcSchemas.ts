@@ -52,6 +52,7 @@ export const TranslationBlockSchema = z
     textAlign: z.enum(["left", "center", "right"]),
     textColor: hexColor,
     outlineColor: hexColor.optional(),
+    outlineWidthPx: finiteNumber.min(0).max(8).optional(),
     backgroundColor: hexColor,
     opacity: finiteNumber.min(0).max(1),
     autoFitText: z.boolean().optional(),

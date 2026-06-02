@@ -1962,24 +1962,31 @@ select {
 
 .overlay-block {
   position: absolute;
+  z-index: 10;
   display: grid;
   place-items: center;
   overflow: visible;
-  border: 2px solid rgba(50, 50, 50, 0.32);
+  border: none;
   border-radius: 4px;
   font-weight: 700;
   white-space: pre-wrap;
   cursor: move;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
-}
-
-.overlay-block.chrome-hidden {
   box-shadow: none;
 }
 
+.overlay-block.chrome-visible {
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+}
+
 .overlay-block.selected {
+  z-index: 18;
   outline: 2px solid #6aa9ff;
   outline-offset: 2px;
+}
+
+.overlay-block.chrome-hidden {
+  box-shadow: none !important;
+  background: transparent !important;
 }
 
 .overlay-block.excluded {
@@ -2124,6 +2131,7 @@ select {
   justify-content: center;
   overflow: visible;
   text-align: inherit;
+  pointer-events: none;
 }
 
 .overlay-text-content {
@@ -2136,10 +2144,12 @@ select {
   overflow: visible;
   overflow-wrap: anywhere;
   word-break: break-word;
+  pointer-events: none;
 }
 
 .resize-handle {
   position: absolute;
+  z-index: 24;
   right: 0;
   bottom: 0;
   width: 18px;
@@ -2148,6 +2158,18 @@ select {
   border-radius: 4px 0 4px 0;
   border: 0;
   background: #6aa9ff;
+  cursor: nwse-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  right: -8px;
+  bottom: -8px;
+  width: 34px;
+  height: 34px;
   cursor: nwse-resize;
 }
 

@@ -3,6 +3,7 @@ import {
   ChapterSnapshotSchema,
   parseIpcPayload,
   SaveChapterSnapshotSchema,
+  SavePageBlocksRequestSchema,
   StartAnalysisRequestSchema,
   WorkShareImportRequestSchema
 } from "../src/shared/ipcSchemas";
@@ -77,6 +78,26 @@ describe("IPC schemas", () => {
         "화 저장"
       )
     ).toThrow(/요청 형식/);
+  });
+
+  it("accepts page block saves with outline width", () => {
+    const payload = makeChapterSnapshot();
+    const parsed = parseIpcPayload(
+      SavePageBlocksRequestSchema,
+      {
+        chapterId,
+        pageId,
+        blocks: [
+          {
+            ...payload.pages[0].blocks[0],
+            outlineColor: "#ffffff",
+            outlineWidthPx: 1.4
+          }
+        ]
+      },
+      "페이지 블록 저장"
+    );
+    expect(parsed.blocks[0]?.outlineWidthPx).toBe(1.4);
   });
 });
 
