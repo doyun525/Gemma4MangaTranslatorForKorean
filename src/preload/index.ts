@@ -19,6 +19,10 @@ import type {
   LocalModelPickResult,
   ModelTestProgressEvent,
   ModelTestResult,
+  CaptureWebSegmentRequest,
+  CaptureWebSegmentResult,
+  OpenWebBrowseRequest,
+  OpenWebBrowseResult,
   RegionAnalysisRequest,
   RegionAnalysisResult,
   SavePageBlocksRequest,
@@ -30,6 +34,10 @@ import type {
   StartInpaintingResult,
   StartAnalysisRequest,
   StartAnalysisResult,
+  ScrollWebBrowserRequest,
+  SetWebAutoTranslateRequest,
+  SyncWebBrowserBoundsRequest,
+  WebBrowseState,
   WorkShareExportRequest,
   WorkShareExportResult,
   WorkShareImportPreview,
@@ -91,6 +99,14 @@ const api = {
     ipcRenderer.invoke("inpainting:export-results", request),
   disposeInpaintingEngine: (): Promise<{ disposed: boolean }> => ipcRenderer.invoke("inpainting:dispose-engine"),
   cancelJob: () => ipcRenderer.invoke("job:cancel"),
+  openWebBrowse: (request: OpenWebBrowseRequest): Promise<OpenWebBrowseResult> => ipcRenderer.invoke("web:open", request),
+  closeWebBrowse: (sessionId: string): Promise<{ closed: boolean }> => ipcRenderer.invoke("web:close", { sessionId }),
+  captureWebSegment: (request: CaptureWebSegmentRequest): Promise<CaptureWebSegmentResult> =>
+    ipcRenderer.invoke("web:capture-segment", request),
+  syncWebBrowserBounds: (request: SyncWebBrowserBoundsRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:sync-bounds", request),
+  setWebAutoTranslate: (request: SetWebAutoTranslateRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:set-auto-translate", request),
+  scrollWebBrowser: (request: ScrollWebBrowserRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:scroll", request),
+  getWebBrowseState: (sessionId: string): Promise<WebBrowseState> => ipcRenderer.invoke("web:get-state", { sessionId }),
   onJobEvent: (callback: (event: JobEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: JobEvent) => callback(payload);
     ipcRenderer.on("job:event", listener);

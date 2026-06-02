@@ -7,7 +7,9 @@ import type {
   JobState,
   LibraryIndex,
   MangaPage,
+  OpenWebBrowseRequest,
   TranslationBlock,
+  WebBrowseState,
   WorkShareExportRequest,
   WorkShareImportPreview
 } from "../../shared/types";
@@ -26,6 +28,7 @@ import { AppModals, type RenameTarget } from "./components/AppModals";
 import { AppSidebar } from "./components/AppSidebar";
 import { AppRightRail } from "./components/AppRightRail";
 import { AppWorkspace } from "./components/AppWorkspace";
+import { WebBrowseModal } from "./components/WebBrowseModal";
 import type { ImportModalSubmit } from "./components/ImportModal";
 import { type BlockCounts, type InpaintingTool } from "./components/InpaintingControlPanel";
 import { InpaintingProvider, type InpaintingContextValue } from "./inpainting/InpaintingContext";
@@ -93,6 +96,11 @@ export default function App(): React.JSX.Element {
   const [jobState, setJobState] = useState<JobState>(EMPTY_JOB);
   const { statusLines, appendStatusLine, pushStatus, clearStatusLines } = useStatusLog();
   const [translationSourceOpen, setTranslationSourceOpen] = useState(false);
+  const [webBrowseOpen, setWebBrowseOpen] = useState(false);
+  const [webBrowseBusy, setWebBrowseBusy] = useState(false);
+  const [webCaptureBusy, setWebCaptureBusy] = useState(false);
+  const [webTranslateAfterCapture, setWebTranslateAfterCapture] = useState(true);
+  const [webSession, setWebSession] = useState<WebBrowseState | null>(null);
   const [importPreview, setImportPreview] = useState<ImportPreviewSession | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [fileDropActive, setFileDropActive] = useState(false);
@@ -121,6 +129,7 @@ export default function App(): React.JSX.Element {
   const [showTextBlocks, setShowTextBlocks] = useState(true);
   const { settings, settingsOpen, settingsBusy, openSettings, closeSettings, submitSettings, resetSettings } = useSettingsDialog(pushStatus);
   const workspacePanelRef = useRef<HTMLElement | null>(null);
+  const webBrowserHostRef = useRef<HTMLDivElement | null>(null);
   const fileDragDepthRef = useRef(0);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -162,7 +171,7 @@ export default function App(): React.JSX.Element {
   });
   const { recordEditHistory, undoEdit, redoEdit } = useChapterEditHistory(currentChapter?.id ?? null);
   const modalOpen = Boolean(
-    translationSourceOpen || importPreview || shareExportOpen || shareImportPreview || renameTarget || settingsOpen || confirmDialog || inpaintingGuideOpen
+    translationSourceOpen || webBrowseOpen || importPreview || shareExportOpen || shareImportPreview || renameTarget || settingsOpen || confirmDialog || inpaintingGuideOpen
   );
   const selectedPageEditLocked = Boolean(jobActive && selectedPage && selectedPage.analysisStatus !== "completed");
   const selectedPageSize = useMemo(
@@ -249,6 +258,49 @@ export default function App(): React.JSX.Element {
   }, [selectedPage]);
 
   React.useEffect(() => {
+    if (!webSession || !webBrowserHostRef.current) {
+      return;
+    }
+
+    let frame = 0;
+    const syncBounds = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (modalOpen) {
+          void window.mangaApi.syncWebBrowserBounds({
+            sessionId: webSession.sessionId,
+            bounds: { x: 0, y: 0, width: 0, height: 0 }
+          });
+          return;
+        }
+        const rect = webBrowserHostRef.current?.getBoundingClientRect();
+        if (!rect) {
+          return;
+        }
+        void window.mangaApi.syncWebBrowserBounds({
+          sessionId: webSession.sessionId,
+          bounds: {
+            x: Math.max(0, Math.round(rect.left)),
+            y: Math.max(0, Math.round(rect.top)),
+            width: Math.max(0, Math.round(rect.width)),
+            height: Math.max(0, Math.round(rect.height))
+          }
+        });
+      });
+    };
+
+    const observer = new ResizeObserver(syncBounds);
+    observer.observe(webBrowserHostRef.current);
+    window.addEventListener("resize", syncBounds);
+    syncBounds();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", syncBounds);
+    };
+  }, [modalOpen, webSession?.sessionId]);
+
+  React.useEffect(() => {
     if (!inpaintingToolActive) {
       setRetouchCursorPoint(null);
       setRetouchPreview(null);
@@ -299,13 +351,21 @@ export default function App(): React.JSX.Element {
         await saveNow();
       }
       const chapter = await window.mangaApi.openChapter(chapterId);
+      if (webSession) {
+        try {
+          await window.mangaApi.closeWebBrowse(webSession.sessionId);
+        } catch (error) {
+          console.error(error);
+        }
+        setWebSession(null);
+      }
       clearDirtyTracking();
       currentChapterRef.current = chapter;
       setCurrentChapter(chapter);
       setSelectedPageId(chapter.pages[0]?.id ?? null);
       setSelectedBlockId(null);
     },
-    [clearDirtyTracking, dirty, saveNow]
+    [clearDirtyTracking, dirty, saveNow, webSession]
   );
 
   const applyChapter = useCallback((chapter: ChapterSnapshot | undefined, fallbackStatus?: string) => {
@@ -561,6 +621,126 @@ export default function App(): React.JSX.Element {
     },
     [clearStatusLines, currentChapter, jobActive, mergeLiveChapter, pushStatus, refreshLibrary, saveNow]
   );
+
+  const openWebBrowse = useCallback(
+    async (request: OpenWebBrowseRequest) => {
+      if (dirty) {
+        await saveNow();
+      }
+      setWebBrowseBusy(true);
+      try {
+        const result = await window.mangaApi.openWebBrowse(request);
+        clearDirtyTracking();
+        currentChapterRef.current = result.openedChapter;
+        setCurrentChapter(result.openedChapter);
+        setSelectedPageId(result.openedChapter.pages[0]?.id ?? null);
+        setSelectedBlockId(null);
+        setWebSession({
+          sessionId: result.sessionId,
+          chapterId: result.chapterId,
+          url: result.url,
+          title: result.title,
+          mode: request.mode || "manual",
+          segmentCount: 0,
+          autoTranslate: false
+        });
+        setWebBrowseOpen(false);
+        await refreshLibrary();
+        pushStatus("웹 페이지를 열었습니다. 현재 화면 캡처를 누르면 보관함에 페이지로 추가됩니다.");
+      } catch (error) {
+        console.error(error);
+        pushStatus(formatErrorMessage(error, "웹 페이지를 열지 못했습니다."));
+      } finally {
+        setWebBrowseBusy(false);
+      }
+    },
+    [clearDirtyTracking, dirty, pushStatus, refreshLibrary, saveNow]
+  );
+
+  const closeWebBrowse = useCallback(async () => {
+    if (!webSession) {
+      return;
+    }
+    try {
+      await window.mangaApi.closeWebBrowse(webSession.sessionId);
+    } catch (error) {
+      console.error(error);
+    }
+    setWebSession(null);
+  }, [webSession]);
+
+  const captureWebSegment = useCallback(async () => {
+    if (!webSession || webCaptureBusy || jobActive) {
+      return;
+    }
+    if (dirty) {
+      await saveNow();
+    }
+    setWebCaptureBusy(true);
+    try {
+      const result = await window.mangaApi.captureWebSegment({ sessionId: webSession.sessionId, captureMode: "viewport" });
+      clearDirtyTracking();
+      currentChapterRef.current = result.chapter;
+      setCurrentChapter(result.chapter);
+      setSelectedPageId(result.pageId);
+      setSelectedBlockId(null);
+      setWebSession((current) =>
+        current
+          ? {
+              ...current,
+              chapterId: result.chapter.id,
+              segmentCount: result.segmentIndex + 1
+            }
+          : current
+      );
+      await refreshLibrary();
+      clearPageImageCache();
+      pushStatus(`웹 화면을 캡처했습니다: ${result.segmentIndex + 1}번째 세그먼트`);
+
+      if (webTranslateAfterCapture) {
+        clearStatusLines();
+        setJobState({
+          id: "pending",
+          kind: "gemma-analysis",
+          status: "starting",
+          progressText: "모델 준비 중",
+          phase: "booting"
+        });
+        setCurrentChapter((chapter) => (chapter ? markChapterPagesRunning(chapter, "single-page", result.pageId) : chapter));
+        const analysis = await window.mangaApi.startAnalysis({ chapterId: result.chapter.id, runMode: "single-page", pageId: result.pageId });
+        if (analysis.chapter) {
+          mergeLiveChapter(analysis.chapter);
+        }
+        await refreshLibrary();
+        if (analysis.status === "failed" && analysis.error) {
+          pushStatus(analysis.error);
+        } else {
+          const warningSummary = summarizeWarnings(analysis.warnings ?? []);
+          if (warningSummary) {
+            pushStatus(warningSummary);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      pushStatus(formatErrorMessage(error, "웹 화면을 캡처하지 못했습니다."));
+    } finally {
+      setWebCaptureBusy(false);
+    }
+  }, [
+    clearDirtyTracking,
+    clearPageImageCache,
+    clearStatusLines,
+    dirty,
+    jobActive,
+    mergeLiveChapter,
+    pushStatus,
+    refreshLibrary,
+    saveNow,
+    webCaptureBusy,
+    webSession,
+    webTranslateAfterCapture
+  ]);
 
   const enterInpaintingMode = useCallback(async () => {
     if (!currentChapter || jobActive) {
@@ -1889,6 +2069,7 @@ export default function App(): React.JSX.Element {
         settingsOpen={settingsOpen}
         onExitInpainting={exitInpaintingMode}
         onOpenTranslationSource={() => setTranslationSourceOpen(true)}
+        onOpenWebBrowse={() => setWebBrowseOpen(true)}
         onOpenBatchImport={() => void openImportPreview("zip-folder")}
         onOpenSettings={() => void openSettings()}
         onOpenLibraryFolder={() => void window.mangaApi.openLibraryFolder()}
@@ -1906,6 +2087,11 @@ export default function App(): React.JSX.Element {
 
       <AppWorkspace
         workspacePanelRef={workspacePanelRef}
+        webBrowserHostRef={webBrowserHostRef}
+        webModeActive={Boolean(webSession)}
+        webSessionTitle={webSession?.title || webSession?.url}
+        webCaptureBusy={webCaptureBusy}
+        webTranslateAfterCapture={webTranslateAfterCapture}
         selectedPage={selectedPage}
         selectedPageImageDataUrl={workspaceImageDataUrl}
         imageRef={imageRef}
@@ -1937,6 +2123,9 @@ export default function App(): React.JSX.Element {
         onBlockPointerDown={onBlockPointerDown}
         onToggleBlockExcluded={toggleBlockInpaintExcluded}
         onOpenTranslationSource={() => setTranslationSourceOpen(true)}
+        onCaptureWebSegment={() => void captureWebSegment()}
+        onCloseWebBrowse={() => void closeWebBrowse()}
+        onToggleWebTranslateAfterCapture={setWebTranslateAfterCapture}
         onOpenBatchImport={() => void openImportPreview("zip-folder")}
         onOpenShareImport={() => void openShareImportPreview()}
       />
@@ -2029,6 +2218,14 @@ export default function App(): React.JSX.Element {
           setInpaintingGuideOpen(false);
         }}
       />
+      {webBrowseOpen ? (
+        <WebBrowseModal
+          library={library}
+          busy={webBrowseBusy}
+          onCancel={() => setWebBrowseOpen(false)}
+          onSubmit={(request) => void openWebBrowse(request)}
+        />
+      ) : null}
     </main>
     </FontsProvider>
   );

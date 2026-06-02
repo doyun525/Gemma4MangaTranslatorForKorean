@@ -45,6 +45,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       pageIds = resolved.pages.map((page) => page.id);
       await markChapterPagesRunning(request.chapterId, pageIds);
       runPaths = await getRunPaths(request.chapterId, id);
+      await context.translationWarmup.waitForReady();
       const result = await runWholePagePipeline({
         jobId: id,
         emit,
@@ -182,6 +183,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         detail: `${Math.round(cropRect.w)} x ${Math.round(cropRect.h)} px`
       });
 
+      await context.translationWarmup.waitForReady();
       const result = await runWholePagePipeline({
         jobId: id,
         emit,

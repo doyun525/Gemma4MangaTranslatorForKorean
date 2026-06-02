@@ -143,14 +143,14 @@ export const OCR_DEVICE_OPTIONS: OcrDeviceOption[] = [
 
 export const OCR_ENGINE_OPTIONS: OcrEngineOption[] = [
   {
-    id: "paddleocr-vl",
-    label: "PaddleOCR-VL",
-    description: "문서/레이아웃 분석까지 포함합니다. 정확도는 높지만 페이지당 시간이 더 걸릴 수 있습니다."
-  },
-  {
     id: "paddleocr-v5",
     label: "PP-OCRv5",
     description: "텍스트 라인 검출 위주로 더 빠르게 동작합니다. 복잡한 페이지에서는 후보가 덜 나올 수 있습니다."
+  },
+  {
+    id: "paddleocr-vl",
+    label: "PaddleOCR-VL",
+    description: "문서/레이아웃 분석까지 포함합니다. 정확도는 높지만 페이지당 시간이 더 걸릴 수 있습니다."
   }
 ];
 

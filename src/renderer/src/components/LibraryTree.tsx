@@ -181,7 +181,7 @@ function SortableChapterItem({
         <span className="drag-grip" aria-hidden="true" />
       </button>
       <button className="chapter-select" onClick={() => onOpenChapter(chapter.id)} title={chapter.title}>
-        <span>{chapter.title}</span>
+        <span>{chapter.sourceKind === "web" ? "웹 " : ""}{chapter.title}</span>
         <small>
           {chapter.pageCount}페이지 · {resolveChapterStatusLabel(chapter.status)}
         </small>
@@ -206,7 +206,7 @@ function ChapterDragPreview({ chapter, active }: { chapter: LibraryChapterSummar
         <span className="drag-grip" aria-hidden="true" />
       </span>
       <div className="chapter-select preview-select" title={chapter.title}>
-        <span>{chapter.title}</span>
+        <span>{chapter.sourceKind === "web" ? "웹 " : ""}{chapter.title}</span>
         <small>
           {chapter.pageCount}페이지 · {resolveChapterStatusLabel(chapter.status)}
         </small>

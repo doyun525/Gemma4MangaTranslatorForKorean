@@ -496,6 +496,32 @@ describe("runtime model launch helpers", () => {
     expect(result.hints[0]).toMatchObject({ x1: 67, y1: 589, x2: 267, y2: 760, ocrText: "いえ…" });
   });
 
+  it("prefetches only PP-OCRv5 model assets when the v5 OCR engine is selected", () => {
+    const tasks = runtimeHelpers.collectRequiredPaddleOcrModelDownloads(
+      { ocrEngine: "paddleocr-v5" },
+      { runtimeDir: "C:/ocr-runtime" }
+    );
+    const repos = new Set(tasks.map((task) => task.repo));
+
+    expect(repos).toContain("PaddlePaddle/PP-OCRv5_server_det");
+    expect(repos).toContain("PaddlePaddle/PP-OCRv5_server_rec");
+    expect([...repos].some((repo) => repo.includes("PaddleOCR-VL"))).toBe(false);
+    expect([...repos].some((repo) => repo.includes("PP-DocLayoutV3"))).toBe(false);
+  });
+
+  it("keeps VL prefetch assets when PaddleOCR-VL is selected", () => {
+    const tasks = runtimeHelpers.collectRequiredPaddleOcrModelDownloads(
+      { ocrEngine: "paddleocr-vl" },
+      { runtimeDir: "C:/ocr-runtime" }
+    );
+    const repos = new Set(tasks.map((task) => task.repo));
+
+    expect(repos).toContain("PaddlePaddle/PaddleOCR-VL-1.5");
+    expect(repos).toContain("PaddlePaddle/PP-DocLayoutV3");
+    expect(repos).toContain("PaddlePaddle/PP-OCRv5_server_det");
+    expect(repos).toContain("PaddlePaddle/PP-OCRv5_server_rec");
+  });
+
   it("uses the same tight Japanese glyph bbox prompt for Gemma chat requests", () => {
     const messages = buildMessages(
       {

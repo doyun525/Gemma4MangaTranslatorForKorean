@@ -96,7 +96,7 @@ export function SettingsModal({
   );
   const [codexOauthPort, setCodexOauthPort] = React.useState(String(initialSettings.codex.oauthPort));
   const [ocrDevice, setOcrDevice] = React.useState<OcrDevice>(initialSettings.ocr.device);
-  const [ocrEngine, setOcrEngine] = React.useState<OcrEngine>(initialSettings.ocr.engine ?? "paddleocr-vl");
+  const [ocrEngine, setOcrEngine] = React.useState<OcrEngine>(initialSettings.ocr.engine ?? "paddleocr-v5");
   const [ocrBatchSize, setOcrBatchSize] = React.useState(
     numberToInput(initialSettings.ocr.batchSize, DEFAULT_OCR_BATCH_SIZE)
   );
@@ -142,7 +142,7 @@ export function SettingsModal({
     setCodexReasoningEffort(initialSettings.codex.reasoningEffort);
     setCodexOauthPort(String(initialSettings.codex.oauthPort));
     setOcrDevice(initialSettings.ocr.device);
-    setOcrEngine(initialSettings.ocr.engine ?? "paddleocr-vl");
+    setOcrEngine(initialSettings.ocr.engine ?? "paddleocr-v5");
     setOcrBatchSize(numberToInput(initialSettings.ocr.batchSize, DEFAULT_OCR_BATCH_SIZE));
     setTranslationMode(resolveTranslationMode(initialSettings.translation?.mode));
     setIncludeSoundEffects(initialSettings.translation.includeSoundEffects);

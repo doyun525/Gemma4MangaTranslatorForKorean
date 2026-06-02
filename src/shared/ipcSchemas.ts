@@ -65,7 +65,54 @@ export const TranslationBlockSchema = z
 
 const PageAnalysisStatusSchema = z.enum(["idle", "running", "completed", "failed"]);
 const ChapterStatusSchema = z.enum(["idle", "running", "completed", "partial", "failed"]);
-const ImportSourceKindSchema = z.enum(["images", "folder", "zip", "zip-folder"]);
+const ImportSourceKindSchema = z.enum(["images", "folder", "zip", "zip-folder", "web"]);
+const WebCaptureModeSchema = z.enum(["viewport", "element", "full-page"]);
+
+const WebViewportMetaSchema = z
+  .object({
+    width: z.number().int().min(1).max(100000),
+    height: z.number().int().min(1).max(100000),
+    deviceScaleFactor: finiteNumber.min(0.1).max(10)
+  })
+  .strict();
+
+const WebRectSchema = z
+  .object({
+    x: finiteNumber,
+    y: finiteNumber,
+    width: finiteNumber.min(1),
+    height: finiteNumber.min(1)
+  })
+  .strict();
+
+export const WebPageSourceMetaSchema = z
+  .object({
+    url: z.string().url().max(4096),
+    finalUrl: z.string().url().max(4096).optional(),
+    segmentIndex: z.number().int().min(0).max(MAX_PAGES_PER_REQUEST),
+    scrollY: finiteNumber.min(0).optional(),
+    viewport: WebViewportMetaSchema,
+    captureMode: WebCaptureModeSchema,
+    captureRectCss: WebRectSchema.optional(),
+    captureRectDevicePx: WebRectSchema.optional(),
+    pageScaleFactor: finiteNumber.min(0.1).max(10).optional(),
+    overlapWithPreviousPx: finiteNumber.min(0).optional(),
+    capturedAt: z.string().max(80),
+    contentHash: z.string().min(1).max(128).optional(),
+    dedupeReason: z.string().max(4000).optional(),
+    sitePresetId: z.string().max(120).optional()
+  })
+  .strict();
+
+export const WebOriginSchema = z
+  .object({
+    startUrl: z.string().url().max(4096),
+    finalUrl: z.string().url().max(4096).optional(),
+    title: z.string().max(MAX_TITLE_LENGTH).optional(),
+    sitePresetId: z.string().max(120).optional(),
+    createdFrom: z.enum(["manual-capture", "live-capture", "batch-capture"])
+  })
+  .strict();
 
 export const MangaPageSchema = z
   .object({
@@ -79,6 +126,7 @@ export const MangaPageSchema = z
     blocks: z.array(TranslationBlockSchema).max(MAX_BLOCKS_PER_PAGE),
     analysisStatus: PageAnalysisStatusSchema,
     lastError: z.string().max(4000).optional(),
+    webMeta: WebPageSourceMetaSchema.optional(),
     createdAt: z.string().max(80),
     updatedAt: z.string().max(80)
   })
@@ -94,6 +142,7 @@ export const ChapterSnapshotSchema = z
     workId: uuid,
     title,
     sourceKind: ImportSourceKindSchema,
+    webOrigin: WebOriginSchema.optional(),
     status: ChapterStatusSchema,
     pageOrder: z.array(uuid).max(MAX_PAGES_PER_REQUEST),
     pages: z.array(MangaPageSchema).max(MAX_PAGES_PER_REQUEST),
@@ -263,6 +312,60 @@ export const SavePageBlocksRequestSchema = z
 export const ReorderChaptersRequestSchema = z.object({ workId: uuid, chapterIds: z.array(uuid).max(MAX_ID_LIST_LENGTH) }).strict();
 export const ReorderPagesRequestSchema = z.object({ chapterId: uuid, pageIds: z.array(uuid).max(MAX_ID_LIST_LENGTH) }).strict();
 export const DeletePageRequestSchema = z.object({ chapterId: uuid, pageId: uuid }).strict();
+
+const ImportTargetSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("new"), title }).strict(),
+  z.object({ mode: z.literal("existing"), workId: uuid }).strict()
+]);
+
+export const WebBrowseBoundsSchema = z
+  .object({
+    x: z.number().int().min(0).max(100000),
+    y: z.number().int().min(0).max(100000),
+    width: z.number().int().min(0).max(100000),
+    height: z.number().int().min(0).max(100000)
+  })
+  .strict();
+
+export const OpenWebBrowseRequestSchema = z
+  .object({
+    url: z.string().url().max(4096),
+    target: ImportTargetSchema,
+    title: title.optional(),
+    mode: z.enum(["manual", "live", "batch"]).optional()
+  })
+  .strict();
+
+export const CaptureWebSegmentRequestSchema = z
+  .object({
+    sessionId: uuid,
+    captureMode: WebCaptureModeSchema.optional(),
+    translate: z.boolean().optional()
+  })
+  .strict();
+
+export const SetWebAutoTranslateRequestSchema = z
+  .object({
+    sessionId: uuid,
+    enabled: z.boolean()
+  })
+  .strict();
+
+export const SyncWebBrowserBoundsRequestSchema = z
+  .object({
+    sessionId: uuid,
+    bounds: WebBrowseBoundsSchema
+  })
+  .strict();
+
+export const ScrollWebBrowserRequestSchema = z
+  .object({
+    sessionId: uuid,
+    deltaY: finiteNumber.min(-100000).max(100000)
+  })
+  .strict();
+
+export const WebSessionIdRequestSchema = z.object({ sessionId: uuid }).strict();
 
 export const AppSettingsSchema = z
   .object({

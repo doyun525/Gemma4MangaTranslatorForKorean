@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ChapterSnapshotSchema,
+  OpenWebBrowseRequestSchema,
   parseIpcPayload,
   SaveChapterSnapshotSchema,
   SavePageBlocksRequestSchema,
@@ -98,6 +99,55 @@ describe("IPC schemas", () => {
       "페이지 블록 저장"
     );
     expect(parsed.blocks[0]?.outlineWidthPx).toBe(1.4);
+  });
+
+  it("accepts web chapter metadata round-trips through strict chapter schemas", () => {
+    const payload = {
+      ...makeChapterSnapshot(),
+      sourceKind: "web",
+      webOrigin: {
+        startUrl: "https://example.com/comic",
+        finalUrl: "https://example.com/comic/1",
+        title: "웹툰",
+        createdFrom: "manual-capture"
+      },
+      pages: [
+        {
+          ...makeChapterSnapshot().pages[0],
+          webMeta: {
+            url: "https://example.com/comic",
+            finalUrl: "https://example.com/comic/1",
+            segmentIndex: 0,
+            scrollY: 320,
+            viewport: { width: 1280, height: 720, deviceScaleFactor: 1.25 },
+            captureMode: "viewport",
+            capturedAt: "2026-06-02T00:00:00.000Z",
+            contentHash: "abc123"
+          }
+        }
+      ]
+    };
+
+    expect(parseIpcPayload(ChapterSnapshotSchema, payload, "웹 화")).toMatchObject({
+      sourceKind: "web",
+      webOrigin: { createdFrom: "manual-capture" },
+      pages: [{ webMeta: { segmentIndex: 0, captureMode: "viewport" } }]
+    });
+    expect(parseIpcPayload(SaveChapterSnapshotSchema, payload, "웹 화 저장").pages[0]?.webMeta?.contentHash).toBe("abc123");
+  });
+
+  it("validates web browse open requests", () => {
+    const parsed = parseIpcPayload(
+      OpenWebBrowseRequestSchema,
+      {
+        url: "https://example.com",
+        target: { mode: "new", title: "웹 번역" },
+        mode: "manual"
+      },
+      "웹 열기"
+    );
+
+    expect(parsed.target.mode).toBe("new");
   });
 });
 

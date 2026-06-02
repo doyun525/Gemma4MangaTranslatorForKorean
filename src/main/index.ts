@@ -7,10 +7,14 @@ import { cleanupLegacyLogs, cleanupLibraryOrphans, getLibraryRoot } from "./libr
 import { getLogPath, logError, logInfo, resetAppLog } from "./logger";
 import { createMainWindow } from "./mainWindow";
 import { decodeImageThroughRuntime, loadSimplePageRuntime } from "./simplePageRuntime";
+import { TranslationWarmupManager } from "./translationWarmup";
+import { WebBrowserManager } from "./webBrowserManager";
 
 const appPaths = ensureWritableAppDirectories();
 const jobs = new ActiveJobStore();
 let mainWindow: BrowserWindow | null = null;
+const translationWarmup = new TranslationWarmupManager(appPaths);
+const webBrowser = new WebBrowserManager(() => mainWindow);
 
 registerImageProtocolScheme();
 resetAppLog();
@@ -55,7 +59,9 @@ app.whenReady().then(async () => {
     jobs,
     getMainWindow: () => mainWindow,
     loadSimplePageRuntime: () => loadSimplePageRuntime(appPaths.runtimeDir),
-    decodeImage: (filePath) => decodeImageThroughRuntime(appPaths.runtimeDir, filePath)
+    decodeImage: (filePath) => decodeImageThroughRuntime(appPaths.runtimeDir, filePath),
+    translationWarmup,
+    webBrowser
   });
   openMainWindow();
 
@@ -73,6 +79,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  webBrowser.closeAll();
+  void translationWarmup.stop();
   const job = jobs.current;
   if (job) {
     job.abortController.abort();
@@ -83,6 +91,7 @@ app.on("before-quit", () => {
 function openMainWindow(): void {
   mainWindow = createMainWindow();
   mainWindow.on("closed", () => {
+    webBrowser.closeAll();
     mainWindow = null;
   });
 }

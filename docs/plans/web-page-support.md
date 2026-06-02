@@ -1,7 +1,8 @@
 # 웹 페이지 번역 지원 기능 — 상세 구현 계획
 
-> **문서 버전:** 0.1  
+> **문서 버전:** 0.2
 > **작성일:** 2026-06-02  
+> **최근 갱신:** 2026-06-02
 > **대상 코드베이스:** Gemma4MangaTranslatorForKorean (Electron + React)  
 > **목적:** 현재 로컬 파일(이미지/폴더/ZIP) 전용인 앱에 **웹 페이지 기반 만화/웹툰 읽기 + OCR/번역** 기능을 추가하기 위한 설계·로드맵
 
@@ -570,26 +571,43 @@ export type WebSitePreset = {
 
 ### Phase 0 — 사전 작업 / POC (1주)
 
-- [ ] WebContentsView POC: URL 로드 + 수동 CDP screenshot buffer 확보
-- [ ] `createWebChapter` + `appendWebCapturePage` prototype
-- [ ] `ImportSourceKind: "web"` + `webMeta` + `webOrigin` 타입/Zod schema 반영
-- [ ] 수동 캡처 → library page append → `openChapter`/`getPageImageDataUrl` 확인
+- [x] WebContentsView POC: URL 로드 + 수동 screenshot buffer 확보
+- [x] `createWebChapter` + `appendWebCapturePage` prototype
+- [x] `ImportSourceKind: "web"` + `webMeta` + `webOrigin` 타입/Zod schema 반영
+- [x] 수동 캡처 → library page append → `openChapter`/`getPageImageDataUrl` 확인
 - [ ] local HTML fixture server 준비 (`webtoon-scroll.html`, `horizontal-viewer.html`, `lazy-images.html`)
 
 **완료 기준:** 임의 URL에서 수동 버튼 1회 → library page 생성 → 기존 `ImageStage`에서 캡처본 표시
 
 ### Phase 1 — MVP: 수동 웹 캡처 + 번역 (2–3주)
 
-- [ ] `WebBrowseModal`: URL 입력 → web chapter 생성
-- [ ] Toolbar `지금 화면 캡처` → materialize + `job:start-analysis` single-page
-- [ ] 최소 Split view (browser + ImageStage)
-- [ ] Library tree에 `sourceKind: web` 아이콘/표시
-- [ ] IPC + 스키마 + 테스트 (create web chapter, append page, schema round-trip)
+- [x] `WebBrowseModal`: URL 입력 → web chapter 생성
+- [x] Toolbar `현재 화면 캡처` → materialize
+- [x] 캡처 후 번역 토글 → 기존 `job:start-analysis` single-page 재사용
+- [x] 최소 Split view (browser + ImageStage)
+- [x] Library tree에 `sourceKind: web` 표시
+- [x] IPC + 스키마 + 테스트 (schema round-trip)
+- [ ] library append web page integration test
 - [ ] capture 실패/translation 실패 시 page `lastError` 표시
 
 **명시적 제외:** 세션 복원, 자동 스크롤, live queue, 사이트 프리셋 UI
 
 **완료 기준:** 사용자가 웹툰 URL을 열고, 스크롤 후 수동 캡처·번역·편집·저장 가능
+
+#### 2026-06-02 구현 메모
+
+- Main process에 `WebBrowserManager`와 `web:*` IPC를 추가했다. Electron 39 기준 `WebContentsView`를 사용하며, 외부 사이트는 앱 renderer와 분리된 `persist:mgt-web-{sessionId}` partition에서 열린다.
+- 현재 보안 정책은 `http:`/`https:` URL만 허용하고, 팝업·카메라·마이크·위치 등 권한 요청은 기본 차단한다.
+- MVP 캡처는 `captureMode: "viewport"`만 실제 지원한다. `element`, `full-page` 타입과 schema는 후속 구현을 위해 남겨두되, main에서는 아직 요청을 거부한다.
+- 캡처 이미지는 즉시 `library/.../pages/` 아래 PNG로 저장되고, `MangaPage.webMeta`에 URL, scrollY, viewport, capture hash, segmentIndex가 기록된다.
+- URL 입력 직후 빈 web chapter를 만들고 `LibraryChapter.webOrigin`에 시작 URL/최종 URL/title을 저장한다.
+- renderer는 split view를 사용한다. 왼쪽은 native browser bounds host, 오른쪽은 기존 `ImageStage` 기반 캡처/번역 편집 화면이다.
+- React 모달이 열릴 때 native browser가 모달 위를 덮지 않도록 bounds를 `0x0`으로 숨긴다.
+- "캡처 후 번역"은 Phase 1용 단순 연결로, renderer에서 캡처 성공 후 기존 `startAnalysis({ runMode: "single-page" })`를 호출한다. Phase 2의 live queue가 들어오면 main worker 방식으로 이동한다.
+- 웹 세션은 아직 메모리 전용이다. 앱 재시작 후에는 캡처된 web chapter를 일반 library chapter처럼 다시 열 수 있으나, 브라우저 세션 복원은 Phase 2 이후 과제로 유지한다.
+- 웹 세션을 열면 `TranslationWarmupManager`가 백그라운드에서 Gemma endpoint와 Paddle OCR 런타임/모델 캐시를 미리 준비한다. 번역 job이 먼저 시작되면 진행 중인 warm-up을 기다린 뒤 기존 pipeline이 `reuseServer`로 endpoint를 재사용한다.
+- OCR 기본 엔진은 PP-OCRv5로 변경했다. v5 선택 시 사전 다운로드 대상도 PP-OCRv5 det/rec 모델로 제한해 PaddleOCR-VL 모델까지 불필요하게 준비하지 않는다.
+- 현재 OCR warm-up은 패키지/모델 캐시 준비 단계다. Python OCR 프로세스를 VRAM에 상주시켜 첫 추론 지연까지 제거하는 daemon 구조는 Phase 2.5 후속 과제로 남긴다.
 
 ### Phase 1.5 — 캡처 품질 보강 (1주)
 
@@ -597,6 +615,8 @@ export type WebSitePreset = {
 - [ ] fixed header/footer crop margin
 - [ ] generic viewer/image selector preset
 - [ ] dHash 또는 sha256 기반 중복 감지
+- [x] 웹 세션 시작 시 Gemma endpoint + Paddle OCR runtime/model cache warm-up
+- [x] PP-OCRv5를 기본 OCR 엔진으로 변경하고 v5 모델만 사전 준비
 
 **완료 기준:** 긴 세로 웹툰에서 말풍선 잘림과 중복 segment가 눈에 띄게 줄어듦
 

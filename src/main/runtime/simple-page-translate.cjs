@@ -631,8 +631,15 @@ async function ensureHfModelAssetsDownloaded(options = {}, launchTarget = inspec
 function collectRequiredPaddleOcrModelDownloads(options = {}, runtime = null) {
   const runtimeDir = runtime?.runtimeDir || resolveOcrRuntimeDir(options);
   const endpoint = String(process.env.PADDLE_PDX_HUGGING_FACE_ENDPOINT || "https://huggingface.co").replace(/\/+$/, "");
+  const provider = resolveOcrBboxProvider(options);
+  const requiredModels = PADDLE_OCR_MODEL_DOWNLOADS.filter((model) => {
+    if (provider === "paddleocr-v5") {
+      return model.name.startsWith("PP-OCRv5_");
+    }
+    return true;
+  });
   const tasks = [];
-  for (const model of PADDLE_OCR_MODEL_DOWNLOADS) {
+  for (const model of requiredModels) {
     const modelDir = resolvePaddleOcrModelCacheDir(runtimeDir, model.name);
     for (const file of model.files) {
       tasks.push({
@@ -2054,6 +2061,24 @@ function resolveOcrBboxProvider(options = {}) {
     return "json-file";
   }
   return "paddleocr-vl";
+}
+
+async function warmupOcrRuntime(options = {}) {
+  const provider = resolveOcrBboxProvider(options);
+  if (!isPaddleOcrProvider(provider)) {
+    return { warmed: false, provider, reason: "provider-not-paddle" };
+  }
+  const runtime = await ensurePaddleOcrRuntime(options);
+  return {
+    warmed: true,
+    provider,
+    runtimeDir: runtime?.runtimeDir || null,
+    runtimeVariant: runtime?.runtimeVariant || null,
+    packageDir: runtime?.packageDir || null,
+    pythonPath: runtime?.pythonPath || null,
+    prepared: Boolean(runtime?.prepared),
+    diagnostics: runtime?.diagnostics || []
+  };
 }
 
 function isPaddleOcrProvider(provider) {
@@ -4297,5 +4322,6 @@ module.exports = {
   saveArtifacts,
   startServer,
   stopServer,
-  testModelReply
+  testModelReply,
+  warmupOcrRuntime
 };

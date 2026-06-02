@@ -14,6 +14,7 @@ export function AppSidebar({
   settingsOpen,
   onExitInpainting,
   onOpenTranslationSource,
+  onOpenWebBrowse,
   onOpenBatchImport,
   onOpenSettings,
   onOpenLibraryFolder,
@@ -37,6 +38,7 @@ export function AppSidebar({
   settingsOpen: boolean;
   onExitInpainting: () => void;
   onOpenTranslationSource: () => void;
+  onOpenWebBrowse: () => void;
   onOpenBatchImport: () => void;
   onOpenSettings: () => void;
   onOpenLibraryFolder: () => void;
@@ -77,6 +79,9 @@ export function AppSidebar({
           <section className="toolbar">
             <Button variant="primary" fullWidth onClick={onOpenTranslationSource} disabled={jobActive}>
               번역
+            </Button>
+            <Button fullWidth onClick={onOpenWebBrowse} disabled={jobActive}>
+              웹에서 열기
             </Button>
             <Button fullWidth onClick={onOpenBatchImport} disabled={jobActive}>
               작품 일괄 번역

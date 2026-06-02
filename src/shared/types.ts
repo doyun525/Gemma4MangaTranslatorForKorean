@@ -103,7 +103,40 @@ export type ChapterStatus = "idle" | "running" | "completed" | "partial" | "fail
 
 export type RunMode = "pending" | "all" | "single-page";
 
-export type ImportSourceKind = "images" | "folder" | "zip" | "zip-folder";
+export type ImportSourceKind = "images" | "folder" | "zip" | "zip-folder" | "web";
+
+export type WebCaptureMode = "viewport" | "element" | "full-page";
+
+export type WebViewportMeta = {
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+};
+
+export type WebPageSourceMeta = {
+  url: string;
+  finalUrl?: string;
+  segmentIndex: number;
+  scrollY?: number;
+  viewport: WebViewportMeta;
+  captureMode: WebCaptureMode;
+  captureRectCss?: { x: number; y: number; width: number; height: number };
+  captureRectDevicePx?: { x: number; y: number; width: number; height: number };
+  pageScaleFactor?: number;
+  overlapWithPreviousPx?: number;
+  capturedAt: string;
+  contentHash?: string;
+  dedupeReason?: string;
+  sitePresetId?: string;
+};
+
+export type WebOriginMeta = {
+  startUrl: string;
+  finalUrl?: string;
+  title?: string;
+  sitePresetId?: string;
+  createdFrom: "manual-capture" | "live-capture" | "batch-capture";
+};
 
 export type BBox = {
   x: number;
@@ -159,6 +192,7 @@ export type MangaPage = {
   blocks: TranslationBlock[];
   analysisStatus: PageAnalysisStatus;
   lastError?: string;
+  webMeta?: WebPageSourceMeta;
   createdAt: string;
   updatedAt: string;
 };
@@ -170,6 +204,7 @@ export type LibraryChapter = {
   workId: string;
   title: string;
   sourceKind: ImportSourceKind;
+  webOrigin?: WebOriginMeta;
   status: ChapterStatus;
   pageOrder: string[];
   pages: LibraryPageRecord[];
@@ -181,7 +216,7 @@ export type ChapterSnapshot = Omit<LibraryChapter, "pages"> & {
   pages: MangaPage[];
 };
 
-export type LibraryChapterSummary = Pick<LibraryChapter, "id" | "workId" | "title" | "status" | "createdAt" | "updatedAt"> & {
+export type LibraryChapterSummary = Pick<LibraryChapter, "id" | "workId" | "title" | "sourceKind" | "status" | "createdAt" | "updatedAt"> & {
   pageCount: number;
 };
 
@@ -259,6 +294,69 @@ export type CreateImportResult = {
   workId: string;
   chapterIds: string[];
   openedChapter?: ChapterSnapshot;
+};
+
+export type WebBrowseMode = "manual" | "live" | "batch";
+
+export type WebBrowseBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type OpenWebBrowseRequest = {
+  url: string;
+  target: ImportTarget;
+  title?: string;
+  mode?: WebBrowseMode;
+};
+
+export type OpenWebBrowseResult = {
+  sessionId: string;
+  chapterId: string;
+  openedChapter: ChapterSnapshot;
+  url: string;
+  title?: string;
+};
+
+export type CaptureWebSegmentRequest = {
+  sessionId: string;
+  captureMode?: WebCaptureMode;
+  translate?: boolean;
+};
+
+export type CaptureWebSegmentResult = {
+  sessionId: string;
+  chapter: ChapterSnapshot;
+  pageId: string;
+  segmentIndex: number;
+  translated: boolean;
+};
+
+export type WebBrowseState = {
+  sessionId: string;
+  chapterId: string;
+  url: string;
+  title?: string;
+  mode: WebBrowseMode;
+  segmentCount: number;
+  autoTranslate: boolean;
+};
+
+export type SetWebAutoTranslateRequest = {
+  sessionId: string;
+  enabled: boolean;
+};
+
+export type SyncWebBrowserBoundsRequest = {
+  sessionId: string;
+  bounds: WebBrowseBounds;
+};
+
+export type ScrollWebBrowserRequest = {
+  sessionId: string;
+  deltaY: number;
 };
 
 export type JobState = {

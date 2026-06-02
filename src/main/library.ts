@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   copyFile,
   mkdir,
@@ -17,6 +17,7 @@ import type {
   ImportChapterDraft,
   ImportPageDraft,
   ImportPreviewResult,
+  ImportTarget,
   ImportSourceKind,
   LibraryChapter,
   LibraryChapterSummary,
@@ -26,6 +27,8 @@ import type {
   LibraryWorkSummary,
   MangaPage,
   SavePageBlocksRequest,
+  WebOriginMeta,
+  WebPageSourceMeta,
   WorkShareImportFromPackageRequest,
   WorkShareExportRequest,
   WorkShareExportResult,
@@ -546,6 +549,127 @@ function isZipPath(filePath: string): boolean {
 
 export async function createImport(request: CreateImportFromPreviewRequest): Promise<CreateImportResult> {
   return withLibraryMutation(() => createImportUnlocked(request));
+}
+
+export async function createWebChapter(input: {
+  target: ImportTarget;
+  title?: string;
+  startUrl: string;
+  finalUrl?: string;
+}): Promise<ChapterSnapshot> {
+  return withLibraryMutation(async () => {
+    const target = input.target.mode === "new" ? await createWork(input.target.title || input.title || "웹 번역") : await ensureExistingWork(input.target.workId);
+    const createdWorkId = input.target.mode === "new" ? target.id : null;
+    const now = new Date().toISOString();
+    const chapterId = randomUUID();
+    const title = sanitizeTitle(input.title || input.startUrl, "웹 번역");
+    const chapterDir = join(WORKS_ROOT, target.id, "chapters", chapterId);
+    const pagesDir = join(chapterDir, "pages");
+
+    try {
+      await mkdir(pagesDir, { recursive: true });
+      const chapter: LibraryChapter = {
+        id: chapterId,
+        workId: target.id,
+        title,
+        sourceKind: "web",
+        webOrigin: {
+          startUrl: input.startUrl,
+          ...(input.finalUrl ? { finalUrl: input.finalUrl } : {}),
+          title,
+          createdFrom: "manual-capture"
+        },
+        status: "idle",
+        pageOrder: [],
+        pages: [],
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await writeChapterFile(chapter);
+      const latestWork = await ensureExistingWork(target.id);
+      latestWork.chapterOrder = [...latestWork.chapterOrder, chapter.id];
+      latestWork.updatedAt = now;
+      await writeWorkFile(latestWork);
+      return hydrateChapter(chapter);
+    } catch (error) {
+      await removeChapterDirectory(target.id, chapterId);
+      if (createdWorkId) {
+        await removeWorkFromIndexAndDisk(createdWorkId);
+      }
+      throw error;
+    }
+  });
+}
+
+export async function appendWebCapturePage(input: {
+  chapterId: string;
+  imageBuffer: Buffer;
+  extension?: ".png" | ".jpg" | ".jpeg" | ".webp";
+  webMeta: WebPageSourceMeta;
+  pageName?: string;
+}): Promise<ChapterSnapshot> {
+  return withLibraryMutation(async () => {
+    const locator = await findChapterLocation(input.chapterId);
+    if (!locator) {
+      throw new Error("웹 캡처를 추가할 화를 찾지 못했습니다.");
+    }
+    const chapter = await readChapterFile(locator.workId, locator.chapterId);
+    if (!chapter) {
+      throw new Error("웹 캡처를 추가할 화를 찾지 못했습니다.");
+    }
+    if (chapter.sourceKind !== "web") {
+      throw new Error("웹 캡처는 웹 화에만 추가할 수 있습니다.");
+    }
+
+    const chapterDir = join(WORKS_ROOT, locator.workId, "chapters", locator.chapterId);
+    const pagesDir = join(chapterDir, "pages");
+    await mkdir(pagesDir, { recursive: true });
+
+    const pageId = randomUUID();
+    const now = new Date().toISOString();
+    const extension = normalizeWebCaptureExtension(input.extension);
+    const outputPath = join(pagesDir, `${String(chapter.pages.length + 1).padStart(3, "0")}-${pageId}${extension}`);
+    await writeFile(outputPath, input.imageBuffer);
+
+    const image = nativeImage.createFromPath(outputPath);
+    const size = image.getSize();
+    if (!size.width || !size.height) {
+      await safeUnlink(outputPath);
+      throw new Error("웹 캡처 이미지를 읽지 못했습니다.");
+    }
+
+    const webMeta: WebPageSourceMeta = {
+      ...input.webMeta,
+      contentHash: input.webMeta.contentHash || createHash("sha256").update(input.imageBuffer).digest("hex")
+    };
+    const page: LibraryPageRecord = {
+      id: pageId,
+      name: sanitizePageName(input.pageName || `web-${String(chapter.pages.length + 1).padStart(3, "0")}${extension}`),
+      imagePath: outputPath,
+      width: size.width,
+      height: size.height,
+      blocks: [],
+      analysisStatus: "idle",
+      webMeta,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    const updated: LibraryChapter = {
+      ...chapter,
+      status: resolveChapterStatus([...chapter.pages, page]),
+      pageOrder: [...chapter.pageOrder, page.id],
+      pages: [...chapter.pages, page],
+      updatedAt: now
+    };
+    await writeChapterFile(updated);
+
+    const work = await ensureExistingWork(locator.workId);
+    work.updatedAt = now;
+    await writeWorkFile(work);
+    return hydrateChapter(updated);
+  });
 }
 
 async function createImportUnlocked(request: CreateImportFromPreviewRequest): Promise<CreateImportResult> {
@@ -1466,6 +1590,16 @@ function sanitizeTitle(title: string, fallback: string): string {
   return trimmed || fallback;
 }
 
+function sanitizePageName(name: string): string {
+  const trimmed = name.trim();
+  return trimmed || "web-capture.png";
+}
+
+function normalizeWebCaptureExtension(value: string | undefined): ".png" | ".jpg" | ".jpeg" | ".webp" {
+  const normalized = String(value || ".png").trim().toLowerCase();
+  return normalized === ".jpg" || normalized === ".jpeg" || normalized === ".webp" ? normalized : ".png";
+}
+
 async function listImageFiles(folderPath: string): Promise<string[]> {
   const entries = await readdir(folderPath, { withFileTypes: true });
   return sortNaturally(
@@ -1653,6 +1787,7 @@ function toChapterSummary(chapter: LibraryChapter): LibraryChapterSummary {
     id: chapter.id,
     workId: chapter.workId,
     title: chapter.title,
+    sourceKind: chapter.sourceKind,
     status: chapter.status,
     createdAt: chapter.createdAt,
     updatedAt: chapter.updatedAt,
