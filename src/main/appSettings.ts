@@ -36,6 +36,9 @@ export const MIN_MAX_TOKENS = 300;
 export const MAX_MAX_TOKENS = 12000;
 export const DEFAULT_OCR_DEVICE: OcrDevice = "cpu";
 export const DEFAULT_OCR_ENGINE: OcrEngine = "paddleocr-vl";
+export const DEFAULT_OCR_BATCH_SIZE = 1;
+export const MIN_OCR_BATCH_SIZE = 1;
+export const MAX_OCR_BATCH_SIZE = 16;
 export const DEFAULT_TRANSLATION_MODE: TranslationMode = "image";
 export const DEFAULT_INCLUDE_SOUND_EFFECTS = true;
 export const DEFAULT_OCR_BBOX_EXPAND_X_RATIO = 0.2;
@@ -170,6 +173,7 @@ export type TranslationOptions = {
   textOutlineWidthPx: number;
   ocrDevice: OcrDevice;
   ocrEngine: OcrEngine;
+  ocrBatchSize: number;
   ocrGpuCudaTag?: string;
   ocrBboxProvider?: string;
   ocrBboxCommand?: string;
@@ -241,6 +245,7 @@ export function resolveDefaultAppSettings(
         env.MANGA_TRANSLATOR_OCR_ENGINE ?? env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER,
         DEFAULT_OCR_ENGINE
       ),
+      batchSize: resolveOcrBatchSize(env.MANGA_TRANSLATOR_OCR_BATCH_SIZE, DEFAULT_OCR_BATCH_SIZE),
       gpuCudaTag: resolveOcrGpuCudaTag(
         env.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG ??
           env.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG ??
@@ -354,6 +359,7 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
         resolvedOcr?.engine ?? resolvedOcr?.bboxProvider ?? record?.ocrBboxProvider,
         defaults.ocr.engine
       ),
+      batchSize: resolveOcrBatchSize(resolvedOcr?.batchSize ?? record?.ocrBatchSize, defaults.ocr.batchSize),
       gpuCudaTag: resolveStoredOcrGpuCudaTag(resolvedOcr, defaults)
     },
     translation: {
@@ -530,6 +536,7 @@ export function buildBaseTranslationOptions({
       env.MANGA_TRANSLATOR_OCR_ENGINE ?? env.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER,
       settings.ocr.engine
     ),
+    ocrBatchSize: resolveOcrBatchSize(env.MANGA_TRANSLATOR_OCR_BATCH_SIZE, settings.ocr.batchSize),
     ocrGpuCudaTag: resolveOcrGpuCudaTag(
       env.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG ??
         env.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG ??
@@ -610,6 +617,14 @@ function isDefaultDflashDraftCompatible(modelSource: ModelSource, modelRepo: str
 
 function resolveOcrEngine(value: unknown, fallback: OcrEngine): OcrEngine {
   return value === "paddleocr-v5" || value === "paddleocr-vl" ? value : fallback;
+}
+
+function resolveOcrBatchSize(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed)) {
+    return fallback;
+  }
+  return clampInteger(parsed, MIN_OCR_BATCH_SIZE, MAX_OCR_BATCH_SIZE);
 }
 
 function resolveTranslationMode(value: unknown, fallback: TranslationMode): TranslationMode {

@@ -10,6 +10,7 @@ import {
   DEFAULT_GEMMA_MODEL_REPO,
   DEFAULT_INCLUDE_SOUND_EFFECTS,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_OCR_BATCH_SIZE,
   DEFAULT_OCR_BBOX_EXPAND_X_RATIO,
   DEFAULT_OCR_BBOX_EXPAND_Y_RATIO,
   DEFAULT_OCR_DEVICE,
@@ -39,6 +40,7 @@ describe("app settings helpers", () => {
     expect(defaults.codex.oauthPort).toBe(DEFAULT_CODEX_OAUTH_PORT);
     expect(defaults.ocr.device).toBe(DEFAULT_OCR_DEVICE);
     expect(defaults.ocr.engine).toBe(DEFAULT_OCR_ENGINE);
+    expect(defaults.ocr.batchSize).toBe(DEFAULT_OCR_BATCH_SIZE);
     expect(defaults.ocr.gpuCudaTag).toBe(DEFAULT_OCR_GPU_CUDA_TAG);
     expect(defaults.translation.mode).toBe(DEFAULT_TRANSLATION_MODE);
     expect(defaults.translation.includeSoundEffects).toBe(DEFAULT_INCLUDE_SOUND_EFFECTS);
@@ -130,6 +132,7 @@ describe("app settings helpers", () => {
       ocr: {
         device: "gpu",
         engine: DEFAULT_OCR_ENGINE,
+        batchSize: 4,
         gpuCudaTag: DEFAULT_OCR_GPU_CUDA_TAG
       },
       translation: {
@@ -167,6 +170,7 @@ describe("app settings helpers", () => {
     expect(options.codexOauthPort).toBe(DEFAULT_CODEX_OAUTH_PORT);
     expect(options.ocrDevice).toBe("gpu");
     expect(options.ocrEngine).toBe(DEFAULT_OCR_ENGINE);
+    expect(options.ocrBatchSize).toBe(4);
     expect(options.ocrGpuCudaTag).toBe(DEFAULT_OCR_GPU_CUDA_TAG);
     expect(options.translationMode).toBe("ocr-text-with-image-retry");
     expect(options.includeSoundEffects).toBe(false);
@@ -468,6 +472,16 @@ describe("app settings helpers", () => {
     expect(parseStoredAppSettings("{\"ocr\":{\"bboxProvider\":\"paddleocr-v5\"}}", defaults).ocr.engine).toBe("paddleocr-v5");
     expect(parseStoredAppSettings("{\"ocr\":{\"engine\":\"bad\"}}", defaults).ocr.engine).toBe(defaults.ocr.engine);
     expect(resolveDefaultAppSettings({ MANGA_TRANSLATOR_OCR_ENGINE: "paddleocr-v5" }).ocr.engine).toBe("paddleocr-v5");
+  });
+
+  it("normalizes OCR batch size settings", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(parseStoredAppSettings("{\"ocr\":{\"batchSize\":4}}", defaults).ocr.batchSize).toBe(4);
+    expect(parseStoredAppSettings("{\"ocr\":{\"batchSize\":0}}", defaults).ocr.batchSize).toBe(1);
+    expect(parseStoredAppSettings("{\"ocr\":{\"batchSize\":30}}", defaults).ocr.batchSize).toBe(16);
+    expect(parseStoredAppSettings("{\"ocrBatchSize\":3}", defaults).ocr.batchSize).toBe(3);
+    expect(resolveDefaultAppSettings({ MANGA_TRANSLATOR_OCR_BATCH_SIZE: "5" }).ocr.batchSize).toBe(5);
   });
 
   it("normalizes sound-effect translation settings", () => {

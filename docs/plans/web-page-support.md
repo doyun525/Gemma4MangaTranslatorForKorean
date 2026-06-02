@@ -49,6 +49,8 @@
 2. **Main에서 캡처, Renderer에서 편집:** ML·네트워크·브라우저 엔진은 main process; renderer는 기존 `ChapterSnapshot` + `ImageStage` 유지.
 3. **점진적 확장:** 1) URL + 수동 캡처 → 2) 스크롤 연동 → 3) 실시간 자동 번역 → 4) 사이트 프리셋 순으로 단계적 출시.
 4. **실패 허용:** 사이트마다 DOM/이미지 로딩 방식이 다르므로, **범용 캡처(스크린샷)** 를 기본으로 하고 사이트별 어댑터는 옵션으로 추가한다.
+5. **MVP 최소화:** 1차 목표는 "웹 URL 로드 → 현재 화면 수동 캡처 → library page append → 기존 single-page 번역"까지로 제한한다. 세션 복원, 자동 스크롤, 사이트 프리셋, 라이브 큐는 이후 단계에서 붙인다.
+6. **IPC strict schema 동시 갱신:** `src/shared/types.ts`만 바꾸지 않는다. `src/shared/ipcSchemas.ts`가 `.strict()` 기반이므로 `web`, `webMeta`, `webOrigin` 같은 신규 필드는 Zod schema까지 같은 커밋에서 반영한다.
 
 ---
 
@@ -134,8 +136,13 @@ export type WebPageSourceMeta = {
   scrollY?: number;               // 캡처 시 scrollY (중복 방지)
   viewport: { width: number; height: number; deviceScaleFactor: number };
   captureMode: "viewport" | "element" | "full-page";
+  captureRectCss?: { x: number; y: number; width: number; height: number };
+  captureRectDevicePx?: { x: number; y: number; width: number; height: number };
+  pageScaleFactor?: number;
+  overlapWithPreviousPx?: number;
   capturedAt: string;             // ISO timestamp
   contentHash?: string;           // perceptual hash / sha256 (중복 skip)
+  dedupeReason?: string;          // skip/debug 판단 근거
   sitePresetId?: string;          // 적용된 사이트 프리셋
 };
 ```
@@ -180,11 +187,28 @@ export type LibraryChapter = {
   sourceKind: ImportSourceKind;   // "web"
   webOrigin?: {
     startUrl: string;
+    finalUrl?: string;
     title?: string;
     sitePresetId?: string;
+    createdFrom: "manual-capture" | "live-capture" | "batch-capture";
   };
 };
 ```
+
+### 5.5 Zod schema 변경 필수
+
+현재 IPC schema는 `.strict()`를 사용한다. 따라서 타입만 확장하면 renderer/main 왕복 저장에서 신규 필드가 거부된다.
+
+변경 대상:
+
+- `ImportSourceKindSchema`: `"web"` 추가
+- `MangaPageSchema`: `webMeta?: WebPageSourceMetaSchema` 추가
+- `ChapterSnapshotSchema`: `webOrigin?: WebOriginSchema` 추가
+- `SaveMangaPageSchema`, `SaveChapterSnapshotSchema`: 저장 시에도 web 필드를 허용
+
+완료 기준:
+
+- `sourceKind: "web"` chapter를 `openChapter → saveChapterSnapshot → openChapter`로 왕복해도 `webMeta`, `webOrigin`이 유지된다.
 
 ---
 
@@ -209,16 +233,33 @@ export type LibraryChapter = {
 ### 6.2 Main — `library.ts` 확장
 
 ```typescript
-async function materializeWebCapture(input: {
+async function appendWebCapturePage(input: {
   chapterId: string;
   imageBuffer: Buffer;
+  extension?: ".png" | ".jpg" | ".webp";
   webMeta: WebPageSourceMeta;
   pageName?: string;
-}): Promise<LibraryPageRecord>
+}): Promise<ChapterSnapshot>
 ```
 
-- 기존 `materializePageRecord` 패턴 재사용 (PNG write, width/height probe)
+- 기존 `materializePageRecord` 패턴 재사용 (이미지 write, width/height probe)
 - `pageOrder` append + `chapter.json` atomic update (`AsyncMutex`)
+- `work.updatedAt`도 같이 갱신
+- 저장 파일명: `pages/{NNN}-{pageId}.png`
+- 반환값은 renderer가 바로 merge할 수 있도록 `ChapterSnapshot`
+
+추가로 빈 web chapter 생성을 위한 API가 필요하다.
+
+```typescript
+async function createWebChapter(input: {
+  target: ImportTarget;
+  title: string;
+  startUrl: string;
+  finalUrl?: string;
+}): Promise<ChapterSnapshot>
+```
+
+MVP에서는 URL 입력 직후 빈 chapter를 만들고, 첫 캡처부터 `appendWebCapturePage`로 page를 추가한다.
 
 ### 6.3 Main — 실시간 번역 오케스트레이션
 
@@ -241,6 +282,22 @@ worker: while queue not empty
 
 - `runMode: "single-page"` + `pageId` 기존 API 재사용
 - OCR hints 캐시: `runs/{jobId}/ocr-hints-{pageId}.json` (페이지별)
+
+단, renderer가 캡처마다 `job:start-analysis`를 직접 반복 호출하면 현재 `ActiveJobStore`의 "동시 active job 1개" 제한에 걸릴 수 있다. Phase 2부터는 main process에 `webLiveQueue`를 두고, 큐 worker만 `ActiveJobStore`를 점유한다.
+
+```text
+renderer: capture/autoTranslate 설정만 요청
+main: webLiveQueue.enqueue(pageId)
+worker: ActiveJobStore가 비어 있을 때만 다음 page 처리
+```
+
+또한 현재 `runWholePagePipeline`은 호출마다 endpoint session을 시작한다. live 모드에서 페이지마다 서버 boot를 반복하면 UX가 크게 느려질 수 있으므로 단계별로 나눈다.
+
+| 단계 | 런타임 전략 |
+|------|-------------|
+| Phase 1 | 기존 `job:start-analysis` single-page 호출 재사용 |
+| Phase 2 | `web-live-analysis` worker 도입, queue 직렬 처리 |
+| Phase 2.5 | endpoint session 재사용 검토 (`runWholePagePipeline` 내부 분리 또는 별도 page runner) |
 
 **프리페치 (2차):**
 
@@ -314,6 +371,27 @@ main: webBrowserManager.setBounds(sessionId, rect)
 | **viewport** | CDP screenshot (clip 없음) | 기본, 대부분 웹툰 |
 | **element** | selector bounding box clip | `.viewer`, `#content` 등 |
 | **full-page** | CDP full page | 배치 import, 짧은 페이지 |
+
+### 8.1.1 viewport 경계 문제
+
+단순 viewport 캡처는 말풍선이나 세로 텍스트가 캡처 경계에 걸릴 수 있다. 이 경우 OCR bbox가 잘리거나 동일 말풍선이 다음 segment와 중복 번역될 수 있다.
+
+MVP 기본값:
+
+- 캡처 간 10-20% overlap 유지
+- 상단/하단 edge zone에 걸친 OCR bbox는 warning 표시 또는 다음 segment와 중복 판단
+- fixed header/footer가 있는 사이트를 위해 crop margin 옵션 제공
+- 가능하면 viewport보다 `element` 또는 이미지 단위 캡처를 우선 사용
+
+Phase 1.5에서 최소 generic selector preset을 추가한다.
+
+```typescript
+type GenericCapturePreset = {
+  viewerSelector?: string;       // 예: main, article, .viewer
+  imageSelector?: string;        // 예: .viewer img
+  excludeFixedSelectors?: string[];
+};
+```
 
 ### 8.2 중복 방지
 
@@ -447,8 +525,13 @@ export type WebSitePreset = {
 
 - `sandbox: true`, `nodeIntegration: false`, `contextIsolation: true`
 - `webSecurity: true` (기본)
+- 앱 본문 renderer와 분리된 session partition 사용
+- `permissionRequestHandler`로 camera/mic/geolocation/notifications 기본 차단
 - 허용 URL: 사용자 입력 + optional allowlist 설정
 - `will-navigate` / `setWindowOpenHandler` 로 의도치 않은 팝업 제어
+- 다운로드는 기본 차단 또는 사용자 확인 후 저장
+- `file://`, 커스텀 프로토콜, 외부 앱 protocol navigation 정책 명시
+- 로그인 쿠키 저장 여부는 사용자 설정으로 분리
 
 ### 11.2 Renderer CSP
 
@@ -485,34 +568,47 @@ export type WebSitePreset = {
 
 ## 13. 구현 단계 (로드맵)
 
-### Phase 0 — 사전 작업 (1주)
+### Phase 0 — 사전 작업 / POC (1주)
 
-- [ ] BrowserView/WebContentsView POC: URL 로드 + CDP screenshot
-- [ ] `materializeWebCapture` prototype + library page append
-- [ ] Split layout bounds sync POC
-- [ ] scroll idle debounce + hash dedupe prototype
+- [ ] WebContentsView POC: URL 로드 + 수동 CDP screenshot buffer 확보
+- [ ] `createWebChapter` + `appendWebCapturePage` prototype
+- [ ] `ImportSourceKind: "web"` + `webMeta` + `webOrigin` 타입/Zod schema 반영
+- [ ] 수동 캡처 → library page append → `openChapter`/`getPageImageDataUrl` 확인
+- [ ] local HTML fixture server 준비 (`webtoon-scroll.html`, `horizontal-viewer.html`, `lazy-images.html`)
 
-**완료 기준:** 임의 URL에서 수동 버튼 1회 → library page 생성 → 기존 `single-page` 번역 → overlay 표시
+**완료 기준:** 임의 URL에서 수동 버튼 1회 → library page 생성 → 기존 `ImageStage`에서 캡처본 표시
 
-### Phase 1 — MVP: 수동 웹 캡처 (2–3주)
+### Phase 1 — MVP: 수동 웹 캡처 + 번역 (2–3주)
 
 - [ ] `WebBrowseModal`: URL 입력 → web chapter 생성
 - [ ] Toolbar `지금 화면 캡처` → materialize + `job:start-analysis` single-page
-- [ ] Split view (browser + ImageStage)
+- [ ] 최소 Split view (browser + ImageStage)
 - [ ] Library tree에 `sourceKind: web` 아이콘/표시
-- [ ] 세션 종료·재열기 (web-session.json)
-- [ ] IPC + 스키마 + 테스트 (materialize, dedupe)
+- [ ] IPC + 스키마 + 테스트 (create web chapter, append page, schema round-trip)
+- [ ] capture 실패/translation 실패 시 page `lastError` 표시
+
+**명시적 제외:** 세션 복원, 자동 스크롤, live queue, 사이트 프리셋 UI
 
 **완료 기준:** 사용자가 웹툰 URL을 열고, 스크롤 후 수동 캡처·번역·편집·저장 가능
+
+### Phase 1.5 — 캡처 품질 보강 (1주)
+
+- [ ] viewport overlap 캡처
+- [ ] fixed header/footer crop margin
+- [ ] generic viewer/image selector preset
+- [ ] dHash 또는 sha256 기반 중복 감지
+
+**완료 기준:** 긴 세로 웹툰에서 말풍선 잘림과 중복 segment가 눈에 띄게 줄어듦
 
 ### Phase 2 — 스크롤 연동 + 준실시간 (2–3주)
 
 - [ ] scroll idle 자동 캡처
-- [ ] Live queue worker (single active translation, FIFO)
+- [ ] main process `webLiveQueue` worker (single active translation, FIFO/coalesce)
 - [ ] `web:segment-captured` / job event 연동 UI
 - [ ] segment 목록 (PageList 연동 또는 web segment strip)
 - [ ] 배치 auto-scroll 캡처 (max cap)
 - [ ] 프리페치 (capture only, no translate)
+- [ ] endpoint session 재사용 가능성 검토
 
 **완료 기준:** 세로 스크롤 웹툰을 읽으며 자동으로 segment 추가 + 번역 overlay 갱신
 
@@ -538,7 +634,9 @@ export type WebSitePreset = {
 | 항목 | 목표 |
 |------|------|
 | 캡처 지연 | scroll idle 후 **< 200ms** (screenshot only) |
-| 번역 지연 | single-page OCR+Gemma **사용자 PC 기준** (기존과 동일, 진행 UI 필수) |
+| 번역 지연 | single-page OCR+Gemma/OpenAI Codex **사용자 설정 기준** (기존과 동일, 진행 UI 필수) |
+| UI 반응 | 캡처본은 즉시 표시, 번역은 비동기 완료 시 blocks merge |
+| backlog 처리 | queue depth 표시, 오래된 자동 캡처는 coalesce/skip 가능 |
 | 캡처 해상도 | 기본 viewport DPR cap (예: max 2000px 긴 변) — OCR 품질 vs 속도 |
 | 중복 캡처율 | 동일 viewport **< 5%** (hash dedupe) |
 | 메모리 | BrowserView 1개 + 세션당 캡처 buffer 즉시 disk flush |
@@ -557,7 +655,9 @@ export type WebSitePreset = {
 ### 15.2 Integration
 
 - 로컬 static HTML fixture (`tests/fixtures/webtoon-scroll.html`) + Electron test
-- capture → materialize → `runWholePagePipeline` mock runtime
+- capture → `appendWebCapturePage` → `openChapter` → `library:get-page-image-data-url`
+- `sourceKind: "web"` + `webMeta` schema round-trip
+- `runWholePagePipeline` mock runtime은 Phase 1 후반부터 추가
 
 ### 15.3 Manual QA
 
@@ -577,6 +677,9 @@ export type WebSitePreset = {
 | Canvas/WebGL 만화 | 검은 캡처 | element capture, preset, 사용자 안내 |
 | lazy-load 이미지 미로드 | 빈 캡처 | idle + networkIdle + preset wait |
 | active job 1개 제한 | live backlog | queue + UI queue depth, skip stale |
+| 페이지마다 endpoint boot | 실시간성 저하 | Phase 2.5에서 endpoint session 재사용 또는 page runner 분리 |
+| viewport 경계 말풍선 잘림 | OCR 품질 저하 | overlap, edge-zone warning, element/image capture |
+| strict IPC schema 누락 | 저장/로드 실패 | 타입과 Zod schema를 같은 단계에서 변경 |
 | 사이트 ToS/DRM | 법적 | 고지, 개인용, 우회 기능 미제공 |
 | 고해상도 캡처 OCR 느림 | 실시간성 저하 | downscale option, economy VRAM |
 | BrowserView deprecated | 유지보수 | WebContentsView API 우선 사용 |

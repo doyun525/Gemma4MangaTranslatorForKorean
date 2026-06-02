@@ -473,7 +473,7 @@ function buildPageExportBlock(
     textAlign: block.textAlign || "center",
     textColor: normalizeExportColor(block.textColor, "#000000"),
     outlineColor: normalizeExportColor(block.outlineColor, "#ffffff"),
-    autoFitText: block.autoFitText ?? true
+    autoFitText: block.autoFitText ?? false
   };
 }
 

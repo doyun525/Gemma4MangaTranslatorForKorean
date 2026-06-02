@@ -42,6 +42,7 @@ export type CodexSettings = {
 export type OcrSettings = {
   device: OcrDevice;
   engine: OcrEngine;
+  batchSize: number;
   gpuCudaTag?: string;
 };
 

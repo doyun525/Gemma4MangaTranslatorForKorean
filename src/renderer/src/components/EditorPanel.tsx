@@ -47,7 +47,7 @@ export function EditorPanel({
 
   const outlineColor = resolveColor(block.outlineColor, "#ffffff");
   const backgroundColor = resolveColor(block.backgroundColor, "#ffffff");
-  const autoFitText = block.autoFitText ?? true;
+  const autoFitText = block.autoFitText ?? false;
   const fontSizePx = clampFontSize(block.fontSizePx);
 
   return (

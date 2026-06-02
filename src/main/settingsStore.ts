@@ -87,6 +87,9 @@ function mergeSettingsForSave(settings: AppSettings, existing: AppSettings | nul
   if (!hasOwn(rawOcr, "engine")) {
     merged.ocr.engine = existing.ocr.engine;
   }
+  if (!hasOwn(rawOcr, "batchSize")) {
+    merged.ocr.batchSize = existing.ocr.batchSize;
+  }
   if (!hasOwn(rawOcr, "gpuCudaTag") && existing.ocr.gpuCudaTag) {
     merged.ocr.gpuCudaTag = existing.ocr.gpuCudaTag;
   }

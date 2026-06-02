@@ -61,7 +61,7 @@ export function overlayItemToBlock(
     outlineWidthPx: normalizeTextOutlineWidthPx(presentation.textOutlineWidthPx),
     backgroundColor: visualStyle.backgroundColor,
     opacity: visualStyle.defaultOpacity,
-    autoFitText: true
+    autoFitText: false
   };
 }
 

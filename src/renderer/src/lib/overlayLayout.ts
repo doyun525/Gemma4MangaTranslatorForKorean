@@ -103,7 +103,7 @@ function resolveTextFontSizePx(
   innerHeight: number
 ): number {
   const capped = Math.max(MIN_FONT_SIZE_PX, Math.floor(maxFontSize));
-  if (!(block.autoFitText ?? true) || !text.trim()) {
+  if (!(block.autoFitText ?? false) || !text.trim()) {
     return capped;
   }
 
@@ -179,7 +179,7 @@ function measureWrappedText(
 }
 
 function resolveAutoFitUpperBound(block: TranslationBlock, preferredFontSize: number, innerWidth: number, innerHeight: number): number {
-  if (!(block.autoFitText ?? true)) {
+  if (!(block.autoFitText ?? false)) {
     return preferredFontSize;
   }
 

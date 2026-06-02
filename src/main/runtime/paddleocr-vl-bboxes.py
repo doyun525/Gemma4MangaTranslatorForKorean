@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--progress", default=None, help="Optional JSONL progress output path.")
     parser.add_argument("--pipeline-version", default="v1.5", choices=["v1", "v1.5"])
     parser.add_argument("--provider", default="paddleocr-vl", choices=["paddleocr-vl", "paddleocr-v5"])
+    parser.add_argument("--batch-size", type=int, default=None, help="PP-OCRv5 image batch size. PaddleOCR-VL stays sequential.")
     parser.add_argument("--device", default=None, help="Optional Paddle device, e.g. gpu:0 or cpu.")
     args = parser.parse_args()
     if args.device:
@@ -61,36 +62,21 @@ def main() -> int:
     pipeline = create_vl_pipeline(args) if args.provider == "paddleocr-vl" else None
     textline_detector = create_textline_detector(required=args.provider == "paddleocr-v5")
     try:
-      summaries = []
-      total = len(batch_items)
-      for index, item in enumerate(batch_items, start=1):
-        emit_progress(
-            args.progress,
-            {
-                "phase": "start",
-                "index": index,
-                "total": total,
-                "output": str(item["output"]),
-                "count": 0,
-            },
+      batch_size = resolve_batch_size(args.batch_size)
+      if args.provider == "paddleocr-v5" and batch_size > 1 and len(batch_items) > 1:
+        summaries = write_ppocr_v5_batch_bboxes(
+            batch_items=batch_items,
+            textline_detector=textline_detector,
+            progress_path=args.progress,
+            batch_size=batch_size,
         )
-        summary = write_page_bboxes(
-            image_path=Path(item["image"]),
-            output_path=Path(item["output"]),
+      else:
+        summaries = write_sequential_bboxes(
+            batch_items=batch_items,
             pipeline=pipeline,
             textline_detector=textline_detector,
             provider=args.provider,
-        )
-        summaries.append(summary)
-        emit_progress(
-            args.progress,
-            {
-                "phase": "done",
-                "index": index,
-                "total": total,
-                "output": summary["output"],
-                "count": summary["count"],
-            },
+            progress_path=args.progress,
         )
     finally:
       if pipeline is not None:
@@ -134,6 +120,12 @@ def load_batch_items(args: argparse.Namespace) -> list[dict]:
     return []
 
 
+def resolve_batch_size(value: int | None) -> int:
+    if value is None:
+      value = int(os.environ.get("MANGA_TRANSLATOR_OCR_BATCH_SIZE", "1") or "1")
+    return max(1, min(16, int(value)))
+
+
 def build_pipeline_kwargs(args: argparse.Namespace) -> dict:
     pipeline_kwargs = {
         "pipeline_version": args.pipeline_version,
@@ -160,6 +152,137 @@ def create_vl_pipeline(args: argparse.Namespace) -> object:
           "or provide MANGA_TRANSLATOR_OCR_BBOX_CMD."
       ) from exc
     return PaddleOCRVL(**build_pipeline_kwargs(args))
+
+
+def write_sequential_bboxes(
+    batch_items: list[dict],
+    pipeline: object,
+    textline_detector: object,
+    provider: str,
+    progress_path: str | None,
+    start_index: int = 0,
+    emit_start: bool = True,
+    total_count: int | None = None,
+) -> list[dict]:
+    summaries = []
+    total = total_count or len(batch_items)
+    for offset, item in enumerate(batch_items, start=1):
+      index = start_index + offset
+      if emit_start:
+        emit_progress(
+            progress_path,
+            {
+                "phase": "start",
+                "index": index,
+                "total": total,
+                "output": str(item["output"]),
+                "count": 0,
+            },
+        )
+      summary = write_page_bboxes(
+          image_path=Path(item["image"]),
+          output_path=Path(item["output"]),
+          pipeline=pipeline,
+          textline_detector=textline_detector,
+          provider=provider,
+      )
+      summaries.append(summary)
+      emit_progress(
+          progress_path,
+          {
+              "phase": "done",
+              "index": index,
+              "total": total,
+              "output": summary["output"],
+              "count": summary["count"],
+          },
+      )
+    return summaries
+
+
+def write_ppocr_v5_batch_bboxes(
+    batch_items: list[dict],
+    textline_detector: object,
+    progress_path: str | None,
+    batch_size: int,
+) -> list[dict]:
+    summaries = []
+    total = len(batch_items)
+    for start in range(0, total, batch_size):
+      chunk = batch_items[start:start + batch_size]
+      for offset, item in enumerate(chunk, start=1):
+        emit_progress(
+            progress_path,
+            {
+                "phase": "start",
+                "index": start + offset,
+                "total": total,
+                "output": str(item["output"]),
+                "count": 0,
+            },
+        )
+
+      try:
+        result_groups = predict_textlines_batch(textline_detector, [Path(item["image"]) for item in chunk])
+      except Exception as exc:
+        print(f"[paddleocr-vl-bboxes] batch predict failed, falling back to sequential: {exc}", file=sys.stderr)
+        summaries.extend(
+            write_sequential_bboxes(
+                batch_items=chunk,
+                pipeline=None,
+                textline_detector=textline_detector,
+                provider="paddleocr-v5",
+                progress_path=progress_path,
+                start_index=start,
+                emit_start=False,
+                total_count=total,
+            )
+        )
+        continue
+
+      for offset, (item, results) in enumerate(zip(chunk, result_groups), start=1):
+        summary = write_page_bboxes_from_textline_results(
+            image_path=Path(item["image"]),
+            output_path=Path(item["output"]),
+            textline_results=results,
+            provider="paddleocr-v5",
+        )
+        summaries.append(summary)
+        emit_progress(
+            progress_path,
+            {
+                "phase": "done",
+                "index": start + offset,
+                "total": total,
+                "output": summary["output"],
+                "count": summary["count"],
+            },
+        )
+    return summaries
+
+
+def predict_textlines_batch(ocr: object, image_paths: list[Path]) -> list[list[object]]:
+    if ocr is None:
+      return [[] for _ in image_paths]
+
+    raw_results = ocr.predict([str(path) for path in image_paths])
+    groups = normalize_result_groups(raw_results, len(image_paths))
+    if len(groups) != len(image_paths):
+      raise RuntimeError(f"PaddleOCR returned {len(groups)} result groups for {len(image_paths)} images.")
+    return groups
+
+
+def normalize_result_groups(raw_results: object, expected_count: int) -> list[list[object]]:
+    if not isinstance(raw_results, list):
+      return [[raw_results]]
+    if expected_count <= 1:
+      return [raw_results]
+    if len(raw_results) == expected_count:
+      groups = []
+      for result in raw_results:
+        groups.append(result if isinstance(result, list) else [result])
+      return groups
+    return [raw_results]
 
 
 def write_page_bboxes(image_path: Path, output_path: Path, pipeline: object, textline_detector: object, provider: str) -> dict:
@@ -213,6 +336,32 @@ def write_page_bboxes(image_path: Path, output_path: Path, pipeline: object, tex
             height=height,
             ocr=textline_detector,
         )
+    )
+    finalize_ocr_text_fields(items)
+    renumber_items(items)
+
+    payload = {
+        "source": provider,
+        "coordinateSpace": "pixels",
+        "width": width,
+        "height": height,
+        "items": items,
+    }
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"output": str(output_path), "count": len(items)}
+
+
+def write_page_bboxes_from_textline_results(image_path: Path, output_path: Path, textline_results: list[object], provider: str) -> dict:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with Image.open(image_path) as image:
+      width, height = image.size
+
+    items = collect_textline_candidates_from_results(
+        results=textline_results,
+        existing_items=[],
+        width=width,
+        height=height,
     )
     finalize_ocr_text_fields(items)
     renumber_items(items)
@@ -305,48 +454,53 @@ def collect_textline_candidates(image_path: Path, existing_items: list[dict], wi
     if ocr is None:
       return []
 
-    raw_candidates: list[dict] = []
     try:
       results = ocr.predict(str(image_path))
-      for result in results:
-        data = dict(result)
-        rec_texts = data.get("rec_texts") or data.get("texts") or []
-        rec_scores = data.get("rec_scores") or data.get("scores") or []
-        for index, poly in enumerate(data.get("dt_polys") or []):
-          box = bbox_from_poly(poly, width, height)
-          if not box:
-            continue
-          text = str(rec_texts[index] if index < len(rec_texts) else "").strip()
-          if text and is_probable_symbol_noise(text):
-            continue
-          x1, y1, x2, y2 = box
-          box_width = x2 - x1
-          box_height = y2 - y1
-          if box_width < 6 or box_height < 6 or box_width * box_height < 200:
-            continue
-          covering_item = find_covering_existing_item(box, existing_items)
-          if covering_item is not None:
-            if text:
-              covering_item.setdefault("_texts", []).append(text)
-            continue
-          score = None
-          try:
-            score = float(rec_scores[index]) if index < len(rec_scores) else None
-          except Exception:
-            score = None
-          raw_candidates.append(
-              {
-                  "label": "ocr_textline",
-                  "x1": x1,
-                  "y1": y1,
-                  "x2": x2,
-                  "y2": y2,
-                  "_score": score,
-                  "_text": text,
-              }
-          )
+      return collect_textline_candidates_from_results(results, existing_items, width, height)
     except Exception as exc:
       print(f"[paddleocr-vl-bboxes] textline detector failed: {exc}", file=sys.stderr)
+      return []
+
+
+def collect_textline_candidates_from_results(results: object, existing_items: list[dict], width: int, height: int) -> list[dict]:
+    raw_candidates: list[dict] = []
+    for result in results or []:
+      data = dict(result)
+      rec_texts = data.get("rec_texts") or data.get("texts") or []
+      rec_scores = data.get("rec_scores") or data.get("scores") or []
+      for index, poly in enumerate(data.get("dt_polys") or []):
+        box = bbox_from_poly(poly, width, height)
+        if not box:
+          continue
+        text = str(rec_texts[index] if index < len(rec_texts) else "").strip()
+        if text and is_probable_symbol_noise(text):
+          continue
+        x1, y1, x2, y2 = box
+        box_width = x2 - x1
+        box_height = y2 - y1
+        if box_width < 6 or box_height < 6 or box_width * box_height < 200:
+          continue
+        covering_item = find_covering_existing_item(box, existing_items)
+        if covering_item is not None:
+          if text:
+            covering_item.setdefault("_texts", []).append(text)
+          continue
+        score = None
+        try:
+          score = float(rec_scores[index]) if index < len(rec_scores) else None
+        except Exception:
+          score = None
+        raw_candidates.append(
+            {
+                "label": "ocr_textline",
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "_score": score,
+                "_text": text,
+            }
+        )
 
     grouped = merge_textline_candidates(raw_candidates, width, height)
     for index, item in enumerate(grouped):

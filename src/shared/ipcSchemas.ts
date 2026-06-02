@@ -299,6 +299,7 @@ export const AppSettingsSchema = z
       .object({
         device: z.enum(["cpu", "gpu"]),
         engine: z.enum(["paddleocr-vl", "paddleocr-v5"]),
+        batchSize: z.number().int().min(1).max(16),
         gpuCudaTag: z.string().regex(/^cu\d+$/i).optional()
       })
       .strict(),

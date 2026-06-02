@@ -10,7 +10,10 @@ function createChapter(blockText: string): ChapterSnapshot {
     id: "chapter-1",
     workId: "work-1",
     title: "1화",
+    sourceKind: "images",
     status: "idle",
+    pageOrder: ["page-1"],
+    createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     pages: [
       {
@@ -39,6 +42,7 @@ function createChapter(blockText: string): ChapterSnapshot {
           }
         ],
         analysisStatus: "completed",
+        createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z"
       }
     ]

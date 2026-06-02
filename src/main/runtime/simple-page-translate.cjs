@@ -162,6 +162,7 @@ function buildOptionSummary(options = {}) {
     ocrBboxProvider: resolveOcrBboxProvider(options),
     ocrEngine: options.ocrEngine ?? resolveOcrBboxProvider(options),
     ocrDevice: resolveOcrDevice(options),
+    ocrBatchSize: resolveOcrBatchSize(options),
     ocrGpuCudaTag: resolveOcrGpuCudaTag(options),
     ocrRuntimeDir: resolveOcrRuntimeDir(options),
     launchMode: launchTarget.launchMode,
@@ -2055,6 +2056,10 @@ function resolveOcrBboxProvider(options = {}) {
   return "paddleocr-vl";
 }
 
+function isPaddleOcrProvider(provider) {
+  return provider === "paddleocr-vl" || provider === "paddleocr-v5";
+}
+
 function isTruthy(value) {
   const text = String(value ?? "").trim().toLowerCase();
   return ["1", "true", "yes", "y", "on"].includes(text);
@@ -2118,7 +2123,7 @@ async function collectOcrBboxHints(options = {}) {
   } catch (error) {
     const diagnostic = buildOcrBboxDiagnostic(provider, error);
     diagnostics.push(diagnostic);
-    if (provider === "paddleocr-vl" && isOcrGpuRequested(options)) {
+    if (isPaddleOcrProvider(provider) && isOcrGpuRequested(options)) {
       const failureMessage = buildPaddleOcrGpuFailureMessage(error, options);
       emitRuntimeProgress(options, "ocr_running", "Paddle OCR GPU 실행 실패", failureMessage);
       throw createOcrRuntimeError(
@@ -2181,7 +2186,7 @@ function buildOcrBboxDiagnostic(provider, error, extra = {}) {
 async function runOcrBboxCommand(options = {}, provider = "external-command") {
   await mkdir(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, "ocr-bbox-hints.json");
-  const runtime = provider === "paddleocr-vl" ? await ensurePaddleOcrRuntime(options) : null;
+  const runtime = isPaddleOcrProvider(provider) ? await ensurePaddleOcrRuntime(options) : null;
   const command = buildOcrBboxCommand(options, provider, outputPath, runtime);
   emitRuntimeProgress(options, "ocr_running", "Paddle OCR 모델 다운로드/위치 분석 중", `장치: ${resolveOcrDeviceLabel(options)}`);
   const handleOcrOutput = createOcrCommandProgressHandler(options, {
@@ -2234,7 +2239,7 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
   const firstOptions = normalizedOptions[0] || {};
   const batchOptions = withoutPageProgressOptions(firstOptions);
   const provider = resolveOcrBboxProvider(firstOptions);
-  if (provider !== "paddleocr-vl") {
+  if (!isPaddleOcrProvider(provider)) {
     const results = [];
     for (const options of normalizedOptions) {
       results.push(await collectOcrBboxHints(options));
@@ -2795,6 +2800,15 @@ function resolveOcrDevice(options = {}) {
   return "cpu";
 }
 
+function resolveOcrBatchSize(options = {}) {
+  const raw = process.env.MANGA_TRANSLATOR_OCR_BATCH_SIZE ?? options.ocrBatchSize ?? 1;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) {
+    return 1;
+  }
+  return Math.max(1, Math.min(16, parsed));
+}
+
 function resolveOcrDeviceLabel(options = {}) {
   const device = resolveOcrDevice(options);
   return device === "cpu" ? "CPU" : device.toUpperCase();
@@ -3048,6 +3062,7 @@ function buildOcrRuntimeEnv(options = {}, runtime = null) {
     HF_HUB_ETAG_TIMEOUT: process.env.HF_HUB_ETAG_TIMEOUT || "30",
     HF_HUB_DOWNLOAD_TIMEOUT: process.env.HF_HUB_DOWNLOAD_TIMEOUT || "300",
     MANGA_TRANSLATOR_OCR_DEVICE: options.ocrDevice || process.env.MANGA_TRANSLATOR_OCR_DEVICE || "cpu",
+    MANGA_TRANSLATOR_OCR_BATCH_SIZE: String(resolveOcrBatchSize(options)),
     MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG: resolveOcrGpuCudaTag(options),
     MANGA_TRANSLATOR_PADDLEOCR_DEVICE: ocrDevice,
     PYTHONPATH: pythonPath,
@@ -3079,10 +3094,10 @@ function buildOcrBboxCommand(options = {}, provider, outputPath, runtime = null)
     return renderCommandTemplate(template, replacements);
   }
 
-  if (provider === "paddleocr-vl") {
+  if (isPaddleOcrProvider(provider)) {
     const python = quoteCommandArg(resolveOcrRuntimePythonPath(runtime, options));
     const scriptPath = quoteCommandArg(path.join(__dirname, "paddleocr-vl-bboxes.py"));
-    return `${python} -u ${scriptPath} --image ${quoteCommandArg(image)} --output ${quoteCommandArg(outputPath)} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
+    return `${python} -u ${scriptPath} --image ${quoteCommandArg(image)} --output ${quoteCommandArg(outputPath)} --provider ${quoteCommandArg(provider)} --batch-size ${quoteCommandArg(resolveOcrBatchSize(options))} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
   }
 
   throw new Error("OCR bbox provider requires MANGA_TRANSLATOR_OCR_BBOX_CMD.");
@@ -3092,7 +3107,8 @@ function buildOcrBboxBatchCommand(options = {}, batchPath, runtime = null, progr
   const python = quoteCommandArg(resolveOcrRuntimePythonPath(runtime, options));
   const scriptPath = quoteCommandArg(path.join(__dirname, "paddleocr-vl-bboxes.py"));
   const progressArg = progressPath ? ` --progress ${quoteCommandArg(progressPath)}` : "";
-  return `${python} -u ${scriptPath} --batch ${quoteCommandArg(batchPath)}${progressArg} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
+  const provider = resolveOcrBboxProvider(options);
+  return `${python} -u ${scriptPath} --batch ${quoteCommandArg(batchPath)}${progressArg} --provider ${quoteCommandArg(provider)} --batch-size ${quoteCommandArg(resolveOcrBatchSize(options))} --device ${quoteCommandArg(resolveOcrDevice(options))}`;
 }
 
 function resolveOcrRuntimePythonPath(runtime = null, options = {}) {

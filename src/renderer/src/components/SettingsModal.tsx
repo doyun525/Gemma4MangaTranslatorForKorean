@@ -14,15 +14,18 @@ import type {
 import {
   CODEX_REASONING_OPTIONS,
   DEFAULT_GEMMA_MODEL_REPO,
+  DEFAULT_OCR_BATCH_SIZE,
   DEFAULT_OCR_BBOX_EXPAND_X_PERCENT,
   DEFAULT_OCR_BBOX_EXPAND_Y_PERCENT,
   DEFAULT_TEXT_OUTLINE_WIDTH_PX,
   DEFAULT_TRANSLATION_MODE,
   GEMMA_VRAM_MODE_OPTIONS,
   MAX_MAX_TOKENS,
+  MAX_OCR_BATCH_SIZE,
   MAX_OCR_BBOX_EXPAND_PERCENT,
   MAX_TEXT_OUTLINE_WIDTH_PX,
   MIN_MAX_TOKENS,
+  MIN_OCR_BATCH_SIZE,
   MIN_OCR_BBOX_EXPAND_PERCENT,
   MIN_TEXT_OUTLINE_WIDTH_PX,
   MODEL_PRESETS,
@@ -94,6 +97,9 @@ export function SettingsModal({
   const [codexOauthPort, setCodexOauthPort] = React.useState(String(initialSettings.codex.oauthPort));
   const [ocrDevice, setOcrDevice] = React.useState<OcrDevice>(initialSettings.ocr.device);
   const [ocrEngine, setOcrEngine] = React.useState<OcrEngine>(initialSettings.ocr.engine ?? "paddleocr-vl");
+  const [ocrBatchSize, setOcrBatchSize] = React.useState(
+    numberToInput(initialSettings.ocr.batchSize, DEFAULT_OCR_BATCH_SIZE)
+  );
   const [translationMode, setTranslationMode] = React.useState<TranslationMode>(
     resolveTranslationMode(initialSettings.translation?.mode)
   );
@@ -137,6 +143,7 @@ export function SettingsModal({
     setCodexOauthPort(String(initialSettings.codex.oauthPort));
     setOcrDevice(initialSettings.ocr.device);
     setOcrEngine(initialSettings.ocr.engine ?? "paddleocr-vl");
+    setOcrBatchSize(numberToInput(initialSettings.ocr.batchSize, DEFAULT_OCR_BATCH_SIZE));
     setTranslationMode(resolveTranslationMode(initialSettings.translation?.mode));
     setIncludeSoundEffects(initialSettings.translation.includeSoundEffects);
     setOcrBboxExpandXPercent(
@@ -213,6 +220,7 @@ export function SettingsModal({
   const trimmedCodexModel = codexModel.trim();
   const parsedCodexOauthPort = Number(codexOauthPort);
   const parsedMaxTokens = Number(maxTokens);
+  const parsedOcrBatchSize = Number(ocrBatchSize);
   const parsedOcrBboxExpandXPercent = Number(ocrBboxExpandXPercent);
   const parsedOcrBboxExpandYPercent = Number(ocrBboxExpandYPercent);
   const parsedTextOutlineWidthPx = Number(textOutlineWidthPx);
@@ -220,6 +228,10 @@ export function SettingsModal({
     Number.isInteger(parsedCodexOauthPort) && parsedCodexOauthPort >= 0 && parsedCodexOauthPort <= 65535;
   const maxTokensValid =
     Number.isInteger(parsedMaxTokens) && parsedMaxTokens >= MIN_MAX_TOKENS && parsedMaxTokens <= MAX_MAX_TOKENS;
+  const ocrBatchSizeValid =
+    Number.isInteger(parsedOcrBatchSize) &&
+    parsedOcrBatchSize >= MIN_OCR_BATCH_SIZE &&
+    parsedOcrBatchSize <= MAX_OCR_BATCH_SIZE;
   const ocrBboxExpandValid =
     isValidPercent(parsedOcrBboxExpandXPercent) && isValidPercent(parsedOcrBboxExpandYPercent);
   const textOutlineWidthValid =
@@ -229,6 +241,7 @@ export function SettingsModal({
   const gemmaSettingsReady = modelSource === "local" ? Boolean(trimmedLocalModelPath) : Boolean(trimmedModelRepo && trimmedModelFile);
   const canSubmit = Boolean(
     maxTokensValid &&
+      ocrBatchSizeValid &&
       ocrBboxExpandValid &&
       textOutlineWidthValid &&
       (modelProvider === "openai-codex" ? trimmedCodexModel && codexOauthPortValid : gemmaSettingsReady)
@@ -237,6 +250,7 @@ export function SettingsModal({
   const buildOcrSettings = () => ({
     device: ocrDevice,
     engine: ocrEngine,
+    batchSize: parsedOcrBatchSize,
     ...(initialSettings.ocr.gpuCudaTag ? { gpuCudaTag: initialSettings.ocr.gpuCudaTag } : {})
   });
 
@@ -249,7 +263,7 @@ export function SettingsModal({
   });
 
   const buildSettings = React.useCallback((): AppSettings | null => {
-    if (!maxTokensValid || !ocrBboxExpandValid || !textOutlineWidthValid) {
+    if (!maxTokensValid || !ocrBatchSizeValid || !ocrBboxExpandValid || !textOutlineWidthValid) {
       return null;
     }
 
@@ -320,6 +334,7 @@ export function SettingsModal({
     trimmedCodexModel,
     parsedCodexOauthPort,
     parsedMaxTokens,
+    parsedOcrBatchSize,
     parsedOcrBboxExpandXPercent,
     parsedOcrBboxExpandYPercent,
     parsedTextOutlineWidthPx,
@@ -327,6 +342,7 @@ export function SettingsModal({
     codexReasoningEffort,
     ocrDevice,
     ocrEngine,
+    ocrBatchSizeValid,
     translationMode,
     includeSoundEffects,
     ocrBboxExpandValid,
@@ -595,6 +611,30 @@ export function SettingsModal({
               {OCR_ENGINE_OPTIONS.find((option) => option.id === ocrEngine)?.description}
             </p>
           </div>
+
+          <label>
+            OCR batch size
+            <input
+              type="number"
+              min={MIN_OCR_BATCH_SIZE}
+              max={MAX_OCR_BATCH_SIZE}
+              step={1}
+              value={ocrBatchSize}
+              disabled={controlsBusy}
+              onChange={(event) => {
+                clearTestState();
+                setOcrBatchSize(event.target.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  submit();
+                }
+              }}
+            />
+          </label>
+          <p className="muted-line modal-note">
+            PP-OCRv5에서 여러 페이지를 한 번에 예측합니다. PaddleOCR-VL은 안정성을 위해 순차 처리합니다. 기본값은 1입니다.
+          </p>
 
           <label className="settings-checkbox-row">
             <input
@@ -1002,6 +1042,11 @@ export function SettingsModal({
           ) : null}
           {!maxTokensValid ? (
             <p className="muted-line">최대 출력 토큰은 {MIN_MAX_TOKENS} 이상 {MAX_MAX_TOKENS} 이하의 정수여야 합니다.</p>
+          ) : null}
+          {!ocrBatchSizeValid ? (
+            <p className="muted-line">
+              OCR batch size는 {MIN_OCR_BATCH_SIZE} 이상 {MAX_OCR_BATCH_SIZE} 이하의 정수여야 합니다.
+            </p>
           ) : null}
           {!ocrBboxExpandValid ? (
             <p className="muted-line">OCR bbox 확장 비율은 {MIN_OCR_BBOX_EXPAND_PERCENT}~{MAX_OCR_BBOX_EXPAND_PERCENT}% 사이여야 합니다.</p>
