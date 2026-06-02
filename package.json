@@ -10,6 +10,7 @@
     "build": "node scripts/build.cjs",
     "dist:win": "node scripts/prepare-ocr-python.cjs && node scripts/prepare-flux-klein-runner.cjs && npm run build && electron-builder --config electron-builder.config.cjs --win nsis --x64",
     "compile:electron": "tsc -p tsconfig.electron.json",
+    "prepare:beellama": "node scripts/prepare-beellama.cjs",
     "logs": "node scripts/tail-log.cjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

@@ -19,6 +19,7 @@ import {
   exportWorkShareToFile,
   importWorkShare,
   listLibrary,
+  previewDroppedImport,
   previewFolder,
   previewImages,
   previewWorkShareImport,
@@ -90,6 +91,14 @@ export function registerImportShareIpc(context: IpcContext): void {
     }
     const preview = await previewZipFolder(result.filePaths[0]);
     return preview.chapters.length ? createImportPreviewSession(preview) : null;
+  });
+
+  ipcMain.handle("import:preview-dropped", async (_event, filePaths: string[]): Promise<ImportPreviewSession | null> => {
+    const preview = await previewDroppedImport(filePaths);
+    if (!preview) {
+      return null;
+    }
+    return preview.chapters.some((chapter) => chapter.pages.length > 0) ? createImportPreviewSession(preview) : null;
   });
 
   ipcMain.handle("import:create", async (_event, request: unknown) => {

@@ -2,6 +2,7 @@ import React from "react";
 import type {
   AppSettings,
   CodexReasoningEffort,
+  GemmaCustomModelPreset,
   GemmaVramMode,
   ModelTestProgressEvent,
   ModelProvider,
@@ -73,6 +74,16 @@ export function SettingsModal({
   );
   const [customModelRepo, setCustomModelRepo] = React.useState(initialSettings.gemma.modelRepo);
   const [customModelFile, setCustomModelFile] = React.useState(initialSettings.gemma.modelFile);
+  const [customModelPresets, setCustomModelPresets] = React.useState<GemmaCustomModelPreset[]>(
+    initialSettings.gemma.customModelPresets ?? []
+  );
+  const [selectedCustomPresetId, setSelectedCustomPresetId] = React.useState(() =>
+    resolveInitialCustomPresetId(
+      initialSettings.gemma.customModelPresets ?? [],
+      initialSettings.gemma.modelRepo,
+      initialSettings.gemma.modelFile
+    )
+  );
   const [localModelPath, setLocalModelPath] = React.useState(initialSettings.gemma.localModelPath ?? "");
   const [localMmprojPath, setLocalMmprojPath] = React.useState(initialSettings.gemma.localMmprojPath ?? "");
   const [vramMode, setVramMode] = React.useState<GemmaVramMode>(initialSettings.gemma.vramMode);
@@ -110,6 +121,14 @@ export function SettingsModal({
     setSelectedPreset(resolveModelPreset(initialSettings.gemma.modelRepo, initialSettings.gemma.modelFile));
     setCustomModelRepo(initialSettings.gemma.modelRepo);
     setCustomModelFile(initialSettings.gemma.modelFile);
+    setCustomModelPresets(initialSettings.gemma.customModelPresets ?? []);
+    setSelectedCustomPresetId(
+      resolveInitialCustomPresetId(
+        initialSettings.gemma.customModelPresets ?? [],
+        initialSettings.gemma.modelRepo,
+        initialSettings.gemma.modelFile
+      )
+    );
     setLocalModelPath(initialSettings.gemma.localModelPath ?? "");
     setLocalMmprojPath(initialSettings.gemma.localMmprojPath ?? "");
     setVramMode(initialSettings.gemma.vramMode);
@@ -160,6 +179,35 @@ export function SettingsModal({
   const trimmedModelFile = (activePreset?.modelFile ?? customModelFile).trim();
   const trimmedMmprojRepo = activePreset?.mmprojRepo;
   const trimmedMmprojFile = activePreset?.mmprojFile;
+  const normalizedCustomModelPresets = React.useMemo(
+    () => normalizeCustomModelPresetsForSettings(customModelPresets),
+    [customModelPresets]
+  );
+  const customModelPresetsForSave = React.useMemo(() => {
+    const modelRepo = customModelRepo.trim();
+    const modelFile = customModelFile.trim();
+    if (modelSource !== "huggingface" || selectedPreset !== "custom" || !modelRepo || !modelFile) {
+      return normalizedCustomModelPresets;
+    }
+
+    const existingPreset =
+      normalizedCustomModelPresets.find((preset) => preset.id === selectedCustomPresetId) ??
+      normalizedCustomModelPresets.find((preset) => sameCustomModelPreset(preset, modelRepo, modelFile));
+    const currentPreset: GemmaCustomModelPreset = {
+      id: existingPreset?.id ?? createCustomPresetId(modelRepo, modelFile, normalizedCustomModelPresets),
+      label: existingPreset?.label ?? buildCustomPresetLabel(modelRepo, modelFile),
+      modelRepo,
+      modelFile
+    };
+    return normalizeCustomModelPresetsForSettings(upsertCustomModelPreset(normalizedCustomModelPresets, currentPreset));
+  }, [
+    customModelFile,
+    customModelRepo,
+    modelSource,
+    normalizedCustomModelPresets,
+    selectedCustomPresetId,
+    selectedPreset
+  ]);
   const trimmedLocalModelPath = localModelPath.trim();
   const trimmedLocalMmprojPath = localMmprojPath.trim();
   const trimmedCodexModel = codexModel.trim();
@@ -220,6 +268,7 @@ export function SettingsModal({
           ...(trimmedMmprojFile ? { mmprojFile: trimmedMmprojFile } : {}),
           ...(trimmedLocalModelPath ? { localModelPath: trimmedLocalModelPath } : {}),
           ...(trimmedLocalMmprojPath ? { localMmprojPath: trimmedLocalMmprojPath } : {}),
+          customModelPresets: customModelPresetsForSave,
           vramMode
         },
         codex: {
@@ -244,6 +293,7 @@ export function SettingsModal({
         ...(trimmedMmprojFile ? { mmprojFile: trimmedMmprojFile } : {}),
         ...(trimmedLocalModelPath ? { localModelPath: trimmedLocalModelPath } : {}),
         ...(trimmedLocalMmprojPath ? { localMmprojPath: trimmedLocalMmprojPath } : {}),
+        customModelPresets: customModelPresetsForSave,
         vramMode
       },
       codex: {
@@ -266,6 +316,7 @@ export function SettingsModal({
     trimmedMmprojFile,
     trimmedLocalModelPath,
     trimmedLocalMmprojPath,
+    customModelPresetsForSave,
     trimmedCodexModel,
     parsedCodexOauthPort,
     parsedMaxTokens,
@@ -291,6 +342,37 @@ export function SettingsModal({
     setTestState({ status: "idle", message: null, detail: null });
     setTestLogLines([]);
   }, []);
+
+  const saveCurrentCustomPreset = React.useCallback(() => {
+    const modelRepo = customModelRepo.trim();
+    const modelFile = customModelFile.trim();
+    if (!modelRepo || !modelFile) {
+      return;
+    }
+
+    const existingPreset =
+      customModelPresets.find((preset) => preset.id === selectedCustomPresetId) ??
+      customModelPresets.find((preset) => sameCustomModelPreset(preset, modelRepo, modelFile));
+    const nextPreset: GemmaCustomModelPreset = {
+      id: existingPreset?.id ?? createCustomPresetId(modelRepo, modelFile, customModelPresets),
+      label: existingPreset?.label ?? buildCustomPresetLabel(modelRepo, modelFile),
+      modelRepo,
+      modelFile
+    };
+
+    setCustomModelPresets((current) => upsertCustomModelPreset(current, nextPreset));
+    setSelectedCustomPresetId(nextPreset.id);
+    clearTestState();
+  }, [clearTestState, customModelFile, customModelPresets, customModelRepo, selectedCustomPresetId]);
+
+  const deleteSelectedCustomPreset = React.useCallback(() => {
+    if (!selectedCustomPresetId) {
+      return;
+    }
+    setCustomModelPresets((current) => current.filter((preset) => preset.id !== selectedCustomPresetId));
+    setSelectedCustomPresetId("");
+    clearTestState();
+  }, [clearTestState, selectedCustomPresetId]);
 
   const appendTestLogLine = React.useCallback((line: string) => {
     const normalized = line.trim();
@@ -658,6 +740,30 @@ export function SettingsModal({
               {selectedPreset === "custom" ? (
                 <>
                   <label>
+                    저장된 커스텀
+                    <select
+                      value={selectedCustomPresetId}
+                      disabled={controlsBusy || customModelPresets.length === 0}
+                      onChange={(event) => {
+                        clearTestState();
+                        const presetId = event.target.value;
+                        setSelectedCustomPresetId(presetId);
+                        const preset = customModelPresets.find((candidate) => candidate.id === presetId);
+                        if (preset) {
+                          setCustomModelRepo(preset.modelRepo);
+                          setCustomModelFile(preset.modelFile);
+                        }
+                      }}
+                    >
+                      <option value="">직접 입력</option>
+                      {customModelPresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
                     HF repo
                     <input
                       ref={modelRepoInputRef}
@@ -665,6 +771,7 @@ export function SettingsModal({
                       disabled={controlsBusy}
                       onChange={(event) => {
                         clearTestState();
+                        setSelectedCustomPresetId("");
                         setCustomModelRepo(event.target.value);
                       }}
                       onKeyDown={(event) => {
@@ -681,6 +788,7 @@ export function SettingsModal({
                       disabled={controlsBusy}
                       onChange={(event) => {
                         clearTestState();
+                        setSelectedCustomPresetId("");
                         setCustomModelFile(event.target.value);
                       }}
                       onKeyDown={(event) => {
@@ -690,6 +798,26 @@ export function SettingsModal({
                       }}
                     />
                   </label>
+                  <div className="settings-inline-actions">
+                    <button
+                      type="button"
+                      onClick={saveCurrentCustomPreset}
+                      disabled={controlsBusy || !customModelRepo.trim() || !customModelFile.trim()}
+                    >
+                      현재 커스텀 저장
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={deleteSelectedCustomPreset}
+                      disabled={controlsBusy || !selectedCustomPresetId}
+                    >
+                      선택 항목 삭제
+                    </button>
+                  </div>
+                  <p className="muted-line modal-note">
+                    하단 저장 버튼을 누르면 현재 커스텀을 드롭다운 목록에도 함께 저장합니다.
+                  </p>
                 </>
               ) : null}
             </>
@@ -886,6 +1014,85 @@ export function SettingsModal({
         </section>
     </Modal>
   );
+}
+
+function resolveInitialCustomPresetId(
+  presets: GemmaCustomModelPreset[],
+  modelRepo: string,
+  modelFile: string
+): string {
+  const matchingPreset = presets.find((preset) => sameCustomModelPreset(preset, modelRepo.trim(), modelFile.trim()));
+  return matchingPreset?.id ?? "";
+}
+
+function normalizeCustomModelPresetsForSettings(presets: GemmaCustomModelPreset[]): GemmaCustomModelPreset[] {
+  const seen = new Set<string>();
+  return presets
+    .map((preset) => ({
+      ...preset,
+      id: preset.id.trim(),
+      label: preset.label.trim(),
+      modelRepo: preset.modelRepo.trim(),
+      modelFile: preset.modelFile.trim(),
+      mmprojRepo: preset.mmprojRepo?.trim(),
+      mmprojFile: preset.mmprojFile?.trim()
+    }))
+    .filter((preset) => {
+      if (!preset.id || !preset.modelRepo || !preset.modelFile) {
+        return false;
+      }
+      if (seen.has(preset.id)) {
+        return false;
+      }
+      seen.add(preset.id);
+      return true;
+    })
+    .map((preset) => ({
+      id: preset.id,
+      label: preset.label || buildCustomPresetLabel(preset.modelRepo, preset.modelFile),
+      modelRepo: preset.modelRepo,
+      modelFile: preset.modelFile,
+      ...(preset.mmprojRepo ? { mmprojRepo: preset.mmprojRepo } : {}),
+      ...(preset.mmprojFile ? { mmprojFile: preset.mmprojFile } : {}),
+    }));
+}
+
+function sameCustomModelPreset(preset: GemmaCustomModelPreset, modelRepo: string, modelFile: string): boolean {
+  return preset.modelRepo.trim() === modelRepo.trim() && preset.modelFile.trim() === modelFile.trim();
+}
+
+function createCustomPresetId(modelRepo: string, modelFile: string, presets: GemmaCustomModelPreset[]): string {
+  const base = `${modelRepo}-${modelFile}`
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 56);
+  const fallbackBase = base || `custom-${Date.now()}`;
+  const usedIds = new Set(presets.map((preset) => preset.id));
+  let candidate = fallbackBase;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = `${fallbackBase}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function buildCustomPresetLabel(modelRepo: string, modelFile: string): string {
+  const repoName = modelRepo.split("/").filter(Boolean).pop() ?? modelRepo;
+  const fileName = modelFile.replace(/\.gguf$/i, "");
+  return `${repoName} / ${fileName}`.slice(0, 120);
+}
+
+function upsertCustomModelPreset(
+  presets: GemmaCustomModelPreset[],
+  nextPreset: GemmaCustomModelPreset
+): GemmaCustomModelPreset[] {
+  const existingIndex = presets.findIndex((preset) => preset.id === nextPreset.id);
+  if (existingIndex < 0) {
+    return [...presets, nextPreset];
+  }
+  return presets.map((preset, index) => (index === existingIndex ? nextPreset : preset));
 }
 
 function resolveTranslationMode(value: unknown): TranslationMode {

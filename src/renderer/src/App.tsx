@@ -92,6 +92,7 @@ export default function App(): React.JSX.Element {
   const [translationSourceOpen, setTranslationSourceOpen] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreviewSession | null>(null);
   const [importBusy, setImportBusy] = useState(false);
+  const [fileDropActive, setFileDropActive] = useState(false);
   const [shareExportOpen, setShareExportOpen] = useState(false);
   const [shareExportBusy, setShareExportBusy] = useState(false);
   const [shareImportPreview, setShareImportPreview] = useState<WorkShareImportPreview | null>(null);
@@ -117,6 +118,7 @@ export default function App(): React.JSX.Element {
   const [showTextBlocks, setShowTextBlocks] = useState(true);
   const { settings, settingsOpen, settingsBusy, openSettings, closeSettings, submitSettings, resetSettings } = useSettingsDialog(pushStatus);
   const workspacePanelRef = useRef<HTMLElement | null>(null);
+  const fileDragDepthRef = useRef(0);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -355,6 +357,72 @@ export default function App(): React.JSX.Element {
     }
     setImportPreview(preview);
   }, []);
+
+  const openDroppedImportPreview = useCallback(
+    async (files: File[]) => {
+      const filePaths = files
+        .map((file) => window.mangaApi.getPathForFile(file) || (file as File & { path?: string }).path || "")
+        .filter(Boolean);
+      if (filePaths.length === 0) {
+        pushStatus("드롭한 파일 경로를 알 수 없습니다.");
+        return;
+      }
+      try {
+        const preview = await window.mangaApi.previewDroppedImport(filePaths);
+        if (preview) {
+          setImportPreview(preview);
+        } else {
+          pushStatus("가져올 수 있는 이미지가 없습니다.");
+        }
+      } catch (error) {
+        console.error(error);
+        pushStatus(formatErrorMessage(error, "드롭한 파일을 열 수 없습니다."));
+      }
+    },
+    [pushStatus]
+  );
+
+  const onWorkspaceDragEnter = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    fileDragDepthRef.current += 1;
+    setFileDropActive(true);
+  }, []);
+
+  const onWorkspaceDragOver = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setFileDropActive(true);
+  }, []);
+
+  const onWorkspaceDragLeave = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) {
+      setFileDropActive(false);
+    }
+  }, []);
+
+  const onWorkspaceDrop = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      fileDragDepthRef.current = 0;
+      setFileDropActive(false);
+      void openDroppedImportPreview(Array.from(event.dataTransfer.files));
+    },
+    [openDroppedImportPreview]
+  );
 
   const selectTranslateSource = useCallback(
     async (mode: TranslateSourceMode) => {
@@ -1624,6 +1692,11 @@ export default function App(): React.JSX.Element {
         jobState={jobState}
         progressSnapshot={progressSnapshot}
         onWorkspaceWheel={onWorkspaceWheel}
+        fileDropActive={fileDropActive}
+        onWorkspaceDragEnter={onWorkspaceDragEnter}
+        onWorkspaceDragOver={onWorkspaceDragOver}
+        onWorkspaceDragLeave={onWorkspaceDragLeave}
+        onWorkspaceDrop={onWorkspaceDrop}
         onStagePointerMove={onStagePointerMove}
         onStagePointerUp={onStagePointerUp}
         onStagePointerDown={onStagePointerDown}
@@ -1722,6 +1795,13 @@ export default function App(): React.JSX.Element {
       />
     </main>
   );
+}
+
+function hasDraggedFiles(dataTransfer: DataTransfer | null): boolean {
+  if (!dataTransfer) {
+    return false;
+  }
+  return Array.from(dataTransfer.types).includes("Files");
 }
 
 function countChapterBlocks(chapter: ChapterSnapshot | null, selectedPageId: string | null): BlockCounts {

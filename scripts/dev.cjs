@@ -3,6 +3,7 @@ const { join } = require("node:path");
 const { readdirSync, rmSync, statSync } = require("node:fs");
 const { spawn, spawnSync } = require("node:child_process");
 const { prepareRuntimeAssets } = require("./prepare-runtime.cjs");
+const { prepareBeellamaRuntime } = require("./prepare-beellama.cjs");
 
 const root = join(__dirname, "..");
 const rendererUrl = "http://127.0.0.1:5173";
@@ -90,6 +91,7 @@ function shutdown() {
 (async () => {
   cleanupOldDevSessions();
   prepareRuntimeAssets({ root, outputDir: join(root, "out", "app-runtime") });
+  await prepareBeellamaRuntime();
   runSync(process.execPath, [nodeBin("typescript", "bin", "tsc"), "-p", "tsconfig.electron.json"]);
   spawnChild(process.execPath, [nodeBin("vite", "bin", "vite.js"), "--config", "vite.renderer.config.ts", "--host", "127.0.0.1"]);
   await waitForUrl(rendererUrl);

@@ -432,6 +432,23 @@ select {
   outline: none;
 }
 
+.workspace.file-drop-active::after {
+  content: "파일을 놓아 가져오기";
+  position: absolute;
+  inset: 24px;
+  z-index: 31;
+  display: grid;
+  place-items: center;
+  color: #f4f8ff;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  border: 2px dashed rgba(112, 183, 255, 0.95);
+  background: rgba(12, 18, 27, 0.7);
+  pointer-events: none;
+}
+
 .toolbar {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1795,6 +1812,33 @@ select {
   touch-action: none;
 }
 
+.image-stage.file-drop-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 29;
+  border: 2px dashed rgba(112, 183, 255, 0.95);
+  background: rgba(17, 24, 32, 0.34);
+  pointer-events: none;
+}
+
+.stage-drop-overlay {
+  position: absolute;
+  inset: 16px;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  color: #f4f8ff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  background: rgba(12, 18, 27, 0.72);
+  border: 1px solid rgba(190, 217, 255, 0.55);
+  border-radius: 12px;
+  pointer-events: none;
+}
+
 .image-stage.selecting-region {
   cursor: crosshair;
 }
@@ -2758,6 +2802,24 @@ select {
 
 .settings-field-stack > span {
   color: #e6ddcf;
+}
+
+.settings-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #e6ddcf;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-checkbox-row input {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
 }
 
 .settings-mode-group {

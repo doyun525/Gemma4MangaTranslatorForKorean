@@ -26,6 +26,11 @@ type AppWorkspaceProps = {
   jobState: JobState;
   progressSnapshot: ProgressSnapshot | null;
   onWorkspaceWheel: React.WheelEventHandler<HTMLElement>;
+  fileDropActive?: boolean;
+  onWorkspaceDragEnter?: React.DragEventHandler<HTMLElement>;
+  onWorkspaceDragOver?: React.DragEventHandler<HTMLElement>;
+  onWorkspaceDragLeave?: React.DragEventHandler<HTMLElement>;
+  onWorkspaceDrop?: React.DragEventHandler<HTMLElement>;
   onStagePointerMove: ImageStageProps["onStagePointerMove"];
   onStagePointerUp: ImageStageProps["onStagePointerUp"];
   onStagePointerDown: ImageStageProps["onStagePointerDown"];
@@ -58,6 +63,11 @@ export function AppWorkspace({
   jobState,
   progressSnapshot,
   onWorkspaceWheel,
+  fileDropActive = false,
+  onWorkspaceDragEnter,
+  onWorkspaceDragOver,
+  onWorkspaceDragLeave,
+  onWorkspaceDrop,
   onStagePointerMove,
   onStagePointerUp,
   onStagePointerDown,
@@ -71,11 +81,15 @@ export function AppWorkspace({
   return (
     <section
       ref={workspacePanelRef}
-      className="workspace"
+      className={`workspace${fileDropActive ? " file-drop-active" : ""}`}
       tabIndex={0}
       aria-label="읽기 영역"
       onMouseDown={() => workspacePanelRef.current?.focus()}
       onWheel={onWorkspaceWheel}
+      onDragEnter={onWorkspaceDragEnter}
+      onDragOver={onWorkspaceDragOver}
+      onDragLeave={onWorkspaceDragLeave}
+      onDrop={onWorkspaceDrop}
     >
       {selectedPage ? (
         <div className="workspace-pane">
@@ -96,6 +110,7 @@ export function AppWorkspace({
             maskStrokes={maskStrokes}
             regionSelectionActive={regionSelectionActive}
             regionSelectionRect={regionSelectionRect}
+            fileDropActive={fileDropActive}
             onStagePointerMove={onStagePointerMove}
             onStagePointerUp={onStagePointerUp}
             onStagePointerDown={onStagePointerDown}

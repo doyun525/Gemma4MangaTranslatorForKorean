@@ -7,7 +7,7 @@ import {
   rm,
   writeFile
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { nativeImage } from "electron";
 import type {
@@ -496,6 +496,52 @@ export async function previewZipFolder(folderPath: string): Promise<ImportPrevie
     suggestedWorkTitle: basename(folderPath),
     chapters
   };
+}
+
+export async function previewDroppedImport(filePaths: string[]): Promise<ImportPreviewResult | null> {
+  const paths = Array.from(new Set(filePaths.map((filePath) => String(filePath ?? "").trim()).filter(Boolean))).filter((filePath) =>
+    existsSync(filePath)
+  );
+  if (paths.length === 0) {
+    return null;
+  }
+
+  if (paths.length === 1) {
+    const filePath = paths[0];
+    const stat = statSync(filePath);
+    if (stat.isDirectory()) {
+      const preview = await previewFolder(filePath);
+      return preview.chapters[0]?.pages.length ? preview : null;
+    }
+    if (isZipPath(filePath)) {
+      const preview = await previewZip(filePath);
+      return preview.chapters[0]?.pages.length ? preview : null;
+    }
+  }
+
+  const imagePaths = paths.filter((filePath) => !statSync(filePath).isDirectory() && isSupportedImagePath(filePath));
+  if (imagePaths.length === paths.length) {
+    const preview = await previewImages(imagePaths);
+    return preview.chapters[0]?.pages.length ? preview : null;
+  }
+
+  const zipPaths = paths.filter((filePath) => !statSync(filePath).isDirectory() && isZipPath(filePath));
+  if (zipPaths.length === paths.length && zipPaths.length > 0) {
+    const previews = await Promise.all(zipPaths.map((zipPath) => previewZip(zipPath)));
+    const chapters = previews.flatMap((preview) => preview.chapters);
+    return {
+      mode: "batch",
+      sourceKind: "zip-folder",
+      suggestedWorkTitle: DEFAULT_WORK_TITLE,
+      chapters
+    };
+  }
+
+  throw new Error("이미지 파일, 이미지 폴더, ZIP 파일만 넣을 수 있습니다.");
+}
+
+function isZipPath(filePath: string): boolean {
+  return extname(filePath).toLowerCase() === ".zip";
 }
 
 export async function createImport(request: CreateImportFromPreviewRequest): Promise<CreateImportResult> {
