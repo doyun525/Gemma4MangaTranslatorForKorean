@@ -9,6 +9,7 @@ import {
   RenameWorkRequestSchema,
   ReorderChaptersRequestSchema,
   ReorderPagesRequestSchema,
+  SampleBlockBackgroundsRequestSchema,
   SavePageBlocksRequestSchema,
   SaveChapterSnapshotSchema,
   parseIpcPayload
@@ -27,6 +28,7 @@ import {
   savePageBlocks,
   saveChapterSnapshot
 } from "../library";
+import { sampleBlockBackgrounds } from "../pipeline/blockBackground";
 import { createLibraryImageUrl } from "../imageProtocol";
 
 export function registerLibraryIpc(): void {
@@ -47,6 +49,11 @@ export function registerLibraryIpc(): void {
   ipcMain.handle("library:save-page-blocks", async (_event, raw: unknown) =>
     savePageBlocks(parseIpcPayload(SavePageBlocksRequestSchema, raw, "페이지 블록 저장"))
   );
+  ipcMain.handle("library:sample-block-backgrounds", async (_event, raw: unknown) => {
+    const request = parseIpcPayload(SampleBlockBackgroundsRequestSchema, raw, "블록 배경색 샘플");
+    const results = await sampleBlockBackgrounds(request.imagePath, request.pageWidth, request.pageHeight, request.blocks);
+    return { results };
+  });
   ipcMain.handle("library:rename-work", async (_event, workId: unknown, title: unknown) => {
     const request = parseIpcPayload(RenameWorkRequestSchema, { workId, title }, "작품 이름 변경");
     return renameWork(request.workId, request.title);

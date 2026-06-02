@@ -9,6 +9,9 @@ type EditorPanelProps = {
   areaTranslateAvailable?: boolean;
   areaTranslateSelecting?: boolean;
   onStartAreaTranslate?: () => void;
+  onSampleBackground?: () => void;
+  onSamplePageBackgrounds?: () => void;
+  pageBlockCount?: number;
   onUpdate: (patch: Partial<TranslationBlock>) => void;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -20,6 +23,9 @@ export function EditorPanel({
   areaTranslateAvailable = false,
   areaTranslateSelecting = false,
   onStartAreaTranslate,
+  onSampleBackground,
+  onSamplePageBackgrounds,
+  pageBlockCount = 0,
   onUpdate,
   onDelete,
   onDuplicate
@@ -40,6 +46,7 @@ export function EditorPanel({
   }
 
   const outlineColor = resolveColor(block.outlineColor, "#ffffff");
+  const backgroundColor = resolveColor(block.backgroundColor, "#ffffff");
   const autoFitText = block.autoFitText ?? true;
   const fontSizePx = clampFontSize(block.fontSizePx);
 
@@ -133,6 +140,19 @@ export function EditorPanel({
       <div className="color-row" aria-label="블록 색상">
         <ColorField label="글자색" value={resolveColor(block.textColor, "#111111")} disabled={disabled} onChange={(textColor) => onUpdate({ textColor })} />
         <ColorField label="외곽선" value={outlineColor} disabled={disabled} onChange={(nextOutlineColor) => onUpdate({ outlineColor: nextOutlineColor })} />
+      </div>
+      <div className="background-color-field">
+        <ColorField label="배경색" value={backgroundColor} disabled={disabled} onChange={(nextBackgroundColor) => onUpdate({ backgroundColor: nextBackgroundColor })} />
+        <div className="background-sample-actions">
+          <Button variant="secondary" disabled={disabled || !onSampleBackground} onClick={onSampleBackground}>
+            배경색 자동 추출
+          </Button>
+          {pageBlockCount > 1 && onSamplePageBackgrounds ? (
+            <Button variant="ghost" disabled={disabled} onClick={onSamplePageBackgrounds}>
+              페이지 전체
+            </Button>
+          ) : null}
+        </div>
       </div>
       <label>
         외곽선 두께 {resolveOutlineWidth(block.outlineWidthPx).toFixed(1)}px

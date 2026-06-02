@@ -21,6 +21,8 @@ import type {
   RegionAnalysisRequest,
   RegionAnalysisResult,
   SavePageBlocksRequest,
+  SampleBlockBackgroundsRequest,
+  SampleBlockBackgroundsResult,
   SetPageInpaintingResultRequest,
   SetPageInpaintingResultResult,
   StartInpaintingRequest,
@@ -51,6 +53,8 @@ const api = {
   openChapter: (chapterId: string): Promise<ChapterSnapshot> => ipcRenderer.invoke("library:open-chapter", chapterId),
   getPageImageDataUrl: (imagePath: string): Promise<string> => ipcRenderer.invoke("library:get-page-image-data-url", imagePath),
   savePageBlocks: (request: SavePageBlocksRequest): Promise<ChapterSnapshot> => ipcRenderer.invoke("library:save-page-blocks", request),
+  sampleBlockBackgrounds: (request: SampleBlockBackgroundsRequest): Promise<SampleBlockBackgroundsResult> =>
+    ipcRenderer.invoke("library:sample-block-backgrounds", request),
   renameWork: (workId: string, title: string): Promise<LibraryIndex> => ipcRenderer.invoke("library:rename-work", workId, title),
   renameChapter: (chapterId: string, title: string): Promise<LibraryIndex> => ipcRenderer.invoke("library:rename-chapter", chapterId, title),
   deleteWork: (workId: string): Promise<LibraryIndex> => ipcRenderer.invoke("library:delete-work", workId),

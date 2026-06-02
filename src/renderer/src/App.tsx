@@ -11,6 +11,7 @@ import type {
   WorkShareExportRequest,
   WorkShareImportPreview
 } from "../../shared/types";
+import { FLAT_BACKGROUND_OPACITY } from "../../shared/blockBackground";
 import {
   applyEditableBlockBbox,
   clampBbox,
@@ -114,7 +115,7 @@ export default function App(): React.JSX.Element {
   const [patternMaskStrokesByPage, setPatternMaskStrokesByPage] = useState<Record<string, InpaintingMaskStroke[]>>({});
   const [retouchUndoStack, setRetouchUndoStack] = useState<RetouchHistoryEntry[]>([]);
   const [retouchRedoStack, setRetouchRedoStack] = useState<RetouchHistoryEntry[]>([]);
-  const [showBlockChrome, setShowBlockChrome] = useState(true);
+  const [showBlockChrome, setShowBlockChrome] = useState(false);
   const [showTextBlocks, setShowTextBlocks] = useState(true);
   const { settings, settingsOpen, settingsBusy, openSettings, closeSettings, submitSettings, resetSettings } = useSettingsDialog(pushStatus);
   const workspacePanelRef = useRef<HTMLElement | null>(null);
@@ -1005,6 +1006,83 @@ export default function App(): React.JSX.Element {
     setSelectedBlockId(copy.id);
   };
 
+  const applyBackgroundSamples = useCallback(
+    (samples: Array<{ id: string; flat: boolean; backgroundColor?: string }>, scopeLabel: string) => {
+      if (!selectedPage) {
+        return;
+      }
+
+      const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
+      let appliedCount = 0;
+      updateCurrentChapter(selectedPage.id, (current) => ({
+        ...current,
+        pages: current.pages.map((page) =>
+          page.id !== selectedPage.id
+            ? page
+            : {
+                ...page,
+                updatedAt: new Date().toISOString(),
+                blocks: page.blocks.map((block) => {
+                  const sample = sampleById.get(block.id);
+                  if (!sample?.flat || !sample.backgroundColor) {
+                    return block;
+                  }
+                  appliedCount += 1;
+                  return {
+                    ...block,
+                    backgroundColor: sample.backgroundColor,
+                    opacity: Math.max(block.opacity, FLAT_BACKGROUND_OPACITY)
+                  };
+                })
+              }
+        )
+      }));
+
+      if (appliedCount > 0) {
+        pushStatus(`${scopeLabel}: 단색 배경 ${appliedCount}개 블록에 적용했습니다.`);
+      } else {
+        pushStatus(`${scopeLabel}: 단색 배경을 찾지 못했습니다.`);
+      }
+    },
+    [pushStatus, selectedPage, updateCurrentChapter]
+  );
+
+  const sampleSelectedBlockBackground = useCallback(async () => {
+    if (!selectedPage || !selectedBlock || selectedPageEditLocked || jobActive) {
+      return;
+    }
+
+    try {
+      const result = await window.mangaApi.sampleBlockBackgrounds({
+        imagePath: selectedPage.imagePath,
+        pageWidth: selectedPage.width,
+        pageHeight: selectedPage.height,
+        blocks: [{ id: selectedBlock.id, bbox: selectedBlock.bbox }]
+      });
+      applyBackgroundSamples(result.results, "선택 블록");
+    } catch (error) {
+      pushStatus(`배경색 추출 실패: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [applyBackgroundSamples, jobActive, pushStatus, selectedBlock, selectedPage, selectedPageEditLocked]);
+
+  const samplePageBlockBackgrounds = useCallback(async () => {
+    if (!selectedPage || selectedPageEditLocked || jobActive || selectedPage.blocks.length === 0) {
+      return;
+    }
+
+    try {
+      const result = await window.mangaApi.sampleBlockBackgrounds({
+        imagePath: selectedPage.imagePath,
+        pageWidth: selectedPage.width,
+        pageHeight: selectedPage.height,
+        blocks: selectedPage.blocks.map((block) => ({ id: block.id, bbox: block.bbox }))
+      });
+      applyBackgroundSamples(result.results, "현재 페이지");
+    } catch (error) {
+      pushStatus(`배경색 추출 실패: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [applyBackgroundSamples, jobActive, pushStatus, selectedPage, selectedPageEditLocked]);
+
   const getNormalizedImagePoint = useCallback((event: React.PointerEvent): { x: number; y: number } | null => {
     const stage = stageRef.current;
     if (!stage) {
@@ -1731,6 +1809,8 @@ export default function App(): React.JSX.Element {
           onEnterInpainting={() => void enterInpaintingMode()}
           onCancelJob={() => void window.mangaApi.cancelJob()}
           onStartAreaTranslate={startRegionTranslationSelection}
+          onSampleBlockBackground={() => void sampleSelectedBlockBackground()}
+          onSamplePageBackgrounds={() => void samplePageBlockBackgrounds()}
           onUpdateBlock={updateSelectedBlock}
           onDeleteBlock={deleteSelectedBlock}
           onDuplicateBlock={duplicateSelectedBlock}

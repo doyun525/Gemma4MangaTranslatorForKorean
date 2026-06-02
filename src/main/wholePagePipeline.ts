@@ -9,6 +9,7 @@ import { maybeRetryLowConfidenceItems } from "./pipeline/cropRetry";
 import { classifyFailure, isAbortErrorLike, isNonRetriableRuntimeError, summarizePage, throwIfAborted } from "./pipeline/failure";
 import { buildNoTextCompletedPage, isOcrResultNoTextDetected, isRequestNoTextDetected } from "./pipeline/noText";
 import { prepareOcrHintsForPages } from "./pipeline/ocrHints";
+import { applySampledBackgroundColors } from "./pipeline/blockBackground";
 import {
   applyOcrCandidateGeometryLocks,
   buildPageWarnings,
@@ -355,11 +356,15 @@ export async function runWholePagePipeline({
           });
           const soundFiltered = filterRejectedOrUncertainSoundItems(normalizedItems);
           normalizedItems = soundFiltered.items;
-          successPage = {
-            ...page,
-            blocks: normalizedItems.map((item, itemIndex) =>
+          const blocks = await applySampledBackgroundColors(
+            normalizedItems.map((item, itemIndex) =>
               overlayItemToBlock(item, page, itemIndex, { textOutlineWidthPx: pageOptions.textOutlineWidthPx })
             ),
+            page
+          );
+          successPage = {
+            ...page,
+            blocks,
             analysisStatus: "completed",
             lastError: undefined,
             updatedAt: new Date().toISOString()

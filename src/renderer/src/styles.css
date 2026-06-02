@@ -1606,6 +1606,18 @@ select {
   gap: var(--sp-3);
 }
 
+.background-color-field {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.background-sample-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--sp-3);
+  align-items: center;
+}
+
 .color-field {
   display: grid;
   gap: var(--sp-1);
@@ -2103,6 +2115,8 @@ select {
 }
 
 .overlay-text {
+  position: relative;
+  z-index: 1;
   max-width: 100%;
   max-height: 100%;
   display: flex;

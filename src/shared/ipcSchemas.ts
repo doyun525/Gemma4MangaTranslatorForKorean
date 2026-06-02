@@ -219,6 +219,25 @@ export const InpaintingColorSampleRequestSchema = z
   })
   .strict();
 
+export const SampleBlockBackgroundsRequestSchema = z
+  .object({
+    imagePath: filePath,
+    pageWidth: finiteNumber.min(1),
+    pageHeight: finiteNumber.min(1),
+    blocks: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(200),
+            bbox: BBoxSchema
+          })
+          .strict()
+      )
+      .min(1)
+      .max(MAX_BLOCKS_PER_PAGE)
+  })
+  .strict();
+
 export const InpaintingExportRequestSchema = z.object({ chapterId: uuid }).strict();
 
 export const RenameWorkRequestSchema = z.object({ workId: uuid, title }).strict();

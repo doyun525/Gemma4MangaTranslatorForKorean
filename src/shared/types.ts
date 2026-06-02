@@ -416,6 +416,24 @@ export type InpaintingColorSampleResult = {
   color: string;
 };
 
+export type SampleBlockBackgroundsRequest = {
+  imagePath: string;
+  pageWidth: number;
+  pageHeight: number;
+  blocks: Array<{
+    id: string;
+    bbox: BBox;
+  }>;
+};
+
+export type SampleBlockBackgroundsResult = {
+  results: Array<{
+    id: string;
+    flat: boolean;
+    backgroundColor?: string;
+  }>;
+};
+
 export type SetPageInpaintingResultRequest = {
   chapterId: string;
   pageId: string;
