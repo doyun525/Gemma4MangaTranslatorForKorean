@@ -53,6 +53,9 @@ export const TranslationBlockSchema = z
     textColor: hexColor,
     outlineColor: hexColor.optional(),
     outlineWidthPx: finiteNumber.min(0).max(8).optional(),
+    outlineWidthScale: finiteNumber.min(0).max(8).optional(),
+    bold: z.boolean().optional(),
+    italic: z.boolean().optional(),
     backgroundColor: hexColor,
     opacity: finiteNumber.min(0).max(1),
     autoFitText: z.boolean().optional(),
@@ -239,7 +242,10 @@ export const SampleBlockBackgroundsRequestSchema = z
   })
   .strict();
 
-export const InpaintingExportRequestSchema = z.object({ chapterId: uuid }).strict();
+export const InpaintingExportRequestSchema = z.discriminatedUnion("scope", [
+  z.object({ chapterId: uuid, scope: z.literal("chapter") }).strict(),
+  z.object({ chapterId: uuid, scope: z.literal("page"), pageId: uuid }).strict()
+]);
 
 export const RenameWorkRequestSchema = z.object({ workId: uuid, title }).strict();
 export const RenameChapterRequestSchema = z.object({ chapterId: uuid, title }).strict();

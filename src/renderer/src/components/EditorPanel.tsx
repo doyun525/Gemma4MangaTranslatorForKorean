@@ -1,7 +1,8 @@
 import React from "react";
 import type { RenderTextDirection, TranslationBlock } from "../../../shared/types";
 import { FontSelect } from "./FontSelect";
-import { Button } from "./ui";
+import { Button, IconButton, RangeInput } from "./ui";
+import { AlignCenterIcon, AlignLeftIcon, AlignRightIcon, BoldIcon, ItalicIcon } from "./ui/icons";
 
 type EditorPanelProps = {
   block: TranslationBlock | null;
@@ -12,6 +13,7 @@ type EditorPanelProps = {
   onSampleBackground?: () => void;
   onSamplePageBackgrounds?: () => void;
   pageBlockCount?: number;
+  onApplyFont?: (scope: "page" | "chapter") => void;
   onUpdate: (patch: Partial<TranslationBlock>) => void;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -26,6 +28,7 @@ export function EditorPanel({
   onSampleBackground,
   onSamplePageBackgrounds,
   pageBlockCount = 0,
+  onApplyFont,
   onUpdate,
   onDelete,
   onDuplicate
@@ -76,8 +79,7 @@ export function EditorPanel({
       </label>
       <label>
         기울기 {block.rotationDeg ?? 0}°
-        <input
-          type="range"
+        <RangeInput
           min={-30}
           max={30}
           step={1}
@@ -88,8 +90,7 @@ export function EditorPanel({
       </label>
       <label>
         투명도 {Math.round(block.opacity * 100)}%
-        <input
-          type="range"
+        <RangeInput
           min={0.1}
           max={1}
           step={0.01}
@@ -101,6 +102,40 @@ export function EditorPanel({
       <div className="font-field">
         <span className="font-field-label">폰트</span>
         <FontSelect value={block.fontFamily} disabled={disabled} onChange={(fontFamily) => onUpdate({ fontFamily })} />
+      </div>
+      {onApplyFont ? (
+        <div className="font-apply-row">
+          <span className="font-apply-label">이 폰트 일괄 적용</span>
+          <div className="font-apply-buttons">
+            <Button size="sm" disabled={disabled} onClick={() => onApplyFont("page")} title="이 페이지의 모든 블록에 적용">
+              페이지
+            </Button>
+            <Button size="sm" disabled={disabled} onClick={() => onApplyFont("chapter")} title="이 화의 모든 페이지·블록에 적용">
+              전체
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      <div className="block-style-row">
+        <div className="block-style-group">
+          <IconButton label="굵게" title="굵게" aria-pressed={Boolean(block.bold)} disabled={disabled} onClick={() => onUpdate({ bold: !block.bold })}>
+            <BoldIcon size={16} />
+          </IconButton>
+          <IconButton label="기울임꼴" title="기울임꼴" aria-pressed={Boolean(block.italic)} disabled={disabled} onClick={() => onUpdate({ italic: !block.italic })}>
+            <ItalicIcon size={16} />
+          </IconButton>
+        </div>
+        <div className="block-style-group">
+          <IconButton label="왼쪽 정렬" title="왼쪽 정렬" aria-pressed={block.textAlign === "left"} disabled={disabled} onClick={() => onUpdate({ textAlign: "left" })}>
+            <AlignLeftIcon size={16} />
+          </IconButton>
+          <IconButton label="가운데 정렬" title="가운데 정렬" aria-pressed={block.textAlign === "center"} disabled={disabled} onClick={() => onUpdate({ textAlign: "center" })}>
+            <AlignCenterIcon size={16} />
+          </IconButton>
+          <IconButton label="오른쪽 정렬" title="오른쪽 정렬" aria-pressed={block.textAlign === "right"} disabled={disabled} onClick={() => onUpdate({ textAlign: "right" })}>
+            <AlignRightIcon size={16} />
+          </IconButton>
+        </div>
       </div>
       <div className="font-size-field">
         <div className="font-size-header">
@@ -116,8 +151,7 @@ export function EditorPanel({
           </label>
         </div>
         <div className="font-size-row">
-          <input
-            type="range"
+          <RangeInput
             min={10}
             max={160}
             step={1}
@@ -154,16 +188,26 @@ export function EditorPanel({
           ) : null}
         </div>
       </div>
-      <label>
+      <label className="outline-width-field">
         외곽선 두께 {resolveOutlineWidth(block.outlineWidthPx).toFixed(1)}px
-        <input
-          type="range"
+        <RangeInput
           min={0}
           max={8}
           step={0.1}
           value={resolveOutlineWidth(block.outlineWidthPx)}
           disabled={disabled}
           onChange={(event) => onUpdate({ outlineWidthPx: resolveOutlineWidth(Number(event.target.value)) })}
+        />
+      </label>
+      <label className="outline-width-field">
+        외곽선 배율 {Math.round((block.outlineWidthScale ?? 1) * 100)}%
+        <RangeInput
+          min={0}
+          max={2.5}
+          step={0.1}
+          value={block.outlineWidthScale ?? 1}
+          disabled={disabled}
+          onChange={(event) => onUpdate({ outlineWidthScale: Number(event.target.value) })}
         />
       </label>
       <div className="block-actions">

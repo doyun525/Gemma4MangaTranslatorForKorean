@@ -29,6 +29,7 @@ type AppRightRailProps = {
   onStartAreaTranslate: () => void;
   onSampleBlockBackground: () => void;
   onSamplePageBackgrounds: () => void;
+  onApplyFont: (scope: "page" | "chapter") => void;
   onUpdateBlock: (patch: Partial<TranslationBlock>) => void;
   onDeleteBlock: () => void;
   onDuplicateBlock: () => void;
@@ -58,6 +59,7 @@ export function AppRightRail({
   onStartAreaTranslate,
   onSampleBlockBackground,
   onSamplePageBackgrounds,
+  onApplyFont,
   onUpdateBlock,
   onDeleteBlock,
   onDuplicateBlock
@@ -76,6 +78,7 @@ export function AppRightRail({
               pageBlockCount={selectedPage?.blocks.length ?? 0}
               onSampleBackground={onSampleBlockBackground}
               onSamplePageBackgrounds={onSamplePageBackgrounds}
+              onApplyFont={onApplyFont}
               onUpdate={onUpdateBlock}
               onDelete={onDeleteBlock}
               onDuplicate={onDuplicateBlock}
@@ -109,6 +112,7 @@ export function AppRightRail({
             pageBlockCount={selectedPage?.blocks.length ?? 0}
             onSampleBackground={onSampleBlockBackground}
             onSamplePageBackgrounds={onSamplePageBackgrounds}
+            onApplyFont={onApplyFont}
             onUpdate={onUpdateBlock}
             onDelete={onDeleteBlock}
             onDuplicate={onDuplicateBlock}

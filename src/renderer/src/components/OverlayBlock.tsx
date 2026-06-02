@@ -35,7 +35,7 @@ export function OverlayBlock({
 
   const displayText = block.translatedText || block.sourceText || "...";
   const layout = resolveBlockTextLayout(block, displayText, pageSize, stageSize);
-  const outlineWidthPx = resolveTextOutlinePx(layout.fontSizePx, block.outlineWidthPx);
+  const outlineWidthPx = resolveTextOutlinePx(layout.fontSizePx, block.outlineWidthPx, block.outlineWidthScale);
   const outlineColor = resolveCssColor(block.outlineColor, "#ffffff");
   const visualStyle = resolveBlockVisualStyle(block.type);
   const style: React.CSSProperties = {
@@ -74,10 +74,10 @@ export function OverlayBlock({
     height: block.renderDirection === "vertical" ? `${layout.fitInnerHeight}px` : undefined,
     maxWidth: "100%",
     maxHeight: "100%",
-    overflow: "visible"
-  };
-  const textStyle: React.CSSProperties = {
-    ...contentStyle,
+    overflow: "visible",
+    fontWeight: block.bold ? 800 : 400,
+    fontStyle: block.italic ? "italic" : "normal",
+    fontSynthesis: "weight style",
     color: block.textColor,
     ...(outlineWidthPx > 0
       ? {
@@ -104,7 +104,7 @@ export function OverlayBlock({
       onPointerDown={pointerDisabled ? undefined : onPointerDown}
     >
       <div className="overlay-text" style={textWrapStyle}>
-        <span className="overlay-text-content" style={textStyle}>
+        <span className="overlay-text-content" style={contentStyle}>
           {displayText}
         </span>
       </div>
@@ -133,12 +133,12 @@ export function OverlayBlock({
   );
 }
 
-function resolveTextOutlinePx(fontSizePx: number, outlineWidthPx?: number): number {
+function resolveTextOutlinePx(fontSizePx: number, outlineWidthPx?: number, outlineWidthScale?: number): number {
   const configured = Number(outlineWidthPx);
   if (Number.isFinite(configured)) {
-    return Math.round(Math.min(8, Math.max(0, configured)) * 10) / 10;
+    return Math.round(Math.min(8, Math.max(0, configured)) * Math.max(0, outlineWidthScale ?? 1) * 10) / 10;
   }
-  return Math.round(Math.min(4, Math.max(0.35, fontSizePx * 0.055)) * 10) / 10;
+  return Math.round(Math.min(4, Math.max(0.35, fontSizePx * 0.055)) * Math.max(0, outlineWidthScale ?? 1) * 10) / 10;
 }
 
 function resolveCssColor(value: string | undefined, fallback: string): string {

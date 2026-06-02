@@ -132,10 +132,20 @@ export type TranslationBlock = {
   textColor: string;
   outlineColor?: string;
   outlineWidthPx?: number;
+  outlineWidthScale?: number;
+  bold?: boolean;
+  italic?: boolean;
   backgroundColor: string;
   opacity: number;
   autoFitText?: boolean;
   inpaintExcluded?: boolean;
+};
+
+export type CustomFont = {
+  id: string;
+  label: string;
+  family: string;
+  fileName: string;
 };
 
 export type MangaPage = {
@@ -358,9 +368,16 @@ export type StartInpaintingResult = {
   error?: string;
 };
 
-export type InpaintingExportRequest = {
-  chapterId: string;
-};
+export type InpaintingExportRequest =
+  | {
+      chapterId: string;
+      scope: "chapter";
+    }
+  | {
+      chapterId: string;
+      scope: "page";
+      pageId: string;
+    };
 
 export type InpaintingExportResult = {
   outputDir: string;

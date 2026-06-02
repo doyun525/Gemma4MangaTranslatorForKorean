@@ -29,6 +29,7 @@ import { AppWorkspace } from "./components/AppWorkspace";
 import type { ImportModalSubmit } from "./components/ImportModal";
 import { type BlockCounts, type InpaintingTool } from "./components/InpaintingControlPanel";
 import { InpaintingProvider, type InpaintingContextValue } from "./inpainting/InpaintingContext";
+import { FontsProvider } from "./fonts/FontsContext";
 import type { ShareImportModalSubmit } from "./components/ShareImportModal";
 import type { TranslateSourceMode } from "./components/TranslateSourceModal";
 import { useConfirmDialog } from "./hooks/useConfirmDialog";
@@ -667,6 +668,7 @@ export default function App(): React.JSX.Element {
     if (!confirmed) {
       return;
     }
+    setInpaintingTool("none");
     setJobState({
       id: "pending-inpainting",
       kind: "inpainting",
@@ -712,13 +714,18 @@ export default function App(): React.JSX.Element {
     selectedPage
   ]);
 
-  const exportInpaintingResults = useCallback(async () => {
+  const exportInpaintingResults = useCallback(async (scope: "page" | "chapter") => {
     if (!currentChapter || jobActive) {
+      return;
+    }
+    if (scope === "page" && !selectedPage) {
+      pushStatus("출력할 페이지가 선택되어 있지 않습니다.");
       return;
     }
     if (dirty) {
       await saveNow();
     }
+    const targetTotal = scope === "page" ? 1 : currentChapter.pages.length;
     try {
       setJobState({
         id: "pending-export",
@@ -727,16 +734,21 @@ export default function App(): React.JSX.Element {
         progressText: "PNG 출력 준비 중",
         phase: "finalizing",
         progressCurrent: 0,
-        progressTotal: currentChapter.pages.length,
-        pageTotal: currentChapter.pages.length
+        progressTotal: targetTotal,
+        pageTotal: targetTotal,
+        detail: scope === "page" ? selectedPage?.name : `${currentChapter.pages.length}페이지`
       });
-      const result = await window.mangaApi.exportInpaintingResults({ chapterId: currentChapter.id });
+      const request =
+        scope === "page"
+          ? { chapterId: currentChapter.id, scope, pageId: selectedPage!.id }
+          : { chapterId: currentChapter.id, scope };
+      const result = await window.mangaApi.exportInpaintingResults(request);
       pushStatus(`인페인팅 결과를 PNG로 출력했습니다: ${result.pageCount}페이지`);
     } catch (error) {
       console.error(error);
       pushStatus(formatErrorMessage(error, "인페인팅 결과를 출력하지 못했습니다."));
     }
-  }, [currentChapter, dirty, jobActive, pushStatus, saveNow]);
+  }, [currentChapter, dirty, jobActive, pushStatus, saveNow, selectedPage]);
 
   const startRegionTranslationSelection = useCallback(() => {
     if (!selectedPage || !selectedPageImageDataUrl || jobActive) {
@@ -1033,6 +1045,34 @@ export default function App(): React.JSX.Element {
             }
       )
     }));
+  };
+
+  const applyFontToScope = (scope: "page" | "chapter") => {
+    if (!currentChapter || !selectedBlock || selectedPageEditLocked) {
+      return;
+    }
+    const fontFamily = selectedBlock.fontFamily;
+    const targetPageIds = scope === "page" ? (selectedPage ? [selectedPage.id] : []) : currentChapter.pages.map((page) => page.id);
+    if (targetPageIds.length === 0) {
+      return;
+    }
+    const targetSet = new Set(targetPageIds);
+    const stamp = new Date().toISOString();
+    setCurrentChapter((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = {
+        ...current,
+        pages: current.pages.map((page) =>
+          targetSet.has(page.id) ? { ...page, updatedAt: stamp, blocks: page.blocks.map((block) => ({ ...block, fontFamily })) } : page
+        )
+      };
+      currentChapterRef.current = next;
+      return next;
+    });
+    targetPageIds.forEach((id) => markDirty(id));
+    pushStatus(scope === "page" ? "이 페이지의 모든 블록에 폰트를 적용했습니다." : "이 화 전체 블록에 폰트를 적용했습니다.");
   };
 
   const deleteSelectedBlock = useCallback(() => {
@@ -1832,11 +1872,12 @@ export default function App(): React.JSX.Element {
     onPeekToggle: () => setPeekOriginal((value) => !value),
     onToggleChrome: () => setShowBlockChrome((value) => !value),
     onToggleBlocks: () => setShowTextBlocks((value) => !value),
-    onExportResults: () => void exportInpaintingResults(),
+    onExportResults: (scope) => void exportInpaintingResults(scope),
     onCancelJob: () => void window.mangaApi.cancelJob()
   };
 
   return (
+    <FontsProvider>
     <main className={`app-shell ${inpaintingMode ? "inpainting-mode" : ""}`}>
       <AppSidebar
         inpaintingMode={inpaintingMode}
@@ -1925,6 +1966,7 @@ export default function App(): React.JSX.Element {
           onStartAreaTranslate={startRegionTranslationSelection}
           onSampleBlockBackground={() => void sampleSelectedBlockBackground()}
           onSamplePageBackgrounds={() => void samplePageBlockBackgrounds()}
+          onApplyFont={applyFontToScope}
           onUpdateBlock={updateSelectedBlock}
           onDeleteBlock={deleteSelectedBlock}
           onDuplicateBlock={duplicateSelectedBlock}
@@ -1988,6 +2030,7 @@ export default function App(): React.JSX.Element {
         }}
       />
     </main>
+    </FontsProvider>
   );
 }
 
