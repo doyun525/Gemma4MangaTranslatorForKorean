@@ -4,6 +4,7 @@ import { basename, dirname, extname, join } from "node:path";
 import { clamp } from "../shared/geometry";
 import type { InpaintingMaskStroke, InpaintingPoint, MangaPage, TranslationBlock } from "../shared/types";
 import {
+  ensureFluxCudnnRuntime,
   ensureMgtFluxKleinRuntime,
   ensureRemoteFile,
   FLUX_MODEL_FILE,
@@ -248,7 +249,7 @@ export async function prepareFluxInpaintingEngine(options: {
   onProgress?: (progress: InpaintingRuntimeProgress) => void;
 }): Promise<FluxInpaintingEngine> {
   const runtimePath = await ensureMgtFluxKleinRuntime(options);
-  const [modelPath, vaePath] = await Promise.all([
+  const [modelPath, vaePath, cudnnBinDir] = await Promise.all([
     ensureRemoteFile({
       ...options,
       fileName: FLUX_MODEL_FILE,
@@ -260,6 +261,11 @@ export async function prepareFluxInpaintingEngine(options: {
       fileName: FLUX_VAE_FILE,
       label: "Flux small decoder",
       url: hfResolveUrl(FLUX_VAE_REPO, FLUX_VAE_FILE)
+    }),
+    ensureFluxCudnnRuntime({
+      cudnnDir: join(dirname(options.runtimeDir), "cudnn-cu12"),
+      signal: options.signal,
+      onProgress: options.onProgress
     })
   ]);
 
@@ -273,7 +279,8 @@ export async function prepareFluxInpaintingEngine(options: {
   return createFluxEngine({
     runtimePath,
     modelPath,
-    vaePath
+    vaePath,
+    extraDllDirs: cudnnBinDir ? [cudnnBinDir] : []
   });
 }
 
@@ -349,10 +356,11 @@ function createFluxEngine(options: {
   runtimePath: string;
   modelPath: string;
   vaePath: string;
+  extraDllDirs?: string[];
 }): FluxInpaintingEngine {
   let worker: FluxWorker | null = null;
   const getWorker = () => {
-    worker ??= new FluxWorker(options.runtimePath, options.modelPath, options.vaePath, FLUX_INPAINT_MASK_PADDING_PX);
+    worker ??= new FluxWorker(options.runtimePath, options.modelPath, options.vaePath, FLUX_INPAINT_MASK_PADDING_PX, options.extraDllDirs ?? []);
     return worker;
   };
   return {

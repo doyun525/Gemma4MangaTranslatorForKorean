@@ -102,6 +102,7 @@ export type RuntimeModules = {
     collectOcrBboxHints: (options: TranslationOptions) => Promise<OcrBboxResult>;
     collectOcrBboxHintsBatch?: (options: TranslationOptions[]) => Promise<OcrBboxResult[]>;
     warmupOcrRuntime?: (options: TranslationOptions) => Promise<unknown>;
+    stopOcrWorker?: () => Promise<void>;
     requestTranslation: (server: ServerHandle, options: TranslationOptions) => Promise<TranslationResult>;
     requestCropRetryTranslation?: (server: ServerHandle, options: TranslationOptions, targets: CropRetryTarget[]) => Promise<TranslationResult>;
     saveArtifacts: (options: TranslationOptions, result: TranslationResult) => Promise<void>;

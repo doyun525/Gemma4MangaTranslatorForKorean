@@ -102,6 +102,14 @@ export const RefreshIcon = createIcon(
   </>
 );
 
+export const DownloadIcon = createIcon(
+  <>
+    <path d="M12 3v11" />
+    <path d="m7 9 5 5 5-5" />
+    <path d="M5 21h14" />
+  </>
+);
+
 export const EditIcon = createIcon(
   <>
     <path d="M12 20h9" />

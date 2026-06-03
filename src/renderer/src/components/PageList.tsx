@@ -6,7 +6,7 @@ import { CSS } from "@dnd-kit/utilities";
 import type { MangaPage } from "../../../shared/types";
 import { useStandardDndSensors } from "../lib/dnd";
 import { IconButton } from "./ui";
-import { CloseIcon, RefreshIcon } from "./ui/icons";
+import { CloseIcon, DownloadIcon, RefreshIcon } from "./ui/icons";
 
 type PageListProps = {
   pages: MangaPage[];
@@ -14,8 +14,16 @@ type PageListProps = {
   jobActive: boolean;
   onSelect: (pageId: string) => void;
   onRetranslate: (pageId: string) => void;
+  onDownloadPage: (pageId: string) => void;
   onRemove: (pageId: string) => void;
   onReorder: (sourcePageId: string, targetPageId: string) => void;
+  downloadSelectionMode: boolean;
+  selectedDownloadPageIds: Set<string>;
+  onDownloadAllPages: () => void;
+  onStartDownloadSelection: () => void;
+  onDownloadSelectedPages: () => void;
+  onCancelDownloadSelection: () => void;
+  onToggleDownloadPage: (pageId: string) => void;
 };
 
 export function PageList({
@@ -24,8 +32,16 @@ export function PageList({
   jobActive,
   onSelect,
   onRetranslate,
+  onDownloadPage,
   onRemove,
-  onReorder
+  onReorder,
+  downloadSelectionMode,
+  selectedDownloadPageIds,
+  onDownloadAllPages,
+  onStartDownloadSelection,
+  onDownloadSelectedPages,
+  onCancelDownloadSelection,
+  onToggleDownloadPage
 }: PageListProps): React.JSX.Element {
   const sensors = useStandardDndSensors();
   const [activePageId, setActivePageId] = React.useState<string | null>(null);
@@ -60,6 +76,27 @@ export function PageList({
     <section className="page-list">
       <div className="panel-header">
         <h2>페이지</h2>
+        <div className="page-download-actions">
+          {downloadSelectionMode ? (
+            <>
+              <button className="chip-toggle active" onClick={onDownloadSelectedPages} disabled={jobActive || selectedDownloadPageIds.size === 0 || pages.length === 0}>
+                선택 저장
+              </button>
+              <button className="chip-toggle" onClick={onCancelDownloadSelection} disabled={jobActive}>
+                취소
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="chip-toggle" onClick={onDownloadAllPages} disabled={jobActive || pages.length === 0}>
+                전체 다운
+              </button>
+              <button className="chip-toggle" onClick={onStartDownloadSelection} disabled={jobActive || pages.length === 0}>
+                선택 다운
+              </button>
+            </>
+          )}
+        </div>
       </div>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragCancel={() => setActivePageId(null)} onDragEnd={handleDragEnd}>
         <SortableContext items={pages.map((page) => page.id)} strategy={verticalListSortingStrategy}>
@@ -71,9 +108,13 @@ export function PageList({
                   page={page}
                   selected={page.id === selectedPageId}
                   disabled={jobActive}
+                  downloadSelectionMode={downloadSelectionMode}
+                  downloadSelected={selectedDownloadPageIds.has(page.id)}
                   onSelect={onSelect}
                   onRetranslate={onRetranslate}
+                  onDownloadPage={onDownloadPage}
                   onRemove={onRemove}
+                  onToggleDownloadPage={onToggleDownloadPage}
                   registerRef={(element) => {
                     pageItemRefs.current[page.id] = element;
                   }}
@@ -97,17 +138,25 @@ function SortablePageItem({
   page,
   selected,
   disabled,
+  downloadSelectionMode,
+  downloadSelected,
   onSelect,
   onRetranslate,
+  onDownloadPage,
   onRemove,
+  onToggleDownloadPage,
   registerRef
 }: {
   page: MangaPage;
   selected: boolean;
   disabled: boolean;
+  downloadSelectionMode: boolean;
+  downloadSelected: boolean;
   onSelect: (pageId: string) => void;
   onRetranslate: (pageId: string) => void;
+  onDownloadPage: (pageId: string) => void;
   onRemove: (pageId: string) => void;
+  onToggleDownloadPage: (pageId: string) => void;
   registerRef: (element: HTMLDivElement | null) => void;
 }): React.JSX.Element {
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -140,6 +189,18 @@ function SortablePageItem({
       >
         <span className="drag-grip" aria-hidden="true" />
       </button>
+      {downloadSelectionMode ? (
+        <label className="page-download-check" title="다운로드 선택">
+          <input
+            type="checkbox"
+            checked={downloadSelected}
+            disabled={disabled}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onChange={() => onToggleDownloadPage(page.id)}
+          />
+        </label>
+      ) : null}
       <button className="page-select" onClick={() => onSelect(page.id)} title={page.name}>
         <span>{page.name}</span>
       </button>
@@ -148,6 +209,9 @@ function SortablePageItem({
           <div className="page-actions">
             <IconButton size="sm" label={`${page.name} 재번역`} title="재번역" onClick={() => onRetranslate(page.id)} disabled={disabled}>
               <RefreshIcon size={15} />
+            </IconButton>
+            <IconButton size="sm" label={`${page.name} 다운로드`} title="다운로드" onClick={() => onDownloadPage(page.id)} disabled={disabled}>
+              <DownloadIcon size={15} />
             </IconButton>
             <IconButton size="sm" variant="danger" label={`${page.name} 삭제`} title="삭제" onClick={() => onRemove(page.id)} disabled={disabled}>
               <CloseIcon size={15} />

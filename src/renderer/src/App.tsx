@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BBox,
   ChapterSnapshot,
@@ -10,17 +10,18 @@ import type {
   OpenWebBrowseRequest,
   TranslationBlock,
   WebBrowseState,
+  WebCaptureMode,
   WorkShareExportRequest,
   WorkShareImportPreview
 } from "../../shared/types";
 import { FLAT_BACKGROUND_OPACITY } from "../../shared/blockBackground";
 import {
-  applyEditableBlockBbox,
   clampBbox,
   normalizeBlockType,
   normalizeRenderDirection,
   normalizeRotationDeg,
   offsetBlockBboxes,
+  resolveBlockRenderBbox,
   resolveEditableBlockBbox
 } from "../../shared/geometry";
 import { isUsableRegionBbox } from "../../shared/region";
@@ -53,6 +54,7 @@ import {
 } from "./lib/appHelpers";
 import { markChapterPagesRunning, mergeLiveChapterPreservingDirtyPages, resolveSelectionAfterChapterSync } from "./lib/chapterSync";
 import { resolveProgressSnapshot, summarizeWarnings, type ProgressSnapshot } from "./lib/jobProgress";
+import { resolveOverlayBlockRenderModel, toWebOverlayRenderBlock } from "./lib/blockRenderModel";
 import { resolveAdjacentPageId, resolveKeyboardPageNavigation, resolveWheelPageNavigation } from "./lib/pageNavigation";
 import "./styles.css";
 
@@ -64,6 +66,8 @@ const EMPTY_JOB: JobState = {
 };
 
 const INPAINTING_GUIDE_HIDDEN_KEY = "mgt.inpaintingGuide.hidden";
+const WEB_OVERLAY_PRELOAD_MISSING_MESSAGE =
+  "웹 번역 오버레이 API가 로드되지 않았습니다. dev 실행 중 preload 변경 후에는 앱을 완전히 종료하고 npm run dev를 다시 실행하세요.";
 
 type DragMode = "move" | "resize";
 
@@ -72,6 +76,7 @@ type DragState = {
   blockId: string;
   startX: number;
   startY: number;
+  bboxKey: "bbox" | "renderBbox";
   startBbox: BBox;
 };
 
@@ -87,6 +92,200 @@ type RetouchHistoryEntry = {
   afterPath?: string;
 };
 
+type WebOverlayRenderOptions = {
+  showBlockChrome: boolean;
+  showTextBlocks: boolean;
+};
+
+async function renderWebTranslationOverlay(
+  sessionId: string,
+  page: MangaPage,
+  options: WebOverlayRenderOptions = { showBlockChrome: true, showTextBlocks: true }
+): Promise<WebBrowseState> {
+  const api = window.mangaApi as unknown as {
+    renderWebOverlay?: (request: { sessionId: string; page: MangaPage; blocks?: import("../../shared/types").WebOverlayRenderBlock[] }) => Promise<WebBrowseState>;
+    writeLog?: (level: "debug" | "info" | "warn" | "error", message: string, detail?: unknown) => Promise<unknown>;
+  };
+  if (typeof api.renderWebOverlay !== "function") {
+    await api.writeLog?.("error", "Web overlay preload API unavailable", {
+      availableApiKeys: Object.keys(window.mangaApi ?? {}).sort()
+    });
+    throw new Error(WEB_OVERLAY_PRELOAD_MISSING_MESSAGE);
+  }
+  const displayPage = toWebOverlayDisplayPage(page, options);
+  return api.renderWebOverlay({
+    sessionId,
+    page: toWebOverlayIpcPage(displayPage),
+    blocks: buildWebOverlayRenderBlocks(displayPage, options)
+  });
+}
+
+async function renderWebTranslationOverlayForPages(
+  sessionId: string,
+  pages: MangaPage[],
+  options: WebOverlayRenderOptions = { showBlockChrome: true, showTextBlocks: true }
+): Promise<WebBrowseState> {
+  const visiblePages = pages.filter((page) => page.webMeta);
+  if (visiblePages.length <= 1) {
+    return renderWebTranslationOverlay(sessionId, visiblePages[0] ?? pages[0], options);
+  }
+  const api = window.mangaApi as unknown as {
+    renderWebOverlay?: (request: { sessionId: string; page: MangaPage; blocks?: import("../../shared/types").WebOverlayRenderBlock[] }) => Promise<WebBrowseState>;
+    writeLog?: (level: "debug" | "info" | "warn" | "error", message: string, detail?: unknown) => Promise<unknown>;
+  };
+  if (typeof api.renderWebOverlay !== "function") {
+    await api.writeLog?.("error", "Web overlay preload API unavailable", {
+      availableApiKeys: Object.keys(window.mangaApi ?? {}).sort()
+    });
+    throw new Error(WEB_OVERLAY_PRELOAD_MISSING_MESSAGE);
+  }
+  const first = visiblePages[0]!;
+  const maxWidth = Math.max(...visiblePages.map((page) => page.webMeta?.viewport.width || page.width || 1), 1);
+  const maxHeight = Math.max(
+    ...visiblePages.map((page) => (page.webMeta?.scrollY ?? 0) + (page.webMeta?.viewport.height || page.height || 1)),
+    1
+  );
+  const aggregatePage: MangaPage = {
+    ...first,
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "web-full-tile-overlay",
+    dataUrl: "",
+    width: maxWidth,
+    height: maxHeight,
+    blocks: [],
+    webMeta: {
+      ...(first.webMeta!),
+      scrollX: 0,
+      scrollY: 0,
+      viewport: {
+        width: maxWidth,
+        height: maxHeight,
+        deviceScaleFactor: first.webMeta?.viewport.deviceScaleFactor || 1
+      },
+      captureMode: "full-page",
+      captureRectCss: { x: 0, y: 0, width: maxWidth, height: maxHeight }
+    }
+  };
+  const blocks = visiblePages.flatMap((page) =>
+    buildWebOverlayRenderBlocks(toWebOverlayDisplayPage(page, options), options).map((block) => ({
+      ...block,
+      pageId: page.id
+    }))
+  );
+  return api.renderWebOverlay({
+    sessionId,
+    page: toWebOverlayIpcPage(aggregatePage),
+    blocks
+  });
+}
+
+async function clearWebTranslationOverlay(sessionId: string): Promise<WebBrowseState | null> {
+  const fallbackPage: MangaPage = {
+    id: "00000000-0000-4000-8000-000000000000",
+    name: "clear-web-overlay",
+    imagePath: "clear-web-overlay.png",
+    dataUrl: "",
+    width: 1,
+    height: 1,
+    blocks: [],
+    analysisStatus: "idle",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    webMeta: {
+      url: "https://example.invalid/",
+      segmentIndex: 0,
+      scrollX: 0,
+      scrollY: 0,
+      viewport: { width: 1, height: 1, deviceScaleFactor: 1 },
+      captureMode: "viewport",
+      capturedAt: new Date(0).toISOString()
+    }
+  };
+  const api = window.mangaApi as unknown as {
+    renderWebOverlay?: (request: { sessionId: string; page: MangaPage; blocks?: import("../../shared/types").WebOverlayRenderBlock[] }) => Promise<WebBrowseState>;
+  };
+  if (typeof api.renderWebOverlay !== "function") {
+    return null;
+  }
+  return api.renderWebOverlay({ sessionId, page: fallbackPage, blocks: [] });
+}
+
+function toWebOverlayDisplayPage(page: MangaPage, options: WebOverlayRenderOptions): MangaPage {
+  if (!options.showTextBlocks) {
+    return { ...page, blocks: [] };
+  }
+  if (options.showBlockChrome) {
+    return page;
+  }
+  return {
+    ...page,
+    blocks: page.blocks.map((block) => ({
+      ...block,
+      opacity: 0
+    }))
+  };
+}
+
+function toWebOverlayIpcPage(page: MangaPage): MangaPage {
+  return page;
+}
+
+function buildWebOverlayRenderBlocks(page: MangaPage, options: WebOverlayRenderOptions): import("../../shared/types").WebOverlayRenderBlock[] {
+  if (!options.showTextBlocks || !page.webMeta) {
+    return [];
+  }
+  const pageSize = { width: Math.max(1, page.width), height: Math.max(1, page.height) };
+  const stageSize = page.webMeta.captureMode === "full-page"
+    ? pageSize
+    : {
+        width: Math.max(1, page.webMeta.viewport.width || page.width || 1),
+        height: Math.max(1, page.webMeta.viewport.height || page.height || 1)
+      };
+  const scrollX = page.webMeta.scrollX ?? 0;
+  const scrollY = page.webMeta.scrollY ?? 0;
+  return page.blocks
+    .map((block) => {
+      const model = resolveOverlayBlockRenderModel(block, pageSize, stageSize);
+      return toWebOverlayRenderBlock(block, model, scrollX, scrollY, options.showBlockChrome);
+    })
+    .filter((block): block is import("../../shared/types").WebOverlayRenderBlock => Boolean(block));
+}
+
+function applyDraggedBlockBbox(block: TranslationBlock, nextBbox: BBox, bboxKey: "bbox" | "renderBbox"): TranslationBlock {
+  const clamped = clampBbox(nextBbox);
+  if (bboxKey === "renderBbox") {
+    return {
+      ...block,
+      renderBbox: clamped,
+      renderBboxSpace: "normalized_1000"
+    };
+  }
+  return {
+    ...block,
+    bbox: clamped,
+    bboxSpace: "normalized_1000"
+  };
+}
+
+function resolveWebOverlayPagesForSelection(chapter: ChapterSnapshot | null, page: MangaPage | null): MangaPage[] {
+  if (!chapter || !page?.webMeta) {
+    return [];
+  }
+  const isTile = /^web-full-tile-\d+-of-\d+\.png$/i.test(page.name);
+  if (!isTile) {
+    return [page];
+  }
+  const capturedAt = page.webMeta.capturedAt;
+  const finalUrl = page.webMeta.finalUrl || page.webMeta.url;
+  return chapter.pages
+    .filter((candidate) =>
+      /^web-full-tile-\d+-of-\d+\.png$/i.test(candidate.name) &&
+      candidate.webMeta?.capturedAt === capturedAt &&
+      (candidate.webMeta.finalUrl || candidate.webMeta.url) === finalUrl
+    )
+    .sort((a, b) => (a.webMeta?.scrollY ?? 0) - (b.webMeta?.scrollY ?? 0));
+}
+
 export default function App(): React.JSX.Element {
   const [library, setLibrary] = useState<LibraryIndex>({ workOrder: [], works: [] });
   const [currentChapter, setCurrentChapter] = useState<ChapterSnapshot | null>(null);
@@ -101,6 +300,8 @@ export default function App(): React.JSX.Element {
   const [webCaptureBusy, setWebCaptureBusy] = useState(false);
   const [webTranslateAfterCapture, setWebTranslateAfterCapture] = useState(true);
   const [webSession, setWebSession] = useState<WebBrowseState | null>(null);
+  const [webBrowserCollapsed, setWebBrowserCollapsed] = useState(false);
+  const [webOverlaySelectionEnabled, setWebOverlaySelectionEnabled] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreviewSession | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [fileDropActive, setFileDropActive] = useState(false);
@@ -127,6 +328,8 @@ export default function App(): React.JSX.Element {
   const [retouchRedoStack, setRetouchRedoStack] = useState<RetouchHistoryEntry[]>([]);
   const [showBlockChrome, setShowBlockChrome] = useState(false);
   const [showTextBlocks, setShowTextBlocks] = useState(true);
+  const [pageDownloadSelectionMode, setPageDownloadSelectionMode] = useState(false);
+  const [selectedDownloadPageIds, setSelectedDownloadPageIds] = useState<Set<string>>(() => new Set());
   const { settings, settingsOpen, settingsBusy, openSettings, closeSettings, submitSettings, resetSettings } = useSettingsDialog(pushStatus);
   const workspacePanelRef = useRef<HTMLElement | null>(null);
   const webBrowserHostRef = useRef<HTMLDivElement | null>(null);
@@ -169,6 +372,19 @@ export default function App(): React.JSX.Element {
     jobActive,
     setCurrentChapter
   });
+
+  useEffect(() => {
+    if (!currentChapter) {
+      setPageDownloadSelectionMode(false);
+      setSelectedDownloadPageIds(new Set());
+      return;
+    }
+    setSelectedDownloadPageIds((current) => {
+      const validPageIds = new Set(currentChapter.pages.map((page) => page.id));
+      const next = new Set([...current].filter((pageId) => validPageIds.has(pageId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [currentChapter]);
   const { recordEditHistory, undoEdit, redoEdit } = useChapterEditHistory(currentChapter?.id ?? null);
   const modalOpen = Boolean(
     translationSourceOpen || webBrowseOpen || importPreview || shareExportOpen || shareImportPreview || renameTarget || settingsOpen || confirmDialog || inpaintingGuideOpen
@@ -178,7 +394,10 @@ export default function App(): React.JSX.Element {
     () => (selectedPage ? { width: selectedPage.width, height: selectedPage.height } : null),
     [selectedPage?.height, selectedPage?.width]
   );
-  const stageSize = useStageSize(imageRef, selectedPageSize, selectedPageImageDataUrl);
+  const webModeActive = Boolean(webSession && currentChapter?.sourceKind === "web");
+  const webEditorMode = Boolean(webModeActive && webBrowserCollapsed);
+  const stageSizeRevision = `${selectedPageImageDataUrl}|${webEditorMode ? "web-editor" : "normal"}`;
+  const stageSize = useStageSize(imageRef, selectedPageSize, stageSizeRevision);
   const progressSnapshot = useMemo(() => resolveProgressSnapshot(jobState), [jobState]);
   const showProgressBar = jobState.status !== "idle" && !!progressSnapshot;
   const regionSelectionRect = useMemo(() => (regionSelection ? regionSelectionToBbox(regionSelection) : null), [regionSelection]);
@@ -258,19 +477,22 @@ export default function App(): React.JSX.Element {
   }, [selectedPage]);
 
   React.useEffect(() => {
-    if (!webSession || !webBrowserHostRef.current) {
+    if (!webSession) {
       return;
     }
 
     let frame = 0;
+    const syncHiddenBounds = () => {
+      void window.mangaApi.syncWebBrowserBounds({
+        sessionId: webSession.sessionId,
+        bounds: { x: 0, y: 0, width: 0, height: 0 }
+      });
+    };
     const syncBounds = () => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        if (modalOpen) {
-          void window.mangaApi.syncWebBrowserBounds({
-            sessionId: webSession.sessionId,
-            bounds: { x: 0, y: 0, width: 0, height: 0 }
-          });
+        if (modalOpen || !webModeActive || webEditorMode) {
+          syncHiddenBounds();
           return;
         }
         const rect = webBrowserHostRef.current?.getBoundingClientRect();
@@ -289,6 +511,11 @@ export default function App(): React.JSX.Element {
       });
     };
 
+    if (!webModeActive || webEditorMode || !webBrowserHostRef.current) {
+      syncHiddenBounds();
+      return () => window.cancelAnimationFrame(frame);
+    }
+
     const observer = new ResizeObserver(syncBounds);
     observer.observe(webBrowserHostRef.current);
     window.addEventListener("resize", syncBounds);
@@ -298,7 +525,34 @@ export default function App(): React.JSX.Element {
       observer.disconnect();
       window.removeEventListener("resize", syncBounds);
     };
-  }, [modalOpen, webSession?.sessionId]);
+  }, [modalOpen, webEditorMode, webModeActive, webSession?.sessionId]);
+
+  React.useEffect(() => {
+    if (!webSession) {
+      return;
+    }
+    void window.mangaApi.setWebOverlayInteraction({
+      sessionId: webSession.sessionId,
+      enabled: webOverlaySelectionEnabled && !webBrowserCollapsed
+    }).catch((error) => console.error(error));
+  }, [webBrowserCollapsed, webOverlaySelectionEnabled, webSession?.sessionId]);
+
+  React.useEffect(() => {
+    const unsubscribe = window.mangaApi.onWebOverlayBlockSelected((event) => {
+      const chapter = currentChapterRef.current;
+      if (!chapter || chapter.id !== event.chapterId || webSession?.sessionId !== event.sessionId) {
+        return;
+      }
+      const page = chapter.pages.find((candidate) => candidate.id === event.pageId);
+      if (!page?.blocks.some((block) => block.id === event.blockId)) {
+        return;
+      }
+      setSelectedPageId(event.pageId);
+      setSelectedBlockId(event.blockId);
+      setShowBlockChrome(true);
+    });
+    return unsubscribe;
+  }, [webSession?.sessionId]);
 
   React.useEffect(() => {
     if (!inpaintingToolActive) {
@@ -359,13 +613,39 @@ export default function App(): React.JSX.Element {
         }
         setWebSession(null);
       }
+      if (chapter.sourceKind === "web" && chapter.webOrigin?.startUrl) {
+        try {
+          const result = await window.mangaApi.reopenWebChapter({ chapterId: chapter.id, mode: "manual" });
+          clearDirtyTracking();
+          currentChapterRef.current = result.openedChapter;
+          setCurrentChapter(result.openedChapter);
+          setSelectedPageId(result.openedChapter.pages[0]?.id ?? null);
+          setSelectedBlockId(null);
+          setWebSession({
+            sessionId: result.sessionId,
+            chapterId: result.chapterId,
+            url: result.url,
+            title: result.title,
+            mode: "manual",
+            segmentCount: result.openedChapter.pages.length,
+            autoTranslate: false
+          });
+          setWebBrowserCollapsed(false);
+          setWebOverlaySelectionEnabled(false);
+          pushStatus("저장된 웹 주소로 페이지를 다시 열었습니다.");
+          return;
+        } catch (error) {
+          console.error(error);
+          pushStatus(formatErrorMessage(error, "저장된 웹 주소를 다시 열지 못해 캡처본만 표시합니다."));
+        }
+      }
       clearDirtyTracking();
       currentChapterRef.current = chapter;
       setCurrentChapter(chapter);
       setSelectedPageId(chapter.pages[0]?.id ?? null);
       setSelectedBlockId(null);
     },
-    [clearDirtyTracking, dirty, saveNow, webSession]
+    [clearDirtyTracking, dirty, pushStatus, saveNow, webSession]
   );
 
   const applyChapter = useCallback((chapter: ChapterSnapshot | undefined, fallbackStatus?: string) => {
@@ -644,6 +924,8 @@ export default function App(): React.JSX.Element {
           segmentCount: 0,
           autoTranslate: false
         });
+        setWebBrowserCollapsed(false);
+        setWebOverlaySelectionEnabled(false);
         setWebBrowseOpen(false);
         await refreshLibrary();
         pushStatus("웹 페이지를 열었습니다. 현재 화면 캡처를 누르면 보관함에 페이지로 추가됩니다.");
@@ -667,18 +949,42 @@ export default function App(): React.JSX.Element {
       console.error(error);
     }
     setWebSession(null);
+    setWebBrowserCollapsed(false);
+    setWebOverlaySelectionEnabled(false);
   }, [webSession]);
 
-  const captureWebSegment = useCallback(async () => {
+  const toggleWebOverlaySelection = useCallback((enabled: boolean) => {
+    setWebOverlaySelectionEnabled(enabled);
+    if (enabled) {
+      setShowTextBlocks(true);
+      setShowBlockChrome(true);
+    }
+    if (!enabled) {
+      setSelectedBlockId(null);
+    }
+  }, []);
+
+  const toggleWebBrowserCollapsed = useCallback(() => {
+    setWebBrowserCollapsed((value) => {
+      const next = !value;
+      if (next) {
+        setShowTextBlocks(true);
+        setShowBlockChrome(true);
+      }
+      return next;
+    });
+  }, []);
+
+  const captureWebSegment = useCallback(async (translateAfterCapture = webTranslateAfterCapture, captureMode: WebCaptureMode = "viewport") => {
     if (!webSession || webCaptureBusy || jobActive) {
-      return;
+      return null;
     }
     if (dirty) {
       await saveNow();
     }
     setWebCaptureBusy(true);
     try {
-      const result = await window.mangaApi.captureWebSegment({ sessionId: webSession.sessionId, captureMode: "viewport" });
+      const result = await window.mangaApi.captureWebSegment({ sessionId: webSession.sessionId, captureMode });
       clearDirtyTracking();
       currentChapterRef.current = result.chapter;
       setCurrentChapter(result.chapter);
@@ -689,15 +995,23 @@ export default function App(): React.JSX.Element {
           ? {
               ...current,
               chapterId: result.chapter.id,
-              segmentCount: result.segmentIndex + 1
+              segmentCount: result.chapter.pages.length
             }
           : current
       );
       await refreshLibrary();
       clearPageImageCache();
-      pushStatus(`웹 화면을 캡처했습니다: ${result.segmentIndex + 1}번째 세그먼트`);
+      const capturedPageIds = result.pageIds?.length ? result.pageIds : [result.pageId];
+      const capturedPageCount = capturedPageIds.length;
+      pushStatus(
+        captureMode === "full-page"
+          ? capturedPageCount > 1
+            ? `전체 스크롤을 ${capturedPageCount}개 타일로 캡처했습니다.`
+            : `전체 스크롤을 캡처했습니다: ${result.segmentIndex + 1}번째 세그먼트`
+          : `웹 화면을 캡처했습니다: ${result.segmentIndex + 1}번째 세그먼트`
+      );
 
-      if (webTranslateAfterCapture) {
+      if (translateAfterCapture) {
         clearStatusLines();
         setJobState({
           id: "pending",
@@ -706,8 +1020,13 @@ export default function App(): React.JSX.Element {
           progressText: "모델 준비 중",
           phase: "booting"
         });
-        setCurrentChapter((chapter) => (chapter ? markChapterPagesRunning(chapter, "single-page", result.pageId) : chapter));
-        const analysis = await window.mangaApi.startAnalysis({ chapterId: result.chapter.id, runMode: "single-page", pageId: result.pageId });
+        const analysisRunMode = capturedPageCount > 1 ? "pending" : "single-page";
+        setCurrentChapter((chapter) => (chapter ? markChapterPagesRunning(chapter, analysisRunMode, result.pageId) : chapter));
+        const analysis = await window.mangaApi.startAnalysis({
+          chapterId: result.chapter.id,
+          runMode: analysisRunMode,
+          pageId: analysisRunMode === "single-page" ? result.pageId : undefined
+        });
         if (analysis.chapter) {
           mergeLiveChapter(analysis.chapter);
         }
@@ -715,15 +1034,32 @@ export default function App(): React.JSX.Element {
         if (analysis.status === "failed" && analysis.error) {
           pushStatus(analysis.error);
         } else {
+          const translatedPages = capturedPageIds
+            .map((pageId) => analysis.chapter?.pages.find((page) => page.id === pageId))
+            .filter((page): page is MangaPage => Boolean(page));
+          const translatedPage = translatedPages[0];
+          if (translatedPage) {
+            await renderWebTranslationOverlayForPages(webSession.sessionId, translatedPages, { showBlockChrome, showTextBlocks });
+          }
           const warningSummary = summarizeWarnings(analysis.warnings ?? []);
           if (warningSummary) {
             pushStatus(warningSummary);
+          } else if (translatedPage) {
+            pushStatus(
+              captureMode === "full-page" && capturedPageCount > 1
+                ? `전체 스크롤 타일 ${capturedPageCount}개의 번역 오버레이를 표시했습니다.`
+                : captureMode === "full-page"
+                  ? "전체 스크롤 번역 오버레이를 표시했습니다."
+                  : "웹 화면 위에 번역 오버레이를 표시했습니다."
+            );
           }
         }
       }
+      return result;
     } catch (error) {
       console.error(error);
       pushStatus(formatErrorMessage(error, "웹 화면을 캡처하지 못했습니다."));
+      return null;
     } finally {
       setWebCaptureBusy(false);
     }
@@ -737,17 +1073,93 @@ export default function App(): React.JSX.Element {
     pushStatus,
     refreshLibrary,
     saveNow,
+    showBlockChrome,
+    showTextBlocks,
     webCaptureBusy,
     webSession,
     webTranslateAfterCapture
+  ]);
+
+  const translateCurrentWebScreen = useCallback(async () => {
+    await captureWebSegment(true);
+  }, [captureWebSegment]);
+
+  const translateFullWebPage = useCallback(async () => {
+    await captureWebSegment(true, "full-page");
+  }, [captureWebSegment]);
+
+  const startWebRegionTranslation = useCallback(async () => {
+    if (!webSession || webCaptureBusy || jobActive) {
+      return;
+    }
+    pushStatus("웹 화면에서 번역할 영역을 드래그하세요. 취소하려면 Esc를 누르세요.");
+    const selection = await window.mangaApi.selectWebRegion({ sessionId: webSession.sessionId });
+    if (!selection.bbox) {
+      pushStatus("웹 선택영역 번역을 취소했습니다.");
+      return;
+    }
+    const result = await captureWebSegment(false);
+    if (!result) {
+      return;
+    }
+    clearStatusLines();
+    setJobState({
+      id: "pending",
+      kind: "gemma-analysis",
+      status: "starting",
+      progressText: "선택 영역 번역 준비 중",
+      phase: "booting",
+      progressCurrent: 0,
+      progressTotal: 1,
+      pageIndex: 1,
+      pageTotal: 1
+    });
+    const analysis = await window.mangaApi.translateRegion({
+      chapterId: result.chapter.id,
+      pageId: result.pageId,
+      bbox: selection.bbox
+    });
+    if (analysis.chapter) {
+      mergeLiveChapter(analysis.chapter);
+    }
+    await refreshLibrary();
+    if (analysis.status === "failed" && analysis.error) {
+      pushStatus(analysis.error);
+      return;
+    }
+    const translatedPage = analysis.chapter?.pages.find((page) => page.id === result.pageId);
+    if (translatedPage) {
+      await renderWebTranslationOverlay(webSession.sessionId, translatedPage, { showBlockChrome, showTextBlocks });
+    }
+    const warningSummary = summarizeWarnings(analysis.warnings ?? []);
+    pushStatus(warningSummary || "웹 선택영역 번역 오버레이를 표시했습니다.");
+  }, [
+    captureWebSegment,
+    clearStatusLines,
+    jobActive,
+    mergeLiveChapter,
+    pushStatus,
+    refreshLibrary,
+    showBlockChrome,
+    showTextBlocks,
+    webCaptureBusy,
+    webSession
   ]);
 
   const enterInpaintingMode = useCallback(async () => {
     if (!currentChapter || jobActive) {
       return;
     }
+    if (currentChapter.pages.length === 0) {
+      pushStatus("인페인팅할 페이지가 없습니다. 먼저 웹 화면을 캡처/번역해 페이지를 추가하세요.");
+      return;
+    }
     if (dirty) {
       await saveNow();
+    }
+    if (webModeActive) {
+      setWebBrowserCollapsed(true);
+      setWebOverlaySelectionEnabled(false);
     }
     setInpaintingMode(true);
     setInpaintingTool("none");
@@ -759,7 +1171,7 @@ export default function App(): React.JSX.Element {
       setInpaintingGuideOpen(true);
     }
     pushStatus("인페인팅 모드로 전환했습니다. 무늬 배경 지우기부터 시작하세요.");
-  }, [currentChapter, dirty, hideInpaintingGuide, jobActive, pushStatus, saveNow]);
+  }, [currentChapter, dirty, hideInpaintingGuide, jobActive, pushStatus, saveNow, webModeActive]);
 
   const exitInpaintingMode = useCallback(() => {
     if (jobActive) {
@@ -930,6 +1342,76 @@ export default function App(): React.JSX.Element {
     }
   }, [currentChapter, dirty, jobActive, pushStatus, saveNow, selectedPage]);
 
+  const exportPageImages = useCallback(
+    async (pageIds: string[]) => {
+      if (!currentChapter || jobActive) {
+        return;
+      }
+      const validPageIds = currentChapter.pages.map((page) => page.id);
+      const requested = pageIds.filter((pageId) => validPageIds.includes(pageId));
+      if (!requested.length) {
+        pushStatus("다운로드할 페이지가 없습니다.");
+        return;
+      }
+      if (dirty) {
+        await saveNow();
+      }
+      try {
+        const result =
+          requested.length === 1
+            ? await window.mangaApi.exportPageImages({
+                chapterId: currentChapter.id,
+                scope: "page",
+                pageId: requested[0]!,
+                options: { showTextBlocks, showBlockChrome }
+              })
+            : await window.mangaApi.exportPageImages({
+                chapterId: currentChapter.id,
+                scope: "pages",
+                pageIds: requested,
+                options: { showTextBlocks, showBlockChrome }
+              });
+        if (result) {
+          pushStatus(`번역 이미지를 저장했습니다: ${result.pageCount}페이지`);
+        } else {
+          pushStatus("번역 이미지 다운로드를 취소했습니다.");
+        }
+      } catch (error) {
+        console.error(error);
+        pushStatus(formatErrorMessage(error, "번역 이미지를 저장하지 못했습니다."));
+      }
+    },
+    [currentChapter, dirty, jobActive, pushStatus, saveNow, showBlockChrome, showTextBlocks]
+  );
+
+  const startPageDownloadSelection = useCallback(() => {
+    if (!currentChapter || jobActive) {
+      return;
+    }
+    setSelectedDownloadPageIds(new Set(currentChapter.pages.map((page) => page.id)));
+    setPageDownloadSelectionMode(true);
+  }, [currentChapter, jobActive]);
+
+  const togglePageDownloadSelection = useCallback((pageId: string) => {
+    setSelectedDownloadPageIds((current) => {
+      const next = new Set(current);
+      if (next.has(pageId)) {
+        next.delete(pageId);
+      } else {
+        next.add(pageId);
+      }
+      return next;
+    });
+  }, []);
+
+  const downloadSelectedPages = useCallback(() => {
+    if (!currentChapter) {
+      return;
+    }
+    const selected = currentChapter.pages.map((page) => page.id).filter((pageId) => selectedDownloadPageIds.has(pageId));
+    void exportPageImages(selected);
+  }, [currentChapter, exportPageImages, selectedDownloadPageIds]);
+
   const startRegionTranslationSelection = useCallback(() => {
     if (!selectedPage || !selectedPageImageDataUrl || jobActive) {
       return;
@@ -1072,6 +1554,36 @@ export default function App(): React.JSX.Element {
     [getCurrentEditSnapshot, recordEditHistory]
   );
 
+  React.useEffect(() => {
+    if (!webSession) {
+      return;
+    }
+    if (!selectedPage?.webMeta) {
+      const handle = window.setTimeout(() => {
+        void clearWebTranslationOverlay(webSession.sessionId).catch((error) => console.error(error));
+      }, 80);
+      return () => window.clearTimeout(handle);
+    }
+    const overlayOptions = {
+      showBlockChrome,
+      showTextBlocks
+    };
+    const handle = window.setTimeout(() => {
+      const overlayPages = resolveWebOverlayPagesForSelection(currentChapter, selectedPage);
+      void renderWebTranslationOverlayForPages(webSession.sessionId, overlayPages.length ? overlayPages : [selectedPage], overlayOptions).catch((error) => console.error(error));
+    }, 80);
+    return () => window.clearTimeout(handle);
+  }, [
+    currentChapter,
+    selectedPage,
+    selectedBlockId,
+    webOverlaySelectionEnabled,
+    webBrowserCollapsed,
+    showBlockChrome,
+    showTextBlocks,
+    webSession?.sessionId
+  ]);
+
   const applyEditSnapshot = useCallback(
     (snapshot: ChapterEditSnapshot) => {
       currentChapterRef.current = snapshot.chapter;
@@ -1117,6 +1629,29 @@ export default function App(): React.JSX.Element {
     pushStatus("편집을 다시 적용했습니다.");
   }, [applyEditSnapshot, getCurrentEditSnapshot, jobActive, pushStatus, redoEdit]);
 
+  const reapplyWebTranslationOverlay = useCallback(async () => {
+    if (!webSession || !selectedPage?.webMeta) {
+      return;
+    }
+    const overlayPages = resolveWebOverlayPagesForSelection(currentChapter, selectedPage);
+    await renderWebTranslationOverlayForPages(
+      webSession.sessionId,
+      overlayPages.length ? overlayPages : [selectedPage],
+      { showBlockChrome, showTextBlocks }
+    );
+    pushStatus("현재 웹 화면에 번역 블록을 다시 적용했습니다.");
+  }, [currentChapter, pushStatus, selectedPage, showBlockChrome, showTextBlocks, webSession]);
+
+  const reloadWebBrowser = useCallback(async () => {
+    if (!webSession) {
+      return;
+    }
+    const state = await window.mangaApi.reloadWebBrowse(webSession.sessionId);
+    setWebSession(state);
+    await clearWebTranslationOverlay(webSession.sessionId);
+    pushStatus("웹 페이지를 새로고침했습니다. 로딩 후 번역 다시 적용을 누르세요.");
+  }, [pushStatus, webSession]);
+
   const removePage = useCallback(
     async (pageId: string) => {
       if (!currentChapter) {
@@ -1140,11 +1675,16 @@ export default function App(): React.JSX.Element {
       applyChapter(nextChapter);
       const currentIndex = previousOrder.indexOf(pageId);
       const nextId = previousOrder[currentIndex + 1] ?? previousOrder[currentIndex - 1] ?? null;
-      setSelectedPageId(nextId && nextChapter.pages.some((candidate) => candidate.id === nextId) ? nextId : nextChapter.pages[0]?.id ?? null);
+      const nextSelectedPageId = nextId && nextChapter.pages.some((candidate) => candidate.id === nextId) ? nextId : nextChapter.pages[0]?.id ?? null;
+      setSelectedPageId(nextSelectedPageId);
+      const nextSelectedPage = nextChapter.pages.find((candidate) => candidate.id === nextSelectedPageId) ?? null;
+      if (webSession && page.webMeta && !nextSelectedPage?.webMeta) {
+        void clearWebTranslationOverlay(webSession.sessionId).catch((error) => console.error(error));
+      }
       pushStatus(`${page.name} 페이지를 삭제했습니다.`);
       await refreshLibrary();
     },
-    [applyChapter, askConfirm, currentChapter, pushStatus, refreshLibrary]
+    [applyChapter, askConfirm, currentChapter, pushStatus, refreshLibrary, webSession]
   );
 
   const retranslatePage = useCallback(
@@ -1351,7 +1891,12 @@ export default function App(): React.JSX.Element {
         imagePath: selectedPage.imagePath,
         pageWidth: selectedPage.width,
         pageHeight: selectedPage.height,
-        blocks: [{ id: selectedBlock.id, bbox: selectedBlock.bbox }]
+        blocks: [
+          {
+            id: selectedBlock.id,
+            bbox: resolveBlockRenderBbox(selectedBlock, { width: selectedPage.width, height: selectedPage.height })
+          }
+        ]
       });
       applyBackgroundSamples(result.results, "선택 블록");
     } catch (error) {
@@ -1369,7 +1914,10 @@ export default function App(): React.JSX.Element {
         imagePath: selectedPage.imagePath,
         pageWidth: selectedPage.width,
         pageHeight: selectedPage.height,
-        blocks: selectedPage.blocks.map((block) => ({ id: block.id, bbox: block.bbox }))
+        blocks: selectedPage.blocks.map((block) => ({
+          id: block.id,
+          bbox: resolveBlockRenderBbox(block, { width: selectedPage.width, height: selectedPage.height })
+        }))
       });
       applyBackgroundSamples(result.results, "현재 페이지");
     } catch (error) {
@@ -1581,6 +2129,7 @@ export default function App(): React.JSX.Element {
       blockId: block.id,
       startX: event.clientX,
       startY: event.clientY,
+      bboxKey: target.key,
       startBbox: target.bbox
     };
     stageRef.current.setPointerCapture(event.pointerId);
@@ -1697,15 +2246,7 @@ export default function App(): React.JSX.Element {
               updatedAt: new Date().toISOString(),
               blocks: candidate.blocks.map((block) =>
                 block.id === drag.blockId
-                  ? {
-                      ...applyEditableBlockBbox(
-                        block,
-                        next,
-                        { width: page.width, height: page.height },
-                        block.translatedText || block.sourceText || "..."
-                      ),
-                      ...(drag.mode === "resize" ? { autoFitText: false } : {})
-                    }
+                  ? applyDraggedBlockBbox(block, next, drag.bboxKey)
                   : block
               )
             }
@@ -2081,15 +2622,25 @@ export default function App(): React.JSX.Element {
         onReorderChapter={reorderChapterInLibrary}
         onSelectPage={selectPageForReading}
         onRetranslatePage={(pageId) => void retranslatePage(pageId)}
+        onDownloadPage={(pageId) => void exportPageImages([pageId])}
         onRemovePage={(pageId) => void removePage(pageId)}
         onReorderPage={reorderPageInChapter}
+        pageDownloadSelectionMode={pageDownloadSelectionMode}
+        selectedDownloadPageIds={selectedDownloadPageIds}
+        onDownloadAllPages={() => void exportPageImages(currentChapter?.pages.map((page) => page.id) ?? [])}
+        onStartPageDownloadSelection={startPageDownloadSelection}
+        onDownloadSelectedPages={downloadSelectedPages}
+        onCancelPageDownloadSelection={() => setPageDownloadSelectionMode(false)}
+        onTogglePageDownloadSelection={togglePageDownloadSelection}
       />
 
       <AppWorkspace
         workspacePanelRef={workspacePanelRef}
         webBrowserHostRef={webBrowserHostRef}
-        webModeActive={Boolean(webSession)}
+        webModeActive={webModeActive}
         webSessionTitle={webSession?.title || webSession?.url}
+        webBrowserCollapsed={webBrowserCollapsed}
+        webOverlaySelectionEnabled={webOverlaySelectionEnabled}
         webCaptureBusy={webCaptureBusy}
         webTranslateAfterCapture={webTranslateAfterCapture}
         selectedPage={selectedPage}
@@ -2124,7 +2675,11 @@ export default function App(): React.JSX.Element {
         onToggleBlockExcluded={toggleBlockInpaintExcluded}
         onOpenTranslationSource={() => setTranslationSourceOpen(true)}
         onCaptureWebSegment={() => void captureWebSegment()}
+        onReloadWebBrowse={() => void reloadWebBrowser()}
+        onReapplyWebTranslationOverlay={() => void reapplyWebTranslationOverlay()}
         onCloseWebBrowse={() => void closeWebBrowse()}
+        onToggleWebBrowserCollapsed={toggleWebBrowserCollapsed}
+        onToggleWebOverlaySelection={toggleWebOverlaySelection}
         onToggleWebTranslateAfterCapture={setWebTranslateAfterCapture}
         onOpenBatchImport={() => void openImportPreview("zip-folder")}
         onOpenShareImport={() => void openShareImportPreview()}
@@ -2151,6 +2706,10 @@ export default function App(): React.JSX.Element {
           onRunPending={() => void runAnalysis("pending")}
           onRunAll={() => void runAnalysis("all")}
           onEnterInpainting={() => void enterInpaintingMode()}
+          onWebTranslateCurrent={() => void translateCurrentWebScreen()}
+          onWebTranslateFullPage={() => void translateFullWebPage()}
+          onWebTranslateRegion={() => void startWebRegionTranslation()}
+          webSessionActive={webModeActive}
           onCancelJob={() => void window.mangaApi.cancelJob()}
           onStartAreaTranslate={startRegionTranslationSelection}
           onSampleBlockBackground={() => void sampleSelectedBlockBackground()}

@@ -10,7 +10,7 @@ import {
   resolvePagesForRun,
   updatePageAfterAnalysis
 } from "../library";
-import { logError } from "../logger";
+import { logError, logInfo } from "../logger";
 import { createRegionCropPage, mapRegionBlocksToPageBlocks } from "../regionCrop";
 import { runWholePagePipeline } from "../wholePagePipeline";
 import type { IpcContext } from "./context";
@@ -23,6 +23,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       return { status: "failed", error: "이미 실행 중인 작업이 있습니다." };
     }
 
+    const jobStartedAt = Date.now();
     const id = randomUUID();
     const abortController = new AbortController();
     context.jobs.start({ id, kind: "gemma-analysis", abortController });
@@ -45,7 +46,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       pageIds = resolved.pages.map((page) => page.id);
       await markChapterPagesRunning(request.chapterId, pageIds);
       runPaths = await getRunPaths(request.chapterId, id);
-      await context.translationWarmup.waitForReady();
+      await waitForEndpointWarmupIfNeeded(context, id, emit, resolved.pages.length);
       const result = await runWholePagePipeline({
         jobId: id,
         emit,
@@ -71,11 +72,12 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         id,
         kind: "gemma-analysis",
         status: "completed",
-        progressText: "번역 작업 완료",
+        progressText: `번역 작업 완료 (${formatTimingSummary(result.timings, jobStartedAt)})`,
         phase: "done",
         progressCurrent: resolved.pages.length,
         progressTotal: resolved.pages.length,
-        pageTotal: resolved.pages.length
+        pageTotal: resolved.pages.length,
+        detail: formatTimingDetail(result.timings, jobStartedAt)
       });
 
       return {
@@ -155,6 +157,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       return { status: "failed", error: "이미 실행 중인 작업이 있습니다." };
     }
 
+    const jobStartedAt = Date.now();
     const id = randomUUID();
     const abortController = new AbortController();
     let runPaths: Awaited<ReturnType<typeof getRunPaths>> | null = null;
@@ -183,7 +186,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         detail: `${Math.round(cropRect.w)} x ${Math.round(cropRect.h)} px`
       });
 
-      await context.translationWarmup.waitForReady();
+      await waitForEndpointWarmupIfNeeded(context, id, emit, 1);
       const result = await runWholePagePipeline({
         jobId: id,
         emit,
@@ -208,12 +211,12 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         id,
         kind: "gemma-analysis",
         status: "completed",
-        progressText: "선택 영역 번역 완료",
+        progressText: `선택 영역 번역 완료 (${formatTimingSummary(result.timings, jobStartedAt)})`,
         phase: "done",
         progressCurrent: 1,
         progressTotal: 1,
         pageTotal: 1,
-        detail: `${mappedBlocks.length}개 블록`
+        detail: `${mappedBlocks.length}개 블록, ${formatTimingDetail(result.timings, jobStartedAt)}`
       });
 
       return {
@@ -278,6 +281,49 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       }
     }
   });
+}
+
+function formatTimingSummary(timings: { totalMs: number; ocrMs: number; translationMs: number }, jobStartedAt: number): string {
+  return `총 ${formatElapsedSeconds(Date.now() - jobStartedAt)}, OCR ${formatElapsedSeconds(timings.ocrMs)}, 번역 ${formatElapsedSeconds(timings.translationMs)}`;
+}
+
+function formatTimingDetail(timings: { totalMs: number; ocrMs: number; translationMs: number }, jobStartedAt: number): string {
+  return `총 ${formatElapsedSeconds(Date.now() - jobStartedAt)} · OCR ${formatElapsedSeconds(timings.ocrMs)} · 번역 ${formatElapsedSeconds(timings.translationMs)}`;
+}
+
+function formatElapsedSeconds(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "0초";
+  }
+  const seconds = ms / 1000;
+  if (seconds < 10) {
+    return `${seconds.toFixed(1)}초`;
+  }
+  return `${Math.round(seconds)}초`;
+}
+
+async function waitForEndpointWarmupIfNeeded(
+  context: IpcContext,
+  jobId: string,
+  emit: (event: JobEvent) => void,
+  pageTotal: number
+): Promise<void> {
+  const warmup = context.translationWarmup.getSnapshot();
+  if (warmup.status === "warming" && !warmup.endpointReady) {
+    logInfo("Analysis job waiting for warmed model endpoint", { jobId, warmup });
+    emit({
+      id: jobId,
+      kind: "gemma-analysis",
+      status: "starting",
+      progressText: "사전 모델 로딩 대기 중",
+      phase: "booting",
+      progressCurrent: 0,
+      progressTotal: pageTotal,
+      pageTotal,
+      detail: "웹 페이지에서 시작한 LLM 사전 로딩이 끝나면 번역을 시작합니다."
+    });
+  }
+  await context.translationWarmup.waitForEndpointReady();
 }
 
 async function saveMappedRegionBlocks(chapterId: string, pageId: string, mappedBlocks: MangaPage["blocks"]) {

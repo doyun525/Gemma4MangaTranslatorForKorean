@@ -1,6 +1,7 @@
 const {
   readOcrCandidateText,
   readPositiveInteger,
+  resolveOcrBboxHintLimit,
   sanitizeHintLabel,
   sanitizeOcrTextForPrompt
 } = require("./simple-page-prompts.cjs");
@@ -49,7 +50,7 @@ function normalizeOcrBboxHintPayload(payload, options = {}) {
     });
   }
 
-  return hints.slice(0, 80);
+  return hints.slice(0, resolveOcrBboxHintLimit(options));
 }
 
 function collectOcrBboxCandidates(payload) {

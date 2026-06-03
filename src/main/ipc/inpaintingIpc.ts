@@ -192,6 +192,7 @@ export function registerInpaintingIpc(context: IpcContext): void {
       }
 
       const message = error instanceof Error ? error.message : String(error);
+      await disposeCachedFluxInpaintingEngine("job-failed").catch(() => undefined);
       logError("Inpainting job failed", { jobId: id, request, lastEvent, error });
       emit({
         id,

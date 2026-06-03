@@ -26,8 +26,16 @@ export function AppSidebar({
   onReorderChapter,
   onSelectPage,
   onRetranslatePage,
+  onDownloadPage,
   onRemovePage,
-  onReorderPage
+  onReorderPage,
+  pageDownloadSelectionMode,
+  selectedDownloadPageIds,
+  onDownloadAllPages,
+  onStartPageDownloadSelection,
+  onDownloadSelectedPages,
+  onCancelPageDownloadSelection,
+  onTogglePageDownloadSelection
 }: {
   inpaintingMode: boolean;
   currentChapter: ChapterSnapshot | null;
@@ -50,8 +58,16 @@ export function AppSidebar({
   onReorderChapter: (workId: string, sourceChapterId: string, targetChapterId: string) => void;
   onSelectPage: (pageId: string) => void;
   onRetranslatePage: (pageId: string) => void;
+  onDownloadPage: (pageId: string) => void;
   onRemovePage: (pageId: string) => void;
   onReorderPage: (sourcePageId: string, targetPageId: string) => void;
+  pageDownloadSelectionMode: boolean;
+  selectedDownloadPageIds: Set<string>;
+  onDownloadAllPages: () => void;
+  onStartPageDownloadSelection: () => void;
+  onDownloadSelectedPages: () => void;
+  onCancelPageDownloadSelection: () => void;
+  onTogglePageDownloadSelection: (pageId: string) => void;
 }): React.JSX.Element {
   return (
     <aside className={`sidebar ${inpaintingMode ? "inpainting-sidebar" : ""}`}>
@@ -70,8 +86,16 @@ export function AppSidebar({
             jobActive={true}
             onSelect={onSelectPage}
             onRetranslate={onRetranslatePage}
+            onDownloadPage={onDownloadPage}
             onRemove={onRemovePage}
             onReorder={() => undefined}
+            downloadSelectionMode={false}
+            selectedDownloadPageIds={selectedDownloadPageIds}
+            onDownloadAllPages={onDownloadAllPages}
+            onStartDownloadSelection={onStartPageDownloadSelection}
+            onDownloadSelectedPages={onDownloadSelectedPages}
+            onCancelDownloadSelection={onCancelPageDownloadSelection}
+            onToggleDownloadPage={onTogglePageDownloadSelection}
           />
         </>
       ) : (
@@ -116,8 +140,16 @@ export function AppSidebar({
             jobActive={jobActive}
             onSelect={onSelectPage}
             onRetranslate={onRetranslatePage}
+            onDownloadPage={onDownloadPage}
             onRemove={onRemovePage}
             onReorder={onReorderPage}
+            downloadSelectionMode={pageDownloadSelectionMode}
+            selectedDownloadPageIds={selectedDownloadPageIds}
+            onDownloadAllPages={onDownloadAllPages}
+            onStartDownloadSelection={onStartPageDownloadSelection}
+            onDownloadSelectedPages={onDownloadSelectedPages}
+            onCancelDownloadSelection={onCancelPageDownloadSelection}
+            onToggleDownloadPage={onTogglePageDownloadSelection}
           />
         </>
       )}

@@ -26,3 +26,4 @@ logs/app.log
 library/
 /fonts/
 settings.json
+window-state.json

@@ -7,6 +7,7 @@ export type SimplePageRuntime = {
   stopServer: (server: { child: unknown } | null | undefined) => Promise<void>;
   isModelCached: (options: Record<string, unknown>) => boolean;
   warmupOcrRuntime?: (options: Record<string, unknown>) => Promise<unknown>;
+  stopOcrWorker?: () => Promise<void>;
   convertImageToPngBufferWithFfmpeg?: (filePath: string) => Promise<Buffer>;
   testModelReply: (server: { baseUrl: string }, options: Record<string, unknown>) => Promise<{
     outputText: string;

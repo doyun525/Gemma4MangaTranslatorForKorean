@@ -2,13 +2,17 @@ import { ipcMain } from "electron";
 import {
   CaptureWebSegmentRequestSchema,
   OpenWebBrowseRequestSchema,
+  ReopenWebChapterRequestSchema,
+  RenderWebOverlayRequestSchema,
   ScrollWebBrowserRequestSchema,
+  SelectWebRegionRequestSchema,
   SetWebAutoTranslateRequestSchema,
+  SetWebOverlayInteractionRequestSchema,
   SyncWebBrowserBoundsRequestSchema,
   WebSessionIdRequestSchema,
   parseIpcPayload
 } from "../../shared/ipcSchemas";
-import type { CaptureWebSegmentResult, OpenWebBrowseResult, WebBrowseState } from "../../shared/types";
+import type { CaptureWebSegmentResult, OpenWebBrowseResult, SelectWebRegionResult, WebBrowseState } from "../../shared/types";
 import type { IpcContext } from "./context";
 
 export function registerWebBrowseIpc(context: IpcContext): void {
@@ -16,6 +20,13 @@ export function registerWebBrowseIpc(context: IpcContext): void {
     const request = parseIpcPayload(OpenWebBrowseRequestSchema, raw, "웹 페이지 열기");
     const result = await context.webBrowser.open(request);
     context.translationWarmup.start("web-open");
+    return result;
+  });
+
+  ipcMain.handle("web:reopen-chapter", async (_event, raw: unknown): Promise<OpenWebBrowseResult> => {
+    const request = parseIpcPayload(ReopenWebChapterRequestSchema, raw, "웹 화 다시 열기");
+    const result = await context.webBrowser.reopenChapter(request);
+    context.translationWarmup.start("web-reopen");
     return result;
   });
 
@@ -28,6 +39,21 @@ export function registerWebBrowseIpc(context: IpcContext): void {
   ipcMain.handle("web:capture-segment", async (_event, raw: unknown): Promise<CaptureWebSegmentResult> => {
     const request = parseIpcPayload(CaptureWebSegmentRequestSchema, raw, "웹 페이지 캡처");
     return context.webBrowser.captureSegment(request.sessionId, request.captureMode || "viewport");
+  });
+
+  ipcMain.handle("web:select-region", async (_event, raw: unknown): Promise<SelectWebRegionResult> => {
+    const request = parseIpcPayload(SelectWebRegionRequestSchema, raw, "웹 영역 선택");
+    return context.webBrowser.selectRegion(request.sessionId);
+  });
+
+  ipcMain.handle("web:render-overlay", async (_event, raw: unknown): Promise<WebBrowseState> => {
+    const request = parseIpcPayload(RenderWebOverlayRequestSchema, raw, "웹 번역 오버레이");
+    return context.webBrowser.renderOverlay(request.sessionId, request.page, request.blocks);
+  });
+
+  ipcMain.handle("web:set-overlay-interaction", async (_event, raw: unknown): Promise<WebBrowseState> => {
+    const request = parseIpcPayload(SetWebOverlayInteractionRequestSchema, raw, "웹 번역 오버레이 선택 설정");
+    return context.webBrowser.setOverlayInteraction(request.sessionId, request.enabled);
   });
 
   ipcMain.handle("web:sync-bounds", async (_event, raw: unknown): Promise<WebBrowseState> => {
@@ -43,6 +69,11 @@ export function registerWebBrowseIpc(context: IpcContext): void {
   ipcMain.handle("web:scroll", async (_event, raw: unknown): Promise<WebBrowseState> => {
     const request = parseIpcPayload(ScrollWebBrowserRequestSchema, raw, "웹 스크롤");
     return context.webBrowser.scroll(request.sessionId, request.deltaY);
+  });
+
+  ipcMain.handle("web:reload", async (_event, raw: unknown): Promise<WebBrowseState> => {
+    const request = parseIpcPayload(WebSessionIdRequestSchema, raw, "웹 페이지 새로고침");
+    return context.webBrowser.reload(request.sessionId);
   });
 
   ipcMain.handle("web:get-state", async (_event, raw: unknown): Promise<WebBrowseState> => {

@@ -4,17 +4,22 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { bboxToPixels, clamp, resolveEffectiveRenderBbox } from "../shared/geometry";
+import { deflateSync } from "node:zlib";
+import { bboxToPixels, clamp, resolveBlockRenderBbox } from "../shared/geometry";
 import type { CustomFont, MangaPage, TranslationBlock } from "../shared/types";
 import { getAppPaths } from "./appPaths";
 import { listCustomFonts } from "./customFonts";
 import type { ImageDecodeFallback } from "./regionCrop";
+
+const MAX_EXPORT_CANVAS_HEIGHT = 12_000;
 
 export async function renderPageWithTranslationBlocksForExport(
   page: MangaPage,
   options: {
     dataRoot: string;
     decodeFallback: ImageDecodeFallback;
+    showTextBlocks?: boolean;
+    showBlockChrome?: boolean;
   }
 ): Promise<Buffer> {
   const sourcePath = page.inpaintedImagePath || page.imagePath;
@@ -23,7 +28,15 @@ export async function renderPageWithTranslationBlocksForExport(
   const width = Math.max(1, size.width || page.width);
   const height = Math.max(1, size.height || page.height);
   const imageDataUrl = `data:image/png;base64,${image.toPNG().toString("base64")}`;
-  const html = buildPageExportHtml(page, imageDataUrl, width, height);
+  if (height > MAX_EXPORT_CANVAS_HEIGHT) {
+    return renderTallPageWithTranslationBlocksForExport(page, imageDataUrl, width, height, options);
+  }
+  const html = buildPageExportHtml(page, imageDataUrl, width, height, {
+    showTextBlocks: options.showTextBlocks ?? true,
+    showBlockChrome: options.showBlockChrome ?? true,
+    tileY: 0,
+    tileHeight: height
+  });
   const renderDir = join(options.dataRoot, "tmp", "png-export-render");
   await mkdir(renderDir, { recursive: true });
   const htmlPath = join(renderDir, `${page.id}-${randomUUID()}.html`);
@@ -58,6 +71,91 @@ export async function renderPageWithTranslationBlocksForExport(
   }
 }
 
+async function renderTallPageWithTranslationBlocksForExport(
+  page: MangaPage,
+  imageDataUrl: string,
+  width: number,
+  height: number,
+  options: {
+    dataRoot: string;
+    showTextBlocks?: boolean;
+    showBlockChrome?: boolean;
+  }
+): Promise<Buffer> {
+  const tiles: Array<{ y: number; height: number; bitmap: Buffer }> = [];
+  for (let y = 0; y < height; y += MAX_EXPORT_CANVAS_HEIGHT) {
+    const tileHeight = Math.min(MAX_EXPORT_CANVAS_HEIGHT, height - y);
+    const png = await renderPageExportTile(page, imageDataUrl, width, height, y, tileHeight, {
+      dataRoot: options.dataRoot,
+      showTextBlocks: options.showTextBlocks ?? true,
+      showBlockChrome: options.showBlockChrome ?? true
+    });
+    const tileImage = nativeImage.createFromBuffer(png);
+    if (tileImage.isEmpty()) {
+      throw new Error(`출력 PNG 타일을 읽지 못했습니다: ${page.name}`);
+    }
+    const tileSize = tileImage.getSize();
+    if (tileSize.width !== width || tileSize.height !== tileHeight) {
+      throw new Error(`출력 PNG 타일 크기가 올바르지 않습니다: ${page.name}`);
+    }
+    tiles.push({ y, height: tileHeight, bitmap: tileImage.toBitmap() });
+  }
+  return stitchExportTilesToPng(tiles, width, height);
+}
+
+async function renderPageExportTile(
+  page: MangaPage,
+  imageDataUrl: string,
+  width: number,
+  height: number,
+  tileY: number,
+  tileHeight: number,
+  options: {
+    dataRoot: string;
+    showTextBlocks: boolean;
+    showBlockChrome: boolean;
+  }
+): Promise<Buffer> {
+  const html = buildPageExportHtml(page, imageDataUrl, width, height, {
+    showTextBlocks: options.showTextBlocks,
+    showBlockChrome: options.showBlockChrome,
+    tileY,
+    tileHeight
+  });
+  const renderDir = join(options.dataRoot, "tmp", "png-export-render");
+  await mkdir(renderDir, { recursive: true });
+  const htmlPath = join(renderDir, `${page.id}-${randomUUID()}-${tileY}.html`);
+  const win = new BrowserWindow({
+    width: Math.min(1200, width),
+    height: Math.min(1000, tileHeight),
+    show: false,
+    useContentSize: true,
+    backgroundColor: "#ffffff",
+    webPreferences: {
+      offscreen: true,
+      backgroundThrottling: false
+    }
+  });
+
+  try {
+    await writeFile(htmlPath, html, "utf8");
+    await win.loadFile(htmlPath);
+    await waitForExportRenderReady(win);
+    const pngDataUrl = await win.webContents.executeJavaScript("window.__exportPngDataUrl", true);
+    if (typeof pngDataUrl !== "string" || !pngDataUrl.startsWith("data:image/png;base64,")) {
+      throw new Error(`출력 PNG 타일 데이터를 만들지 못했습니다: ${page.name}`);
+    }
+    const png = Buffer.from(pngDataUrl.slice("data:image/png;base64,".length), "base64");
+    if (!png.length) {
+      throw new Error(`출력 PNG 타일을 만들지 못했습니다: ${page.name}`);
+    }
+    return png;
+  } finally {
+    win.destroy();
+    await rm(htmlPath, { force: true }).catch(() => {});
+  }
+}
+
 export function sanitizeOutputBaseName(value: string): string {
   const raw = basename(value, extname(value)) || "page";
   const cleaned = raw.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim();
@@ -81,12 +179,22 @@ async function loadImageForPngExport(imagePath: string, decodeFallback: ImageDec
   throw new Error(`출력할 이미지를 읽지 못했습니다: ${imagePath}`);
 }
 
-function buildPageExportHtml(page: MangaPage, imageDataUrl: string, width: number, height: number): string {
+function buildPageExportHtml(
+  page: MangaPage,
+  imageDataUrl: string,
+  width: number,
+  height: number,
+  options: { showTextBlocks: boolean; showBlockChrome: boolean; tileY: number; tileHeight: number }
+): string {
   const rendererCssHref = findRendererCssHref();
   const customFonts = listCustomFonts();
   const customFamilyById = new Map(customFonts.map((font) => [font.id, font.family]));
   const customFontFaces = buildCustomFontFaces(customFonts);
-  const blocks = buildPageExportBlocks(page, width, height, customFamilyById);
+  const tileY = Math.max(0, Math.floor(options.tileY));
+  const tileHeight = Math.max(1, Math.floor(options.tileHeight));
+  const blocks = options.showTextBlocks
+    ? buildPageExportBlocks(page, width, height, tileY, tileHeight, customFamilyById, options.showBlockChrome)
+    : [];
   return `<!doctype html>
 <html>
 <head>
@@ -98,7 +206,7 @@ ${customFontFaces}
 html, body {
   margin: 0;
   width: ${width}px;
-  height: ${height}px;
+  height: ${tileHeight}px;
   overflow: hidden;
   background: #fff;
 }
@@ -108,7 +216,7 @@ body {
 .page-export-stage {
   position: relative;
   width: ${width}px;
-  height: ${height}px;
+  height: ${tileHeight}px;
   overflow: hidden;
   background: #fff;
 }
@@ -147,13 +255,17 @@ body {
 </head>
 <body>
 <div class="page-export-stage" id="stage">
-  <canvas id="exportCanvas" width="${width}" height="${height}" style="display:block;width:${width}px;height:${height}px"></canvas>
+  <canvas id="exportCanvas" width="${width}" height="${tileHeight}" style="display:block;width:${width}px;height:${tileHeight}px"></canvas>
 </div>
 <script>
 const EXPORT_BLOCKS = ${safeScriptJson(blocks)};
 const EXPORT_IMAGE_DATA_URL = ${safeScriptJson(imageDataUrl)};
+const EXPORT_FULL_WIDTH = ${width};
+const EXPORT_FULL_HEIGHT = ${height};
+const EXPORT_TILE_Y = ${tileY};
 const MIN_FONT_SIZE = 10;
 const MAX_AUTOFIT_FONT_SIZE = 256;
+const AUTOFIT_ROOM_RATIO = 0.9;
 const canvas = document.createElement("canvas");
 const context = canvas.getContext("2d");
 
@@ -239,7 +351,8 @@ function resolveFontSize(block, innerWidth, innerHeight) {
       high = mid - 1;
     }
   }
-  return Math.min(best, capped);
+  const fitted = Math.min(best, capped);
+  return fitted <= MIN_FONT_SIZE ? MIN_FONT_SIZE : Math.max(MIN_FONT_SIZE, Math.floor(fitted * AUTOFIT_ROOM_RATIO));
 }
 
 function resolveOutlineShadow(fontSize, color, scale) {
@@ -324,6 +437,10 @@ function drawExportBlock(ctx, block) {
     ctx.rotate((block.rotationDeg * Math.PI) / 180);
     drawRect = { left: -rect.width / 2, top: -rect.height / 2, width: rect.width, height: rect.height };
   }
+  if (block.showChrome) {
+    ctx.fillStyle = block.backgroundRgba;
+    ctx.fillRect(drawRect.left, drawRect.top, drawRect.width, drawRect.height);
+  }
   if (block.renderDirection === "vertical") {
     drawVerticalText(ctx, block, drawRect, fontSize);
   } else {
@@ -349,7 +466,7 @@ async function renderCanvasPng() {
   }
   const image = await loadExportImage();
   ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
-  ctx.drawImage(image, 0, 0, outputCanvas.width, outputCanvas.height);
+  ctx.drawImage(image, 0, -EXPORT_TILE_Y, EXPORT_FULL_WIDTH, EXPORT_FULL_HEIGHT);
   for (const block of EXPORT_BLOCKS) {
     drawExportBlock(ctx, block);
   }
@@ -446,7 +563,10 @@ function buildPageExportBlocks(
   page: MangaPage,
   outputWidth: number,
   outputHeight: number,
-  customFamilyById: Map<string, string>
+  tileY: number,
+  tileHeight: number,
+  customFamilyById: Map<string, string>,
+  showChrome: boolean
 ): PageExportBlock[] {
   const pageWidth = Math.max(1, page.width || outputWidth);
   const pageHeight = Math.max(1, page.height || outputHeight);
@@ -454,7 +574,19 @@ function buildPageExportBlocks(
   const scaleY = outputHeight / pageHeight;
   const fontScale = Math.min(scaleX, scaleY);
   return page.blocks
-    .map((block) => buildPageExportBlock(block, { width: pageWidth, height: pageHeight }, scaleX, scaleY, fontScale, customFamilyById))
+    .map((block) =>
+      buildPageExportBlock(
+        block,
+        { width: pageWidth, height: pageHeight },
+        scaleX,
+        scaleY,
+        fontScale,
+        tileY,
+        tileHeight,
+        customFamilyById,
+        showChrome
+      )
+    )
     .filter((block): block is PageExportBlock => Boolean(block));
 }
 
@@ -474,6 +606,8 @@ type PageExportBlock = {
   outlineWidthPx?: number;
   outlineWidthScale: number;
   autoFitText: boolean;
+  showChrome: boolean;
+  backgroundRgba: string;
 };
 
 function buildPageExportBlock(
@@ -482,7 +616,10 @@ function buildPageExportBlock(
   scaleX: number,
   scaleY: number,
   fontScale: number,
-  customFamilyById: Map<string, string>
+  tileY: number,
+  tileHeight: number,
+  customFamilyById: Map<string, string>,
+  showChrome: boolean
 ): PageExportBlock | null {
   if (block.renderDirection === "hidden") {
     return null;
@@ -491,15 +628,20 @@ function buildPageExportBlock(
   if (!text.trim()) {
     return null;
   }
-  const renderBbox = resolveEffectiveRenderBbox(block, pageSize, text);
+  const renderBbox = resolveBlockRenderBbox(block, pageSize);
   const rect = bboxToPixels(renderBbox, pageSize.width, pageSize.height);
+  const scaledTop = rect.y * scaleY;
+  const scaledHeight = Math.max(1, rect.h * scaleY);
+  if (scaledTop + scaledHeight < tileY || scaledTop > tileY + tileHeight) {
+    return null;
+  }
   return {
     text,
     rect: {
       left: rect.x * scaleX,
-      top: rect.y * scaleY,
+      top: scaledTop - tileY,
       width: Math.max(1, rect.w * scaleX),
-      height: Math.max(1, rect.h * scaleY)
+      height: scaledHeight
     },
     renderDirection: block.renderDirection === "vertical" ? "vertical" : block.renderDirection === "rotated" ? "rotated" : "horizontal",
     rotationDeg: block.rotationDeg ? clamp(Math.round(block.rotationDeg), -30, 30) : 0,
@@ -513,7 +655,9 @@ function buildPageExportBlock(
     italic: Boolean(block.italic),
     outlineWidthPx: block.outlineWidthPx == null ? undefined : Math.max(0, block.outlineWidthPx * fontScale),
     outlineWidthScale: block.outlineWidthScale == null ? 1 : Math.max(0, block.outlineWidthScale),
-    autoFitText: block.autoFitText ?? false
+    autoFitText: block.autoFitText ?? false,
+    showChrome,
+    backgroundRgba: buildRgbaColor(normalizeExportColor(block.backgroundColor, "#ffffff"), clamp(block.opacity ?? 1, 0, 1))
   };
 }
 
@@ -548,6 +692,14 @@ function resolveExportBlockFontFamily(value: string | undefined, customFamilyByI
 function normalizeExportColor(value: string | undefined, fallback: string): string {
   const text = String(value ?? "").trim();
   return /^#[0-9a-f]{6}$/i.test(text) ? text : fallback;
+}
+
+function buildRgbaColor(hex: string, alpha: number): string {
+  const normalized = normalizeExportColor(hex, "#ffffff");
+  const r = Number.parseInt(normalized.slice(1, 3), 16);
+  const g = Number.parseInt(normalized.slice(3, 5), 16);
+  const b = Number.parseInt(normalized.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${clamp(alpha, 0, 1)})`;
 }
 
 function findRendererCssHref(): string | null {
@@ -623,4 +775,72 @@ function safeScriptJson(value: unknown): string {
     .replace(/&/g, "\\u0026")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
+}
+
+function stitchExportTilesToPng(
+  tiles: Array<{ y: number; height: number; bitmap: Buffer }>,
+  width: number,
+  height: number
+): Buffer {
+  const rowBytes = width * 4;
+  const filtered = Buffer.alloc((rowBytes + 1) * height);
+  for (const tile of tiles) {
+    for (let y = 0; y < tile.height; y += 1) {
+      const targetY = tile.y + y;
+      if (targetY < 0 || targetY >= height) {
+        continue;
+      }
+      const sourceStart = y * rowBytes;
+      const targetStart = targetY * (rowBytes + 1);
+      filtered[targetStart] = 0;
+      copyBitmapBgraToPngRgba(tile.bitmap, filtered, sourceStart, targetStart + 1, width);
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(filtered)),
+    pngChunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
+function copyBitmapBgraToPngRgba(source: Buffer, target: Buffer, sourceStart: number, targetStart: number, width: number): void {
+  for (let x = 0; x < width; x += 1) {
+    const sourceOffset = sourceStart + x * 4;
+    const targetOffset = targetStart + x * 4;
+    target[targetOffset] = source[sourceOffset + 2] ?? 255;
+    target[targetOffset + 1] = source[sourceOffset + 1] ?? 255;
+    target[targetOffset + 2] = source[sourceOffset] ?? 255;
+    target[targetOffset + 3] = source[sourceOffset + 3] ?? 255;
+  }
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuffer = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBuffer.copy(chunk, 4);
+  data.copy(chunk, 8);
+  const checksum = crc32(Buffer.concat([typeBuffer, data]));
+  chunk.writeUInt32BE(checksum >>> 0, 8 + data.length);
+  return chunk;
+}
+
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }

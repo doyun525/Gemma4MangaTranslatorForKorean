@@ -23,8 +23,23 @@ import { buildBaseOptions, buildPageOptions, formatGemmaVramMode, readNumberEnv,
 import { loadTranslationRuntimePort } from "./pipeline/translationRuntimePort";
 import type {
   OcrBboxResult,
+  OverlayItem,
   PipelineOptions,
 } from "./pipeline/types";
+
+const OCR_TEXT_TRANSLATION_CHUNK_SIZE = 80;
+
+export type PipelineTimingSummary = {
+  totalMs: number;
+  ocrMs: number;
+  translationMs: number;
+};
+
+export type WholePagePipelineResult = {
+  pages: MangaPage[];
+  warnings: string[];
+  timings: PipelineTimingSummary;
+};
 
 export async function runWholePagePipeline({
   jobId,
@@ -36,9 +51,23 @@ export async function runWholePagePipeline({
   runPaths,
   signal,
   skipOcrPrepass = false
-}: PipelineOptions): Promise<{ pages: MangaPage[]; warnings: string[] }> {
+}: PipelineOptions): Promise<WholePagePipelineResult> {
+  const pipelineStartedAt = Date.now();
+  let ocrMs = 0;
+  let translationMs = 0;
+
+  const buildResult = (resultPages: MangaPage[]): WholePagePipelineResult => ({
+    pages: resultPages,
+    warnings,
+    timings: {
+      totalMs: Date.now() - pipelineStartedAt,
+      ocrMs,
+      translationMs
+    }
+  });
+
   if (pages.length === 0) {
-    return { pages: [], warnings: [] };
+    return buildResult([]);
   }
 
   throwIfAborted(signal);
@@ -108,17 +137,20 @@ export async function runWholePagePipeline({
   };
   baseOptions.abortSignal = signal;
 
-  const ocrHintsByPageId = skipOcrPrepass
-    ? new Map<string, OcrBboxResult>()
-    : await prepareOcrHintsForPages({
-        runtime,
-        baseOptions,
-        pages,
-        runPaths,
-        emit,
-        jobId,
-        signal
-      });
+  let ocrHintsByPageId = new Map<string, OcrBboxResult>();
+  if (!skipOcrPrepass) {
+    const ocrStartedAt = Date.now();
+    ocrHintsByPageId = await prepareOcrHintsForPages({
+      runtime,
+      baseOptions,
+      pages,
+      runPaths,
+      emit,
+      jobId,
+      signal
+    });
+    ocrMs = Date.now() - ocrStartedAt;
+  }
 
   if (skipOcrPrepass) {
     logInfo("OCR prepass skipped for analysis pipeline", {
@@ -154,7 +186,7 @@ export async function runWholePagePipeline({
       progressTotal,
       pageIndex,
       pageTotal: pages.length,
-      detail: "Paddle OCR에서 일본어 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
+      detail: "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
     });
   }
 
@@ -171,11 +203,10 @@ export async function runWholePagePipeline({
       detail: `${pages.length} pages ready, 모델 호출 없음`
     });
 
-    return {
-      pages: pages.map((page) => completedPagesById.get(page.id) ?? page),
-      warnings
-    };
+    return buildResult(pages.map((page) => completedPagesById.get(page.id) ?? page));
   }
+
+  const translationStartedAt = Date.now();
 
   emit({
     id: jobId,
@@ -228,6 +259,11 @@ export async function runWholePagePipeline({
     } else {
       pageOptions.ocrBboxHints = ocrHintsByPageId.get(page.id)?.hints ?? [];
     }
+    if (page.webMeta?.ocrTiles?.length) {
+      pageOptions.translationMode = "ocr-text";
+      pageOptions.imageFirst = false;
+      pageOptions.includeEnhancedVariant = false;
+    }
     pageOptions.abortSignal = signal;
     pageOptions.onProgress = (progress) => {
       emit({
@@ -252,6 +288,144 @@ export async function runWholePagePipeline({
       });
     };
     return pageOptions;
+  };
+
+  const parseTranslationOverlayItems = (outputText: string, page: MangaPage, pageOptions: TranslationOptions): OverlayItem[] => {
+    let parsed: unknown;
+    try {
+      parsed = runtime.parseJsonLenient(outputText);
+    } catch (error) {
+      const preview = summarizePreview(outputText);
+      const parseError = new Error(
+        `${page.name}: 모델 응답을 구조화 형식으로 해석하지 못했습니다. preview=${preview} cause=${error instanceof Error ? error.message : String(error)}`
+      ) as Error & { cause?: unknown };
+      parseError.cause = error;
+      Object.assign(parseError, {
+        outputPreview: preview,
+        outputDir: pageOptions.outputDir,
+        responseFormat: "structured-overlay"
+      });
+      throw parseError;
+    }
+
+    return runtime.normalizeItems(parsed);
+  };
+
+  const requestPageOverlayItems = async (
+    page: MangaPage,
+    pageOptions: TranslationOptions,
+    pageIndex: number,
+    attempt: number
+  ): Promise<{
+    items: OverlayItem[];
+    requestBody: unknown;
+    outputText: string;
+    noTextDetected: boolean;
+  }> => {
+    const ocrHints = Array.isArray(pageOptions.ocrBboxHints) ? pageOptions.ocrBboxHints : [];
+    if (shouldChunkOcrTextTranslation(pageOptions, ocrHints)) {
+      return requestChunkedOcrTextTranslation(page, pageOptions, pageIndex, attempt, ocrHints);
+    }
+
+    const result = await runtime.requestTranslation(server, pageOptions);
+    await runtime.saveArtifacts(pageOptions, result);
+    const items = parseTranslationOverlayItems(result.outputText, page, pageOptions);
+    return {
+      items,
+      requestBody: result.requestBody,
+      outputText: result.outputText,
+      noTextDetected: items.length === 0 && isRequestNoTextDetected(result.requestBody)
+    };
+  };
+
+  const requestChunkedOcrTextTranslation = async (
+    page: MangaPage,
+    pageOptions: TranslationOptions,
+    pageIndex: number,
+    attempt: number,
+    ocrHints: unknown[]
+  ): Promise<{
+    items: OverlayItem[];
+    requestBody: unknown;
+    outputText: string;
+    noTextDetected: boolean;
+  }> => {
+    const chunks = chunkArray(ocrHints, OCR_TEXT_TRANSLATION_CHUNK_SIZE);
+    const mergedItems: OverlayItem[] = [];
+    const mergedOutputs: string[] = [];
+    let firstRequestBody: unknown = null;
+    let emptyChunkCount = 0;
+
+    logInfo("OCR text translation chunking enabled", {
+      jobId,
+      page: summarizePage(page),
+      hintCount: ocrHints.length,
+      chunkSize: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+      chunkCount: chunks.length
+    });
+
+    for (const [chunkIndex, chunkHints] of chunks.entries()) {
+      throwIfAborted(signal);
+      const chunkNumber = chunkIndex + 1;
+      const chunkOptions: TranslationOptions = {
+        ...pageOptions,
+        ocrBboxHints: chunkHints,
+        ocrBboxHintLimit: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+        outputDir: join(pageOptions.outputDir, "chunks", `chunk-${String(chunkNumber).padStart(3, "0")}`),
+        label: `${pageOptions.label}-chunk-${chunkNumber}-of-${chunks.length}`
+      };
+
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "running",
+        progressText: `${page.name} 번역 청크 ${chunkNumber}/${chunks.length}`,
+        phase: "page_running",
+        progressCurrent: pageIndex + 1,
+        progressTotal,
+        pageIndex: pageIndex + 1,
+        pageTotal: pages.length,
+        attempt,
+        attemptTotal: maxAttempts,
+        detail: `OCR 후보 ${chunkHints.length}개 번역 중`
+      });
+
+      const result = await runtime.requestTranslation(server, chunkOptions);
+      await runtime.saveArtifacts(chunkOptions, result);
+      if (!firstRequestBody) {
+        firstRequestBody = result.requestBody;
+      }
+
+      const items = parseTranslationOverlayItems(result.outputText, page, chunkOptions);
+      mergedOutputs.push(result.outputText);
+      const chunkOverlayItemsPath = join(chunkOptions.outputDir, "overlay-items.json");
+      await mkdir(chunkOptions.outputDir, { recursive: true });
+      await writeFile(chunkOverlayItemsPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
+
+      if (items.length === 0) {
+        emptyChunkCount += 1;
+        warnings.push(`${page.name}: 번역 청크 ${chunkNumber}/${chunks.length}에서 블록이 생성되지 않았습니다.`);
+        continue;
+      }
+      mergedItems.push(...items);
+    }
+
+    if (emptyChunkCount > 0) {
+      logWarn("Some OCR text translation chunks returned no overlay items", {
+        jobId,
+        page: summarizePage(page),
+        emptyChunkCount,
+        chunkCount: chunks.length,
+        mergedItemCount: mergedItems.length
+      });
+    }
+
+    return {
+      items: mergedItems,
+      requestBody: buildMergedChunkRequestBody(firstRequestBody, ocrHints, page),
+      outputText: mergedOutputs.join("\n\n"),
+      noTextDetected: mergedItems.length === 0
+    };
   };
 
   try {
@@ -285,28 +459,9 @@ export async function runWholePagePipeline({
         });
 
         try {
-          const result = await runtime.requestTranslation(server, pageOptions);
-          await runtime.saveArtifacts(pageOptions, result);
-
-          let parsed: unknown;
-          try {
-            parsed = runtime.parseJsonLenient(result.outputText);
-          } catch (error) {
-            const preview = summarizePreview(result.outputText);
-            const parseError = new Error(
-              `${page.name}: 모델 응답을 구조화 형식으로 해석하지 못했습니다. preview=${preview} cause=${error instanceof Error ? error.message : String(error)}`
-            ) as Error & { cause?: unknown };
-            parseError.cause = error;
-            Object.assign(parseError, {
-              outputPreview: preview,
-              outputDir: pageOptions.outputDir,
-              responseFormat: "structured-overlay"
-            });
-            throw parseError;
-          }
-
-          const items = runtime.normalizeItems(parsed);
-          if (items.length === 0 && isRequestNoTextDetected(result.requestBody)) {
+          const translation = await requestPageOverlayItems(page, pageOptions, index, attempt);
+          const items = translation.items;
+          if (items.length === 0 && translation.noTextDetected) {
             successPage = buildNoTextCompletedPage(page);
             await onPageComplete?.(successPage);
             emit({
@@ -319,7 +474,7 @@ export async function runWholePagePipeline({
               progressTotal,
               pageIndex: index + 1,
               pageTotal: pages.length,
-              detail: "Paddle OCR에서 일본어 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
+              detail: "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
             });
             break;
           }
@@ -327,7 +482,7 @@ export async function runWholePagePipeline({
             const bboxError = new Error(`${page.name}: bbox 결과를 만들지 못했습니다.`);
             Object.assign(bboxError, {
               outputDir: pageOptions.outputDir,
-              outputPreview: summarizePreview(result.outputText)
+              outputPreview: summarizePreview(translation.outputText)
             });
             throw bboxError;
           }
@@ -337,9 +492,9 @@ export async function runWholePagePipeline({
           await writeFile(overlayItemsPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
 
           let normalizedItems = applyOcrCandidateGeometryLocks(
-            normalizeOverlayItemBboxes(items, page, getBboxNormalizationOptions(result.requestBody)),
+            normalizeOverlayItemBboxes(items, page, getBboxNormalizationOptions(translation.requestBody)),
             page,
-            getOcrBboxHints(result.requestBody),
+            getOcrBboxHints(translation.requestBody),
             pageOptions
           );
           normalizedItems = await maybeRetryLowConfidenceItems({
@@ -484,11 +639,37 @@ export async function runWholePagePipeline({
       detail: `${pages.length} pages ready`
     });
 
-    return {
-      pages: pages.map((page) => completedPagesById.get(page.id) ?? page),
-      warnings
-    };
+    translationMs = Date.now() - translationStartedAt;
+    return buildResult(pages.map((page) => completedPagesById.get(page.id) ?? page));
   } finally {
+    translationMs = Math.max(translationMs, Date.now() - translationStartedAt);
     await endpointSession.dispose();
   }
+}
+
+function shouldChunkOcrTextTranslation(options: TranslationOptions, ocrHints: unknown[]): boolean {
+  return String(options.translationMode ?? "") === "ocr-text" && ocrHints.length > OCR_TEXT_TRANSLATION_CHUNK_SIZE;
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function buildMergedChunkRequestBody(firstRequestBody: unknown, ocrHints: unknown[], page: MangaPage): unknown {
+  const base = firstRequestBody && typeof firstRequestBody === "object" ? firstRequestBody as Record<string, unknown> : {};
+  return {
+    ...base,
+    bboxCoordinateSpace: base.bboxCoordinateSpace ?? "pixels",
+    bboxCoordinateFrame: base.bboxCoordinateFrame ?? {
+      width: page.width,
+      height: page.height
+    },
+    ocrBboxHintCount: ocrHints.length,
+    ocrBboxHintLimit: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+    ocrBboxHints: ocrHints
+  };
 }

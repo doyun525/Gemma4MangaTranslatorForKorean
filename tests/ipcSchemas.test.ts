@@ -3,8 +3,11 @@ import {
   ChapterSnapshotSchema,
   OpenWebBrowseRequestSchema,
   parseIpcPayload,
+  RenderWebOverlayRequestSchema,
+  ReopenWebChapterRequestSchema,
   SaveChapterSnapshotSchema,
   SavePageBlocksRequestSchema,
+  SelectWebRegionRequestSchema,
   StartAnalysisRequestSchema,
   WorkShareImportRequestSchema
 } from "../src/shared/ipcSchemas";
@@ -118,6 +121,7 @@ describe("IPC schemas", () => {
             url: "https://example.com/comic",
             finalUrl: "https://example.com/comic/1",
             segmentIndex: 0,
+            scrollX: 12,
             scrollY: 320,
             viewport: { width: 1280, height: 720, deviceScaleFactor: 1.25 },
             captureMode: "viewport",
@@ -131,7 +135,7 @@ describe("IPC schemas", () => {
     expect(parseIpcPayload(ChapterSnapshotSchema, payload, "웹 화")).toMatchObject({
       sourceKind: "web",
       webOrigin: { createdFrom: "manual-capture" },
-      pages: [{ webMeta: { segmentIndex: 0, captureMode: "viewport" } }]
+      pages: [{ webMeta: { segmentIndex: 0, scrollX: 12, captureMode: "viewport" } }]
     });
     expect(parseIpcPayload(SaveChapterSnapshotSchema, payload, "웹 화 저장").pages[0]?.webMeta?.contentHash).toBe("abc123");
   });
@@ -148,6 +152,68 @@ describe("IPC schemas", () => {
     );
 
     expect(parsed.target.mode).toBe("new");
+  });
+
+  it("validates web chapter reopen requests", () => {
+    const parsed = parseIpcPayload(
+      ReopenWebChapterRequestSchema,
+      {
+        chapterId,
+        mode: "manual"
+      },
+      "웹 화 다시 열기"
+    );
+
+    expect(parsed).toEqual({ chapterId, mode: "manual" });
+    expect(() => parseIpcPayload(ReopenWebChapterRequestSchema, { chapterId: "bad" }, "웹 화 다시 열기")).toThrow(/요청 형식/);
+  });
+
+  it("validates web region selection requests", () => {
+    const parsed = parseIpcPayload(SelectWebRegionRequestSchema, { sessionId: workId }, "웹 영역 선택");
+
+    expect(parsed).toEqual({ sessionId: workId });
+    expect(() => parseIpcPayload(SelectWebRegionRequestSchema, { sessionId: "bad" }, "웹 영역 선택")).toThrow(/요청 형식/);
+  });
+
+  it("validates web overlay render requests", () => {
+    const page = makeChapterSnapshot().pages[0];
+    const parsed = parseIpcPayload(
+      RenderWebOverlayRequestSchema,
+      {
+        sessionId: workId,
+        page,
+        blocks: [
+          {
+            id: "block-1",
+            x: 12,
+            y: 24,
+            w: 80,
+            h: 42,
+            text: "안녕",
+            textColor: "#111111",
+            backgroundColor: "#ffffff",
+            opacity: 0.9,
+            fontSizePx: 20,
+            lineHeight: 1.2,
+            textAlign: "center",
+            fontFamily: "sans-serif",
+            outlineColor: "#ffffff",
+            outlineWidthPx: 1.4,
+            bold: false,
+            italic: false,
+            vertical: false,
+            autoFitText: true
+          }
+        ]
+      },
+      "웹 번역 오버레이"
+    );
+
+    expect(parsed.page.id).toBe(page.id);
+    expect(parsed.blocks?.[0]?.autoFitText).toBe(true);
+    expect(() =>
+      parseIpcPayload(RenderWebOverlayRequestSchema, { sessionId: workId, page: { ...page, unknown: true } }, "웹 번역 오버레이")
+    ).toThrow(/요청 형식/);
   });
 });
 

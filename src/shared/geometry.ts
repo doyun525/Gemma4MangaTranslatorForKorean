@@ -10,6 +10,7 @@ type RenderBboxBlock = Pick<TranslationBlock, "bbox" | "renderBbox"> &
   Partial<Pick<TranslationBlock, "bboxSpace" | "renderBboxSpace" | "renderDirection" | "lineHeight" | "fontSizePx" | "autoFitText">>;
 
 export const MIN_READABLE_FONT_SIZE_PX = 10;
+export const MIN_NORMALIZED_BBOX_SIZE = 0.01;
 
 const READABLE_AVERAGE_CHAR_WIDTH_RATIO = 0.95;
 const READABLE_VERTICAL_COLUMN_WIDTH_RATIO = 1.15;
@@ -23,11 +24,15 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 export function clampBbox(bbox: BBox): BBox {
-  const x = clamp(bbox.x, 0, 999);
-  const y = clamp(bbox.y, 0, 999);
-  const w = clamp(bbox.w, 1, 1000 - x);
-  const h = clamp(bbox.h, 1, 1000 - y);
-  return { x, y, w, h };
+  const x = clamp(bbox.x, 0, 1000 - MIN_NORMALIZED_BBOX_SIZE);
+  const y = clamp(bbox.y, 0, 1000 - MIN_NORMALIZED_BBOX_SIZE);
+  const w = clamp(bbox.w, MIN_NORMALIZED_BBOX_SIZE, 1000 - x);
+  const h = clamp(bbox.h, MIN_NORMALIZED_BBOX_SIZE, 1000 - y);
+  return { x: roundBboxValue(x), y: roundBboxValue(y), w: roundBboxValue(w), h: roundBboxValue(h) };
+}
+
+function roundBboxValue(value: number): number {
+  return Math.round(value * 10000) / 10000;
 }
 
 export function sanitizeChapterBboxes(chapter: ChapterSnapshot): ChapterSnapshot {
@@ -119,19 +124,12 @@ export function resolveEditableBlockBbox(
   pageSize?: PageSize | null,
   text = ""
 ): { key: "bbox" | "renderBbox"; bbox: BBox } {
+  void text;
   if (block.renderBbox) {
     return { key: "renderBbox", bbox: normalizeBboxTo1000(block.renderBbox, pageSize, block.renderBboxSpace) };
   }
 
-  const bbox = normalizeBboxTo1000(block.bbox, pageSize, block.bboxSpace);
-  if (pageSize && text.trim()) {
-    const effectiveRenderBbox = resolveEffectiveRenderBbox(block, pageSize, text);
-    if (!areBboxesClose(effectiveRenderBbox, bbox)) {
-      return { key: "renderBbox", bbox: effectiveRenderBbox };
-    }
-  }
-
-  return { key: "bbox", bbox };
+  return { key: "bbox", bbox: normalizeBboxTo1000(block.bbox, pageSize, block.bboxSpace) };
 }
 
 export function applyEditableBlockBbox(block: TranslationBlock, nextBbox: BBox, pageSize?: PageSize | null, text = ""): TranslationBlock {
@@ -260,8 +258,4 @@ function expandBboxAroundCenter(bbox: BBox, pageSize: PageSize, targetWidthPx: n
   const x = clamp(centerX - width / 2, 0, Math.max(0, pageSize.width - width));
   const y = clamp(centerY - height / 2, 0, Math.max(0, pageSize.height - height));
   return pixelsToBbox({ x, y, w: width, h: height }, pageSize.width, pageSize.height);
-}
-
-function areBboxesClose(a: BBox, b: BBox): boolean {
-  return Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
 }

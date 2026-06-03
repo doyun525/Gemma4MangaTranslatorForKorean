@@ -2,7 +2,7 @@
 
 > **문서 버전:** 0.2
 > **작성일:** 2026-06-02  
-> **최근 갱신:** 2026-06-02
+> **최근 갱신:** 2026-06-03
 > **대상 코드베이스:** Gemma4MangaTranslatorForKorean (Electron + React)  
 > **목적:** 현재 로컬 파일(이미지/폴더/ZIP) 전용인 앱에 **웹 페이지 기반 만화/웹툰 읽기 + OCR/번역** 기능을 추가하기 위한 설계·로드맵
 
@@ -371,7 +371,7 @@ main: webBrowserManager.setBounds(sessionId, rect)
 |------|-----|------|
 | **viewport** | CDP screenshot (clip 없음) | 기본, 대부분 웹툰 |
 | **element** | selector bounding box clip | `.viewer`, `#content` 등 |
-| **full-page** | CDP full page | 배치 import, 짧은 페이지 |
+| **full-page** | CDP `Page.captureScreenshot({ captureBeyondViewport: true })` | 전체 스크롤 번역, 중간 길이 웹툰 |
 
 ### 8.1.1 viewport 경계 문제
 
@@ -385,6 +385,35 @@ MVP 기본값:
 - 가능하면 viewport보다 `element` 또는 이미지 단위 캡처를 우선 사용
 
 Phase 1.5에서 최소 generic selector preset을 추가한다.
+
+### 8.1.2 full-page 전체 스크롤 캡처
+
+긴 스크롤 웹툰에서 viewport 캡처를 여러 페이지로 저장하면, 사용자가 다시 위로 스크롤했을 때 이전 번역이 즉시 보이지 않는다. 이를 줄이기 위해 `captureMode: "full-page"`를 지원한다.
+
+- 캡처 전 웹 번역 오버레이를 숨겨 원본 웹만 캡처한다.
+- `position: fixed` / `sticky` 요소 중 viewport 가장자리에 붙은 후보를 임시로 `visibility: hidden` 처리해 고정 헤더/푸터 반복을 줄인다.
+- lazy-loading 이미지를 위해 전체 페이지를 짧게 자동 스크롤한 뒤 원래 위치로 복귀한다.
+- 32,000px 이하의 캡처 이미지는 하나의 web page로 materialize하고, `webMeta.viewport`에는 전체 문서 CSS 크기를 저장한다.
+- 오버레이는 viewport scroll 좌표가 아니라 문서 전체 좌표에 주입하므로, 다시 스크롤해도 같은 웹 페이지 위에서 번역 블록이 유지된다.
+- 32,000px를 넘는 초대형 페이지는 오버랩 viewport 타일로 캡처한 뒤 겹친 상단을 잘라 하나의 `web-full-###.png`로 저장한다. OCR은 이 거대 PNG를 직접 읽지 않고, `webMeta.ocrTiles`에 저장된 보조 타일 PNG들을 배치 OCR한 뒤 bbox를 전체 이미지 좌표로 보정한다.
+
+현재 안전 장치:
+
+- 단일 full-page 캡처는 OCR/OpenCV/Pillow 안정성을 위해 32,000px 이하에서만 사용한다.
+- 32,000px 초과 페이지는 하나의 보관함 페이지로 저장하되 OCR만 내부 타일 배치로 처리한다. OCR batch size 설정은 이 OCR 타일들에 그대로 적용된다.
+
+### 8.1.3 초대형 페이지 타일 처리 설계
+
+full-page 단일 PNG가 너무 큰 경우에는 다음 방식으로 확장한다.
+
+1. 문서 높이를 viewport 단위 tile로 나누고 약 25%, 최대 360px overlap을 둔다.
+2. 각 tile은 원본 웹 오버레이를 숨긴 상태에서 캡처한다. fixed/sticky 요소를 강제로 숨기면 일부 사이트에서 레이아웃이 잘리는 문제가 있어, 현재는 overlap crop으로 반복 영역을 줄인다.
+3. OCR/번역은 tile 단위로 실행한다. 이때 LLM에는 전체 초대형 이미지를 보내지 않는다.
+4. tile-local bbox는 각 OCR tile의 `x/y/width/height`를 이용해 전체 PNG의 0-1000 좌표로 변환한다.
+5. overlap을 도입하는 후속 단계에서는 bbox IoU, source text, 중심점 거리로 중복 블록을 제거한다.
+6. 현재 구현은 물리 저장은 하나의 full-page PNG로 유지하고, OCR용 타일 PNG는 페이지 보조 디렉터리에 저장한다. 긴 페이지 번역은 `ocr-text` 모드로 강제해 거대 이미지를 LLM에 보내지 않는다.
+
+2026-06-03 구현 메모: `captureMode: "full-page"`에서 문서 높이가 32,000px를 넘으면 overlap tile capture → cropped stitch PNG 생성 → `webMeta.ocrTiles` 배치 OCR → 전체 좌표 bbox 병합 순서로 처리한다.
 
 ```typescript
 type GenericCapturePreset = {
@@ -598,7 +627,7 @@ export type WebSitePreset = {
 
 - Main process에 `WebBrowserManager`와 `web:*` IPC를 추가했다. Electron 39 기준 `WebContentsView`를 사용하며, 외부 사이트는 앱 renderer와 분리된 `persist:mgt-web-{sessionId}` partition에서 열린다.
 - 현재 보안 정책은 `http:`/`https:` URL만 허용하고, 팝업·카메라·마이크·위치 등 권한 요청은 기본 차단한다.
-- MVP 캡처는 `captureMode: "viewport"`만 실제 지원한다. `element`, `full-page` 타입과 schema는 후속 구현을 위해 남겨두되, main에서는 아직 요청을 거부한다.
+- MVP 캡처는 `captureMode: "viewport"`를 기본으로 한다. 2026-06-03에 `full-page` 전체 스크롤 캡처를 추가했다. `element` 타입과 schema는 후속 구현을 위해 남겨두되, main에서는 아직 요청을 거부한다.
 - 캡처 이미지는 즉시 `library/.../pages/` 아래 PNG로 저장되고, `MangaPage.webMeta`에 URL, scrollY, viewport, capture hash, segmentIndex가 기록된다.
 - URL 입력 직후 빈 web chapter를 만들고 `LibraryChapter.webOrigin`에 시작 URL/최종 URL/title을 저장한다.
 - renderer는 split view를 사용한다. 왼쪽은 native browser bounds host, 오른쪽은 기존 `ImageStage` 기반 캡처/번역 편집 화면이다.
@@ -607,15 +636,21 @@ export type WebSitePreset = {
 - 웹 세션은 아직 메모리 전용이다. 앱 재시작 후에는 캡처된 web chapter를 일반 library chapter처럼 다시 열 수 있으나, 브라우저 세션 복원은 Phase 2 이후 과제로 유지한다.
 - 웹 세션을 열면 `TranslationWarmupManager`가 백그라운드에서 Gemma endpoint와 Paddle OCR 런타임/모델 캐시를 미리 준비한다. 번역 job이 먼저 시작되면 진행 중인 warm-up을 기다린 뒤 기존 pipeline이 `reuseServer`로 endpoint를 재사용한다.
 - OCR 기본 엔진은 PP-OCRv5로 변경했다. v5 선택 시 사전 다운로드 대상도 PP-OCRv5 det/rec 모델로 제한해 PaddleOCR-VL 모델까지 불필요하게 준비하지 않는다.
-- 현재 OCR warm-up은 패키지/모델 캐시 준비 단계다. Python OCR 프로세스를 VRAM에 상주시켜 첫 추론 지연까지 제거하는 daemon 구조는 Phase 2.5 후속 과제로 남긴다.
+- Paddle OCR warm-up은 이제 패키지/모델 캐시 준비 후 `paddleocr-vl-bboxes.py --serve` 워커를 띄워 Python OCR 프로세스와 Paddle 모델 객체를 유지한다. 이후 OCR 배치는 같은 워커에 JSONL 요청을 보내며, `MANGA_TRANSLATOR_DISABLE_OCR_WORKER=1` 설정 시 기존처럼 배치마다 프로세스를 실행한다.
+- `전체 스크롤 번역` 버튼은 `captureMode: "full-page"`로 캡처 후 기존 single-page 분석 파이프라인을 재사용한다. full-page 오버레이는 문서 전체 좌표로 주입하고 렌더링 시 `window.scrollTo`를 강제하지 않는다.
+- full-page 캡처 전에는 웹 번역 오버레이와 fixed/sticky edge 요소를 임시로 숨기고, lazy-loading 이미지를 깨우기 위해 페이지를 자동 스크롤한다.
 
 ### Phase 1.5 — 캡처 품질 보강 (1주)
 
 - [ ] viewport overlap 캡처
-- [ ] fixed header/footer crop margin
+- [x] full-page 전체 스크롤 캡처
+- [x] fixed/sticky header/footer 자동 숨김
+- [x] 초대형 full-page tile OCR/번역 병합
+- [ ] fixed header/footer crop margin 수동 설정
 - [ ] generic viewer/image selector preset
 - [ ] dHash 또는 sha256 기반 중복 감지
 - [x] 웹 세션 시작 시 Gemma endpoint + Paddle OCR runtime/model cache warm-up
+- [x] Paddle OCR persistent worker로 PP-OCRv5/VL 모델 프로세스 재사용
 - [x] PP-OCRv5를 기본 OCR 엔진으로 변경하고 v5 모델만 사전 준비
 
 **완료 기준:** 긴 세로 웹툰에서 말풍선 잘림과 중복 segment가 눈에 띄게 줄어듦

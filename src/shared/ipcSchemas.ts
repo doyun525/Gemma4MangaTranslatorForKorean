@@ -6,7 +6,9 @@ const MAX_PATH_LENGTH = 4096;
 const MAX_ID_LIST_LENGTH = 2000;
 const MAX_PAGES_PER_REQUEST = 2000;
 const MAX_BLOCKS_PER_PAGE = 500;
+const MAX_WEB_OVERLAY_BLOCKS = 20000;
 const MAX_STROKE_POINTS = 20000;
+const MAX_WEB_CAPTURE_DIMENSION = 500000;
 
 const finiteNumber = z.number().finite();
 const uuid = z.string().uuid();
@@ -14,13 +16,14 @@ const title = z.string().max(MAX_TITLE_LENGTH);
 const filePath = z.string().min(1).max(MAX_PATH_LENGTH);
 const boundedText = z.string().max(MAX_TEXT_LENGTH);
 const hexColor = z.string().regex(/^#[0-9a-f]{6}$/i);
+const MIN_NORMALIZED_BBOX_SIZE = 0.01;
 
 export const BBoxSchema = z
   .object({
     x: finiteNumber.min(0).max(1000),
     y: finiteNumber.min(0).max(1000),
-    w: finiteNumber.min(1).max(1000),
-    h: finiteNumber.min(1).max(1000)
+    w: finiteNumber.min(MIN_NORMALIZED_BBOX_SIZE).max(1000),
+    h: finiteNumber.min(MIN_NORMALIZED_BBOX_SIZE).max(1000)
   })
   .strict()
   .superRefine((bbox, context) => {
@@ -70,8 +73,8 @@ const WebCaptureModeSchema = z.enum(["viewport", "element", "full-page"]);
 
 const WebViewportMetaSchema = z
   .object({
-    width: z.number().int().min(1).max(100000),
-    height: z.number().int().min(1).max(100000),
+    width: z.number().int().min(1).max(MAX_WEB_CAPTURE_DIMENSION),
+    height: z.number().int().min(1).max(MAX_WEB_CAPTURE_DIMENSION),
     deviceScaleFactor: finiteNumber.min(0.1).max(10)
   })
   .strict();
@@ -90,15 +93,31 @@ export const WebPageSourceMetaSchema = z
     url: z.string().url().max(4096),
     finalUrl: z.string().url().max(4096).optional(),
     segmentIndex: z.number().int().min(0).max(MAX_PAGES_PER_REQUEST),
+    scrollX: finiteNumber.min(0).optional(),
     scrollY: finiteNumber.min(0).optional(),
     viewport: WebViewportMetaSchema,
     captureMode: WebCaptureModeSchema,
     captureRectCss: WebRectSchema.optional(),
     captureRectDevicePx: WebRectSchema.optional(),
+    contentRectCss: WebRectSchema.optional(),
     pageScaleFactor: finiteNumber.min(0.1).max(10).optional(),
     overlapWithPreviousPx: finiteNumber.min(0).optional(),
     capturedAt: z.string().max(80),
     contentHash: z.string().min(1).max(128).optional(),
+    ocrTiles: z
+      .array(
+        z
+          .object({
+            imagePath: filePath,
+            x: finiteNumber.min(0),
+            y: finiteNumber.min(0),
+            width: finiteNumber.min(1),
+            height: finiteNumber.min(1)
+          })
+          .strict()
+      )
+      .max(500)
+      .optional(),
     dedupeReason: z.string().max(4000).optional(),
     sitePresetId: z.string().max(120).optional()
   })
@@ -121,8 +140,8 @@ export const MangaPageSchema = z
     imagePath: filePath,
     inpaintedImagePath: filePath.optional(),
     dataUrl: z.string().max(32 * 1024 * 1024),
-    width: z.number().int().min(1).max(100000),
-    height: z.number().int().min(1).max(100000),
+    width: z.number().int().min(1).max(MAX_WEB_CAPTURE_DIMENSION),
+    height: z.number().int().min(1).max(MAX_WEB_CAPTURE_DIMENSION),
     blocks: z.array(TranslationBlockSchema).max(MAX_BLOCKS_PER_PAGE),
     analysisStatus: PageAnalysisStatusSchema,
     lastError: z.string().max(4000).optional(),
@@ -296,6 +315,25 @@ export const InpaintingExportRequestSchema = z.discriminatedUnion("scope", [
   z.object({ chapterId: uuid, scope: z.literal("page"), pageId: uuid }).strict()
 ]);
 
+const PageImageExportOptionsSchema = z
+  .object({
+    showTextBlocks: z.boolean(),
+    showBlockChrome: z.boolean()
+  })
+  .strict();
+
+export const PageImageExportRequestSchema = z.discriminatedUnion("scope", [
+  z.object({ chapterId: uuid, scope: z.literal("page"), pageId: uuid, options: PageImageExportOptionsSchema }).strict(),
+  z
+    .object({
+      chapterId: uuid,
+      scope: z.literal("pages"),
+      pageIds: z.array(uuid).min(1).max(MAX_ID_LIST_LENGTH),
+      options: PageImageExportOptionsSchema
+    })
+    .strict()
+]);
+
 export const RenameWorkRequestSchema = z.object({ workId: uuid, title }).strict();
 export const RenameChapterRequestSchema = z.object({ chapterId: uuid, title }).strict();
 export const DeleteWorkRequestSchema = z.object({ workId: uuid }).strict();
@@ -336,11 +374,63 @@ export const OpenWebBrowseRequestSchema = z
   })
   .strict();
 
+export const ReopenWebChapterRequestSchema = z
+  .object({
+    chapterId: uuid,
+    mode: z.enum(["manual", "live", "batch"]).optional()
+  })
+  .strict();
+
 export const CaptureWebSegmentRequestSchema = z
   .object({
     sessionId: uuid,
     captureMode: WebCaptureModeSchema.optional(),
     translate: z.boolean().optional()
+  })
+  .strict();
+
+export const SelectWebRegionRequestSchema = z.object({ sessionId: uuid }).strict();
+
+export const RenderWebOverlayRequestSchema = z
+  .object({
+    sessionId: uuid,
+    page: MangaPageSchema,
+    blocks: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(200),
+            pageId: uuid.optional(),
+            x: finiteNumber,
+            y: finiteNumber,
+            w: finiteNumber.min(1),
+            h: finiteNumber.min(1),
+            text: boundedText,
+            textColor: hexColor,
+            backgroundColor: hexColor,
+            opacity: finiteNumber.min(0).max(1),
+            fontSizePx: finiteNumber.min(1).max(512),
+            lineHeight: finiteNumber.min(0.5).max(4),
+            textAlign: z.enum(["left", "center", "right"]),
+            fontFamily: z.string().min(1).max(300),
+            outlineColor: hexColor,
+            outlineWidthPx: finiteNumber.min(0).max(8),
+            bold: z.boolean(),
+            italic: z.boolean(),
+            vertical: z.boolean(),
+            autoFitText: z.boolean().optional()
+          })
+          .strict()
+      )
+      .max(MAX_WEB_OVERLAY_BLOCKS)
+      .optional()
+  })
+  .strict();
+
+export const SetWebOverlayInteractionRequestSchema = z
+  .object({
+    sessionId: uuid,
+    enabled: z.boolean()
   })
   .strict();
 

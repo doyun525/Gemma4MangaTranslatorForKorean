@@ -106,6 +106,11 @@ export class TranslationWarmupManager {
     this.ocrPromise = null;
     this.endpointReady = false;
     this.ocrReady = false;
+    try {
+      await this.getRuntime().simplePage.stopOcrWorker?.();
+    } catch (error) {
+      logError("Failed to stop OCR warmup worker", error);
+    }
     if (endpoint) {
       try {
         await stopModelEndpoint(this.getRuntime(), endpoint);
@@ -161,8 +166,12 @@ export class TranslationWarmupManager {
         installLogLine: progress.installLogLine
       });
     };
-    await runtime.simplePage.warmupOcrRuntime(options);
+    const result = await runtime.simplePage.warmupOcrRuntime(options);
     this.ocrReady = true;
+    logInfo("OCR warmup ready", {
+      reason,
+      ...(result && typeof result === "object" ? (result as Record<string, unknown>) : {})
+    });
   }
 
   private getRuntime(): RuntimeModules {

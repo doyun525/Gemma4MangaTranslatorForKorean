@@ -25,6 +25,10 @@ type AppRightRailProps = {
   onRunPending: () => void;
   onRunAll: () => void;
   onEnterInpainting: () => void;
+  onWebTranslateCurrent: () => void;
+  onWebTranslateFullPage: () => void;
+  onWebTranslateRegion: () => void;
+  webSessionActive: boolean;
   onCancelJob: () => void;
   onStartAreaTranslate: () => void;
   onSampleBlockBackground: () => void;
@@ -55,6 +59,10 @@ export function AppRightRail({
   onRunPending,
   onRunAll,
   onEnterInpainting,
+  onWebTranslateCurrent,
+  onWebTranslateFullPage,
+  onWebTranslateRegion,
+  webSessionActive,
   onCancelJob,
   onStartAreaTranslate,
   onSampleBlockBackground,
@@ -96,6 +104,10 @@ export function AppRightRail({
             onRunPending={onRunPending}
             onRunAll={onRunAll}
             onEnterInpainting={onEnterInpainting}
+            onWebTranslateCurrent={onWebTranslateCurrent}
+            onWebTranslateFullPage={onWebTranslateFullPage}
+            onWebTranslateRegion={onWebTranslateRegion}
+            webSessionActive={webSessionActive}
             onCancelJob={onCancelJob}
           />
 

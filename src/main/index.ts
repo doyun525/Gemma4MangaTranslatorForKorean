@@ -89,7 +89,7 @@ app.on("before-quit", () => {
 });
 
 function openMainWindow(): void {
-  mainWindow = createMainWindow();
+  mainWindow = createMainWindow(appPaths);
   mainWindow.on("closed", () => {
     webBrowser.closeAll();
     mainWindow = null;

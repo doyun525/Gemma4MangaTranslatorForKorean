@@ -117,15 +117,18 @@ export type WebPageSourceMeta = {
   url: string;
   finalUrl?: string;
   segmentIndex: number;
+  scrollX?: number;
   scrollY?: number;
   viewport: WebViewportMeta;
   captureMode: WebCaptureMode;
   captureRectCss?: { x: number; y: number; width: number; height: number };
   captureRectDevicePx?: { x: number; y: number; width: number; height: number };
+  contentRectCss?: { x: number; y: number; width: number; height: number };
   pageScaleFactor?: number;
   overlapWithPreviousPx?: number;
   capturedAt: string;
   contentHash?: string;
+  ocrTiles?: Array<{ imagePath: string; x: number; y: number; width: number; height: number }>;
   dedupeReason?: string;
   sitePresetId?: string;
 };
@@ -172,6 +175,29 @@ export type TranslationBlock = {
   opacity: number;
   autoFitText?: boolean;
   inpaintExcluded?: boolean;
+};
+
+export type WebOverlayRenderBlock = {
+  id: string;
+  pageId?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  textColor: string;
+  backgroundColor: string;
+  opacity: number;
+  fontSizePx: number;
+  lineHeight: number;
+  textAlign: "left" | "center" | "right";
+  fontFamily: string;
+  outlineColor: string;
+  outlineWidthPx: number;
+  bold: boolean;
+  italic: boolean;
+  vertical: boolean;
+  autoFitText?: boolean;
 };
 
 export type CustomFont = {
@@ -312,6 +338,11 @@ export type OpenWebBrowseRequest = {
   mode?: WebBrowseMode;
 };
 
+export type ReopenWebChapterRequest = {
+  chapterId: string;
+  mode?: WebBrowseMode;
+};
+
 export type OpenWebBrowseResult = {
   sessionId: string;
   chapterId: string;
@@ -326,10 +357,37 @@ export type CaptureWebSegmentRequest = {
   translate?: boolean;
 };
 
+export type SelectWebRegionRequest = {
+  sessionId: string;
+};
+
+export type SelectWebRegionResult = {
+  bbox: BBox | null;
+};
+
+export type RenderWebOverlayRequest = {
+  sessionId: string;
+  page: MangaPage;
+  blocks?: WebOverlayRenderBlock[];
+};
+
+export type SetWebOverlayInteractionRequest = {
+  sessionId: string;
+  enabled: boolean;
+};
+
+export type WebOverlayBlockSelectionEvent = {
+  sessionId: string;
+  chapterId: string;
+  pageId: string;
+  blockId: string;
+};
+
 export type CaptureWebSegmentResult = {
   sessionId: string;
   chapter: ChapterSnapshot;
   pageId: string;
+  pageIds?: string[];
   segmentIndex: number;
   translated: boolean;
 };
@@ -482,6 +540,30 @@ export type InpaintingExportResult = {
   pageCount: number;
 };
 
+export type PageImageExportOptions = {
+  showTextBlocks: boolean;
+  showBlockChrome: boolean;
+};
+
+export type PageImageExportRequest =
+  | {
+      chapterId: string;
+      scope: "page";
+      pageId: string;
+      options: PageImageExportOptions;
+    }
+  | {
+      chapterId: string;
+      scope: "pages";
+      pageIds: string[];
+      options: PageImageExportOptions;
+    };
+
+export type PageImageExportResult = {
+  outputPath: string;
+  pageCount: number;
+};
+
 export type InpaintingPoint = {
   x: number;
   y: number;
@@ -547,6 +629,10 @@ export type SampleBlockBackgroundsResult = {
     id: string;
     flat: boolean;
     backgroundColor?: string;
+    reason?: string;
+    dominance?: number;
+    maxStddev?: number;
+    sampleCount?: number;
   }>;
 };
 

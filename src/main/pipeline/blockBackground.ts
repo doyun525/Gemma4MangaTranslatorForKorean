@@ -5,6 +5,7 @@ import {
   type BlockBackgroundSampleInput,
   type BlockBackgroundSampleResult
 } from "../../shared/blockBackground";
+import { logInfo } from "../logger";
 import type { MangaPage, TranslationBlock } from "../../shared/types";
 
 export async function applySampledBackgroundColors(blocks: TranslationBlock[], page: MangaPage): Promise<TranslationBlock[]> {
@@ -25,6 +26,7 @@ export async function applySampledBackgroundColors(blocks: TranslationBlock[], p
     page.height,
     blocks.map((block) => ({ id: block.id, bbox: block.bbox }))
   );
+  logBackgroundSampleSummary("pipeline", page.imagePath, page.width, page.height, samples);
   const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
 
   return blocks.map((block) => applySampleToBlock(block, sampleById.get(block.id)));
@@ -45,7 +47,7 @@ export async function sampleBlockBackgrounds(
     return blocks.map((block) => ({ id: block.id, flat: false }));
   }
 
-  return sampleBlockBackgroundsFromBitmap(
+  const results = sampleBlockBackgroundsFromBitmap(
     bitmapData.bitmap,
     bitmapData.width,
     bitmapData.height,
@@ -53,6 +55,8 @@ export async function sampleBlockBackgrounds(
     pageHeight,
     blocks
   );
+  logBackgroundSampleSummary("manual", imagePath, pageWidth, pageHeight, results);
+  return results;
 }
 
 function applySampleToBlock(block: TranslationBlock, sample: BlockBackgroundSampleResult | undefined): TranslationBlock {
@@ -80,4 +84,25 @@ async function loadPageBitmap(imagePath: string): Promise<{ bitmap: Buffer; widt
   }
 
   return { bitmap, width: size.width, height: size.height };
+}
+
+function logBackgroundSampleSummary(
+  source: "pipeline" | "manual",
+  imagePath: string,
+  pageWidth: number,
+  pageHeight: number,
+  samples: BlockBackgroundSampleResult[]
+): void {
+  const flatCount = samples.filter((sample) => sample.flat).length;
+  const failed = samples.filter((sample) => !sample.flat).slice(0, 12);
+  logInfo("Block background sampling completed", {
+    source,
+    imagePath,
+    pageWidth,
+    pageHeight,
+    blockCount: samples.length,
+    flatCount,
+    failedCount: samples.length - flatCount,
+    failed
+  });
 }

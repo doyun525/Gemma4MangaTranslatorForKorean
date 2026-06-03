@@ -179,10 +179,13 @@ export type TranslationOptions = {
   ocrBboxCommand?: string;
   ocrBboxHintsPath?: string;
   ocrBboxHints?: unknown;
+  ocrBboxHintLimit?: number;
   skipOcrBboxHints?: boolean;
   regionCropMode?: boolean;
   ocrPageIndex?: number;
   ocrPageTotal?: number;
+  ocrTileIndex?: number;
+  ocrTileTotal?: number;
   ocrProgressDefaultToPage?: boolean;
   ocrBatchCompletedBefore?: number;
   ocrBatchTotal?: number;

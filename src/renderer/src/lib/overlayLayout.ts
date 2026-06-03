@@ -1,9 +1,10 @@
 import type { TranslationBlock } from "../../../shared/types";
-import { bboxToPixels, clamp, MIN_READABLE_FONT_SIZE_PX, resolveBlockRenderBbox, resolveEffectiveRenderBbox } from "../../../shared/geometry";
+import { bboxToPixels, clamp, MIN_READABLE_FONT_SIZE_PX, resolveBlockRenderBbox } from "../../../shared/geometry";
 import { resolveBlockFontFamily } from "./fonts";
 
-const MIN_FONT_SIZE_PX = MIN_READABLE_FONT_SIZE_PX;
+const MIN_FONT_SIZE_PX = 1;
 const MAX_AUTOFIT_FONT_SIZE_PX = 256;
+const AUTOFIT_ROOM_RATIO = 0.9;
 const MIN_BLOCK_PADDING_PX = 0;
 const MIN_INNER_SIZE_PX = 1;
 const BLOCK_BORDER_PX = 1;
@@ -74,7 +75,8 @@ export function resolveBlockTextLayout(
 }
 
 export function resolveBlockRectPx(block: TranslationBlock, pageSize: ViewportSize, stageSize: ViewportSize, text = ""): PixelRect {
-  const renderBbox = text.trim() ? resolveEffectiveRenderBbox(block, pageSize, text) : resolveBlockRenderBbox(block, pageSize);
+  void text;
+  const renderBbox = resolveBlockRenderBbox(block, pageSize);
   const pixelRect = bboxToPixels(renderBbox, pageSize.width, pageSize.height);
   const scaleX = stageSize.width / Math.max(1, pageSize.width);
   const scaleY = stageSize.height / Math.max(1, pageSize.height);
@@ -119,7 +121,7 @@ function resolveTextFontSizePx(
       high = mid - 1;
     }
   }
-  return Math.min(best, capped);
+  return applyAutoFitRoom(Math.min(best, capped));
 }
 
 function doesTextFit(block: TranslationBlock, text: string, fontSize: number, innerWidth: number, innerHeight: number): boolean {
@@ -186,6 +188,13 @@ function resolveAutoFitUpperBound(block: TranslationBlock, preferredFontSize: nu
   const heightBound = Math.floor(innerHeight / Math.max(1, block.lineHeight || 1));
   const widthBound = block.renderDirection === "vertical" ? Math.floor(innerWidth / 1.15) : MAX_AUTOFIT_FONT_SIZE_PX;
   return clamp(Math.max(MIN_FONT_SIZE_PX, heightBound, widthBound), MIN_FONT_SIZE_PX, MAX_AUTOFIT_FONT_SIZE_PX);
+}
+
+function applyAutoFitRoom(fontSize: number): number {
+  if (fontSize <= MIN_FONT_SIZE_PX) {
+    return MIN_FONT_SIZE_PX;
+  }
+  return Math.max(MIN_FONT_SIZE_PX, Math.floor(fontSize * AUTOFIT_ROOM_RATIO));
 }
 
 function measureVerticalText(

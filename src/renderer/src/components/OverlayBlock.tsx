@@ -1,8 +1,6 @@
 import React from "react";
 import type { TranslationBlock } from "../../../shared/types";
-import { resolveBlockVisualStyle } from "../../../shared/blockVisuals";
-import { resolveBlockFontFamily } from "../lib/fonts";
-import { hexToRgba, resolveBlockTextLayout, type ViewportSize } from "../lib/overlayLayout";
+import { resolveOverlayBlockBackground, resolveOverlayBlockRenderModel, type ViewportSize } from "../lib/blockRenderModel";
 
 type OverlayBlockProps = {
   block: TranslationBlock;
@@ -33,11 +31,8 @@ export function OverlayBlock({
     return null;
   }
 
-  const displayText = block.translatedText || block.sourceText || "...";
-  const layout = resolveBlockTextLayout(block, displayText, pageSize, stageSize);
-  const outlineWidthPx = resolveTextOutlinePx(layout.fontSizePx, block.outlineWidthPx, block.outlineWidthScale);
-  const outlineColor = resolveCssColor(block.outlineColor, "#ffffff");
-  const visualStyle = resolveBlockVisualStyle(block.type);
+  const model = resolveOverlayBlockRenderModel(block, pageSize, stageSize);
+  const { displayText, layout, outlineWidthPx, outlineColor } = model;
   const style: React.CSSProperties = {
     left: layout.rect.left,
     top: layout.rect.top,
@@ -48,8 +43,8 @@ export function OverlayBlock({
     overflow: "visible",
     color: block.textColor,
     border: "none",
-    backgroundColor: showChrome ? hexToRgba(block.backgroundColor || visualStyle.backgroundColor, block.opacity) : "transparent",
-    fontFamily: resolveBlockFontFamily(block.fontFamily),
+    backgroundColor: resolveOverlayBlockBackground(block, model, showChrome),
+    fontFamily: model.fontFamily,
     fontSize: `${layout.fontSizePx}px`,
     lineHeight: block.lineHeight,
     textAlign: block.textAlign,
@@ -66,25 +61,45 @@ export function OverlayBlock({
     justifyContent: "center",
     overflow: "visible"
   };
-  const contentStyle: React.CSSProperties = {
-    boxSizing: "border-box",
-    writingMode: block.renderDirection === "vertical" ? "vertical-rl" : "horizontal-tb",
-    textOrientation: block.renderDirection === "vertical" ? "upright" : undefined,
+  const textStackStyle: React.CSSProperties = {
+    display: "grid",
+    placeItems: "center",
     width: block.renderDirection === "vertical" ? "max-content" : `${layout.fitInnerWidth}px`,
     height: block.renderDirection === "vertical" ? `${layout.fitInnerHeight}px` : undefined,
+    maxWidth: "100%",
+    maxHeight: "100%",
+    overflow: "visible"
+  };
+  const contentStyle: React.CSSProperties = {
+    boxSizing: "border-box",
+    gridArea: "1 / 1",
+    writingMode: block.renderDirection === "vertical" ? "vertical-rl" : "horizontal-tb",
+    textOrientation: block.renderDirection === "vertical" ? "upright" : undefined,
+    width: "100%",
+    height: "100%",
     maxWidth: "100%",
     maxHeight: "100%",
     overflow: "visible",
     fontWeight: block.bold ? 800 : 400,
     fontStyle: block.italic ? "italic" : "normal",
     fontSynthesis: "weight style",
-    color: block.textColor,
-    ...(outlineWidthPx > 0
+    color: block.textColor
+  };
+  const outlineStyle: React.CSSProperties =
+    outlineWidthPx > 0
       ? {
+          ...contentStyle,
+          zIndex: 0,
+          color: "transparent",
           WebkitTextStroke: `${outlineWidthPx}px ${outlineColor}`,
-          paintOrder: "stroke fill"
+          paintOrder: "stroke",
+          pointerEvents: "none"
         }
-      : {})
+      : {};
+  const fillStyle: React.CSSProperties = {
+    ...contentStyle,
+    zIndex: 1,
+    WebkitTextStroke: "0 transparent"
   };
 
   const excluded = showExcluded && Boolean(block.inpaintExcluded);
@@ -104,8 +119,15 @@ export function OverlayBlock({
       onPointerDown={pointerDisabled ? undefined : onPointerDown}
     >
       <div className="overlay-text" style={textWrapStyle}>
-        <span className="overlay-text-content" style={contentStyle}>
-          {displayText}
+        <span className="overlay-text-stack" style={textStackStyle}>
+          {outlineWidthPx > 0 ? (
+            <span className="overlay-text-content overlay-text-outline" style={outlineStyle} aria-hidden="true">
+              {displayText}
+            </span>
+          ) : null}
+          <span className="overlay-text-content overlay-text-fill" style={fillStyle}>
+            {displayText}
+          </span>
         </span>
       </div>
       {showExcluded && onToggleExcluded && !pointerDisabled ? (
@@ -131,17 +153,4 @@ export function OverlayBlock({
       {selected && !pointerDisabled ? <button className="resize-handle" onPointerDown={onResizePointerDown} aria-label="Resize" /> : null}
     </div>
   );
-}
-
-function resolveTextOutlinePx(fontSizePx: number, outlineWidthPx?: number, outlineWidthScale?: number): number {
-  const configured = Number(outlineWidthPx);
-  if (Number.isFinite(configured)) {
-    return Math.round(Math.min(8, Math.max(0, configured)) * Math.max(0, outlineWidthScale ?? 1) * 10) / 10;
-  }
-  return Math.round(Math.min(4, Math.max(0.35, fontSizePx * 0.055)) * Math.max(0, outlineWidthScale ?? 1) * 10) / 10;
-}
-
-function resolveCssColor(value: string | undefined, fallback: string): string {
-  const text = String(value ?? "").trim();
-  return /^#[0-9a-f]{6}$/i.test(text) ? text : fallback;
 }

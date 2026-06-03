@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { once } from "node:events";
-import { delimiter, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
 
 export type FluxWorkerRequest = {
   input: string;
@@ -25,14 +26,14 @@ export class FluxWorker {
   private pending = new Map<string, FluxWorkerPending>();
   private closed = false;
 
-  constructor(runtimePath: string, modelPath: string, vaePath: string, maskPaddingPx: number) {
+  constructor(runtimePath: string, modelPath: string, vaePath: string, maskPaddingPx: number, extraDllDirs: string[] = []) {
     this.child = spawn(
       runtimePath,
       ["--transformer-path", modelPath, "--vae-path", vaePath, "--steps", "4", "--strength", "1", "--mask-padding", String(maskPaddingPx)],
       {
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: buildFluxWorkerEnv(runtimePath)
+        env: buildFluxWorkerEnv(runtimePath, extraDllDirs)
       }
     );
     this.child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk));
@@ -163,7 +164,7 @@ export class FluxWorker {
   }
 }
 
-function buildRuntimePathEnv(command: string): string {
+function buildRuntimePathEnv(command: string, extraDllDirs: string[] = []): string {
   const dirs: string[] = [];
   let current = dirname(command);
   for (let depth = 0; depth < 4; depth += 1) {
@@ -176,12 +177,43 @@ function buildRuntimePathEnv(command: string): string {
     }
     current = parent;
   }
+  for (const cudaDllDir of findBundledCudaDllDirs()) {
+    if (!dirs.includes(cudaDllDir)) {
+      dirs.push(cudaDllDir);
+    }
+  }
+  for (const extraDir of extraDllDirs) {
+    if (extraDir && existsSync(extraDir) && !dirs.includes(extraDir)) {
+      dirs.push(extraDir);
+    }
+  }
   return [...dirs, process.env.PATH ?? ""].join(delimiter);
 }
 
-function buildFluxWorkerEnv(command: string): NodeJS.ProcessEnv {
+function findBundledCudaDllDirs(): string[] {
+  const candidates = [
+    join(process.cwd(), "tools", "beellama-v0.2.0-cuda12.4"),
+    join(process.cwd(), "tools", "beellama"),
+    join(process.cwd(), "tools", "cudnn", "bin"),
+    join(process.cwd(), "tools", "cudnn"),
+    join(process.cwd(), "tools", "nvidia-cudnn", "bin"),
+    join(process.cwd(), "tools", "nvidia-cudnn"),
+    process.resourcesPath ? join(process.resourcesPath, "tools", "beellama-v0.2.0-cuda12.4") : null,
+    process.resourcesPath ? join(process.resourcesPath, "tools", "beellama") : null,
+    process.resourcesPath ? join(process.resourcesPath, "tools", "cudnn", "bin") : null,
+    process.resourcesPath ? join(process.resourcesPath, "tools", "cudnn") : null,
+    process.resourcesPath ? join(process.resourcesPath, "tools", "nvidia-cudnn", "bin") : null,
+    process.resourcesPath ? join(process.resourcesPath, "tools", "nvidia-cudnn") : null
+  ];
+  return candidates.filter(
+    (candidate): candidate is string =>
+      Boolean(candidate && (existsSync(join(candidate, "cublas64_12.dll")) || existsSync(join(candidate, "cudnn64_12.dll")) || existsSync(join(candidate, "cudnn.dll"))))
+  );
+}
+
+function buildFluxWorkerEnv(command: string, extraDllDirs: string[] = []): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    PATH: buildRuntimePathEnv(command),
+    PATH: buildRuntimePathEnv(command, extraDllDirs),
     PYTHONIOENCODING: "utf-8"
   };
   for (const key of ["SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA"] as const) {

@@ -608,6 +608,8 @@ export async function appendWebCapturePage(input: {
   extension?: ".png" | ".jpg" | ".jpeg" | ".webp";
   webMeta: WebPageSourceMeta;
   pageName?: string;
+  width?: number;
+  height?: number;
 }): Promise<ChapterSnapshot> {
   return withLibraryMutation(async () => {
     const locator = await findChapterLocation(input.chapterId);
@@ -634,7 +636,9 @@ export async function appendWebCapturePage(input: {
 
     const image = nativeImage.createFromPath(outputPath);
     const size = image.getSize();
-    if (!size.width || !size.height) {
+    const imageWidth = size.width || Math.round(Number(input.width) || 0);
+    const imageHeight = size.height || Math.round(Number(input.height) || 0);
+    if (!imageWidth || !imageHeight) {
       await safeUnlink(outputPath);
       throw new Error("웹 캡처 이미지를 읽지 못했습니다.");
     }
@@ -647,8 +651,8 @@ export async function appendWebCapturePage(input: {
       id: pageId,
       name: sanitizePageName(input.pageName || `web-${String(chapter.pages.length + 1).padStart(3, "0")}${extension}`),
       imagePath: outputPath,
-      width: size.width,
-      height: size.height,
+      width: imageWidth,
+      height: imageHeight,
       blocks: [],
       analysisStatus: "idle",
       webMeta,

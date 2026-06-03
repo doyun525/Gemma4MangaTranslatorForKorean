@@ -11,6 +11,8 @@ type AppWorkspaceProps = {
   webBrowserHostRef?: React.RefObject<HTMLDivElement | null>;
   webModeActive?: boolean;
   webSessionTitle?: string;
+  webBrowserCollapsed?: boolean;
+  webOverlaySelectionEnabled?: boolean;
   webCaptureBusy?: boolean;
   webTranslateAfterCapture?: boolean;
   selectedPage: MangaPage | null;
@@ -45,7 +47,11 @@ type AppWorkspaceProps = {
   onToggleBlockExcluded: ImageStageProps["onToggleBlockExcluded"];
   onOpenTranslationSource: () => void;
   onCaptureWebSegment?: () => void;
+  onReloadWebBrowse?: () => void;
+  onReapplyWebTranslationOverlay?: () => void;
   onCloseWebBrowse?: () => void;
+  onToggleWebBrowserCollapsed?: () => void;
+  onToggleWebOverlaySelection?: (enabled: boolean) => void;
   onToggleWebTranslateAfterCapture?: (enabled: boolean) => void;
   onOpenBatchImport: () => void;
   onOpenShareImport: () => void;
@@ -56,6 +62,8 @@ export function AppWorkspace({
   webBrowserHostRef,
   webModeActive = false,
   webSessionTitle,
+  webBrowserCollapsed = false,
+  webOverlaySelectionEnabled = false,
   webCaptureBusy = false,
   webTranslateAfterCapture = false,
   selectedPage,
@@ -90,13 +98,18 @@ export function AppWorkspace({
   onToggleBlockExcluded,
   onOpenTranslationSource,
   onCaptureWebSegment,
+  onReloadWebBrowse,
+  onReapplyWebTranslationOverlay,
   onCloseWebBrowse,
+  onToggleWebBrowserCollapsed,
+  onToggleWebOverlaySelection,
   onToggleWebTranslateAfterCapture,
   onOpenBatchImport,
   onOpenShareImport
 }: AppWorkspaceProps): React.JSX.Element {
   // Subscribe to custom-font changes so overlay text re-resolves families when fonts load/register.
   useFonts();
+  const showWebEditStage = webBrowserCollapsed;
   return (
     <section
       ref={workspacePanelRef}
@@ -111,59 +124,68 @@ export function AppWorkspace({
       onDrop={onWorkspaceDrop}
     >
       {webModeActive ? (
-        <div className="web-workspace-split">
+        <div className="web-workspace-single">
           <div className="web-browser-pane">
             <div className="web-browser-toolbar">
               <strong title={webSessionTitle}>{webSessionTitle || "웹 페이지"}</strong>
-              <label className="inline-toggle">
+              <Button size="sm" onClick={onReloadWebBrowse} disabled={webCaptureBusy || jobState.status === "running" || jobState.status === "starting"}>
+                새로고침
+              </Button>
+              <Button size="sm" onClick={onReapplyWebTranslationOverlay} disabled={webCaptureBusy || !selectedPage?.webMeta}>
+                번역 다시 적용
+              </Button>
+              <Button size="sm" onClick={onToggleWebBrowserCollapsed}>
+                {webBrowserCollapsed ? "펼치기" : "접기"}
+              </Button>
+              <label className="web-toolbar-check">
                 <input
                   type="checkbox"
-                  checked={webTranslateAfterCapture}
-                  disabled={webCaptureBusy}
-                  onChange={(event) => onToggleWebTranslateAfterCapture?.(event.target.checked)}
+                  checked={webOverlaySelectionEnabled}
+                  onChange={(event) => onToggleWebOverlaySelection?.(event.currentTarget.checked)}
                 />
-                캡처 후 번역
+                <span>블록 선택가능</span>
               </label>
-              <Button size="sm" variant="primary" disabled={webCaptureBusy} onClick={onCaptureWebSegment}>
-                {webCaptureBusy ? "캡처 중" : "현재 화면 캡처"}
-              </Button>
               <Button size="sm" onClick={onCloseWebBrowse}>
                 닫기
               </Button>
             </div>
-            <div ref={webBrowserHostRef} className="web-browser-host" aria-label="웹 브라우저 영역" />
-          </div>
-          <div className="web-capture-pane">
-            {selectedPage ? (
-              <WorkspaceStage
-                selectedPage={selectedPage}
-                selectedPageImageDataUrl={selectedPageImageDataUrl}
-                imageRef={imageRef}
-                stageRef={stageRef}
-                stageSize={stageSize}
-                selectedBlockId={selectedBlockId}
-                showTextBlocks={showTextBlocks}
-                showBlockChrome={showBlockChrome}
-                inpaintingMode={inpaintingMode}
-                inpaintingToolActive={inpaintingToolActive}
-                retouchCursor={retouchCursor}
-                retouchPreviewLayer={retouchPreviewLayer}
-                maskStrokes={maskStrokes}
-                regionSelectionActive={regionSelectionActive}
-                regionSelectionRect={regionSelectionRect}
-                fileDropActive={fileDropActive}
-                onStagePointerMove={onStagePointerMove}
-                onStagePointerUp={onStagePointerUp}
-                onStagePointerDown={onStagePointerDown}
-                onStagePointerLeave={onStagePointerLeave}
-                onBlockPointerDown={onBlockPointerDown}
-                onToggleBlockExcluded={onToggleBlockExcluded}
-              />
+            {showWebEditStage ? (
+              selectedPage ? (
+                <div className="web-collapsed-stage">
+                  {showingOriginalPeek ? <div className="peek-original-badge">원본</div> : null}
+                  <WorkspaceStage
+                    selectedPage={selectedPage}
+                    selectedPageImageDataUrl={selectedPageImageDataUrl}
+                    imageRef={imageRef}
+                    stageRef={stageRef}
+                    stageSize={stageSize}
+                    selectedBlockId={selectedBlockId}
+                    showTextBlocks={showTextBlocks}
+                    showBlockChrome={showBlockChrome}
+                    inpaintingMode={inpaintingMode}
+                    inpaintingToolActive={inpaintingToolActive}
+                    retouchCursor={retouchCursor}
+                    retouchPreviewLayer={retouchPreviewLayer}
+                    maskStrokes={maskStrokes}
+                    regionSelectionActive={regionSelectionActive}
+                    regionSelectionRect={regionSelectionRect}
+                    fileDropActive={fileDropActive}
+                    onStagePointerMove={onStagePointerMove}
+                    onStagePointerUp={onStagePointerUp}
+                    onStagePointerDown={onStagePointerDown}
+                    onStagePointerLeave={onStagePointerLeave}
+                    onBlockPointerDown={onBlockPointerDown}
+                    onToggleBlockExcluded={onToggleBlockExcluded}
+                  />
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <h2>캡처된 웹 페이지가 없습니다.</h2>
+                  <p>현재 화면 번역을 실행하면 캡처 이미지와 텍스트 블록이 보관함에 저장됩니다.</p>
+                </div>
+              )
             ) : (
-              <div className="empty-state compact">
-                <h2>아직 캡처한 화면이 없습니다.</h2>
-                <p>왼쪽 웹 페이지를 이동한 뒤 현재 화면을 캡처하세요.</p>
-              </div>
+              <div ref={webBrowserHostRef} className="web-browser-host" aria-label="웹 브라우저 영역" />
             )}
           </div>
         </div>

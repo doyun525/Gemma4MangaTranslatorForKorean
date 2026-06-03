@@ -25,17 +25,16 @@ describe("geometry helpers", () => {
 
   it("keeps boxes valid when dragged to the bottom-right edge", () => {
     expect(clampBbox({ x: 1000, y: 1000, w: 0, h: 0 })).toEqual({
-      x: 999,
-      y: 999,
-      w: 1,
-      h: 1
+      x: 999.99,
+      y: 999.99,
+      w: 0.01,
+      h: 0.01
     });
-    expect(clampBbox({ x: 999.8, y: 999.4, w: 4, h: 4 })).toEqual({
-      x: 999,
-      y: 999,
-      w: 1,
-      h: 1
-    });
+    const edge = clampBbox({ x: 999.8, y: 999.4, w: 4, h: 4 });
+    expect(edge.x).toBe(999.8);
+    expect(edge.y).toBe(999.4);
+    expect(edge.w).toBeCloseTo(0.2);
+    expect(edge.h).toBeCloseTo(0.6);
   });
 
   it("normalizes invalid saved chapter block boxes before IPC validation", () => {
@@ -82,8 +81,8 @@ describe("geometry helpers", () => {
       updatedAt: "2026-06-01T00:00:00.000Z"
     });
 
-    expect(chapter.pages[0].blocks[0].bbox).toEqual({ x: 999, y: 999, w: 1, h: 1 });
-    expect(chapter.pages[0].blocks[0].renderBbox).toEqual({ x: 999, y: 999, w: 1, h: 1 });
+    expect(chapter.pages[0].blocks[0].bbox).toEqual({ x: 999.99, y: 999.99, w: 0.01, h: 0.01 });
+    expect(chapter.pages[0].blocks[0].renderBbox).toEqual({ x: 999.99, y: 999.99, w: 0.01, h: 0.01 });
     expect(chapter.pages[0].blocks[0].bboxSpace).toBe("normalized_1000");
     expect(chapter.pages[0].blocks[0].renderBboxSpace).toBe("normalized_1000");
   });
@@ -122,7 +121,7 @@ describe("geometry helpers", () => {
     expect(block.bbox).toEqual({ x: 100, y: 100, w: 4, h: 4 });
     expect(effective.w).toBeGreaterThan(block.bbox.w);
     expect(effective.h).toBeGreaterThan(block.bbox.h);
-    expect(resolveEditableBlockBbox(block, { width: 1000, height: 1000 }, "가나다").key).toBe("renderBbox");
+    expect(resolveEditableBlockBbox(block, { width: 1000, height: 1000 }, "가나다").key).toBe("bbox");
   });
 
   it("respects an explicit renderBbox as a manual layout box", () => {
@@ -183,7 +182,7 @@ describe("geometry helpers", () => {
     expect(next.renderBbox).toEqual({ x: 120, y: 140, w: 240, h: 280 });
   });
 
-  it("stores a temporary readable render box when dragging a tiny source-only block", () => {
+  it("updates the stored source box when dragging a source-only block", () => {
     const block = {
       id: "block-1",
       type: "nonsolid" as const,
@@ -204,8 +203,8 @@ describe("geometry helpers", () => {
 
     const next = applyEditableBlockBbox(block, { x: 120, y: 120, w: 80, h: 60 }, { width: 1000, height: 1000 }, block.translatedText);
 
-    expect(next.bbox).toEqual(block.bbox);
-    expect(next.renderBbox).toEqual({ x: 120, y: 120, w: 80, h: 60 });
+    expect(next.bbox).toEqual({ x: 120, y: 120, w: 80, h: 60 });
+    expect(next.renderBbox).toBeUndefined();
   });
 
   it("offsets both source and render boxes when duplicating a block", () => {

@@ -2,12 +2,15 @@ import { once } from "node:events";
 import { createWriteStream, existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { AdmZip } from "../libraryStore/zipSafety";
 
 export const FLUX_RUNTIME_EXECUTABLE = "mgt-flux-klein.exe";
 export const FLUX_MODEL_REPO = "unsloth/FLUX.2-klein-4B-GGUF";
 export const FLUX_MODEL_FILE = "flux-2-klein-4b-Q4_K_M.gguf";
 export const FLUX_VAE_REPO = "black-forest-labs/FLUX.2-small-decoder";
 export const FLUX_VAE_FILE = "diffusion_pytorch_model.safetensors";
+export const FLUX_CUDNN_ZIP_FILE = "cudnn-windows-x86_64-9.10.2.21_cuda12-archive.zip";
+export const FLUX_CUDNN_URL = `https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/${FLUX_CUDNN_ZIP_FILE}`;
 
 export type FluxAssetProgress = {
   progressText: string;
@@ -85,6 +88,76 @@ export async function ensureRemoteFile(options: {
     onProgress: options.onProgress
   });
   return filePath;
+}
+
+export async function ensureFluxCudnnRuntime(options: {
+  cudnnDir: string;
+  signal?: AbortSignal;
+  onProgress?: (progress: FluxAssetProgress) => void;
+}): Promise<string | null> {
+  if (process.platform !== "win32") {
+    return null;
+  }
+
+  const existing = findFirstCudnnDirectory([
+    process.env.MGT_FLUX_CUDNN_BIN,
+    process.env.CUDNN_BIN,
+    process.env.CUDNN_PATH ? join(process.env.CUDNN_PATH, "bin") : undefined,
+    findCudnnBin(options.cudnnDir),
+    join(process.cwd(), "tools", "cudnn", "bin"),
+    join(process.cwd(), "tools", "cudnn"),
+    process.resourcesPath ? join(process.resourcesPath, "tools", "cudnn", "bin") : undefined,
+    process.resourcesPath ? join(process.resourcesPath, "tools", "cudnn") : undefined
+  ]);
+  if (existing) {
+    options.onProgress?.({
+      progressText: "cuDNN 런타임 캐시 사용",
+      detail: basename(existing),
+      progressMode: "log-only",
+      installLogLine: `cuDNN DLL을 사용합니다: ${existing}`
+    });
+    return existing;
+  }
+
+  await mkdir(options.cudnnDir, { recursive: true });
+  const archivePath = join(options.cudnnDir, FLUX_CUDNN_ZIP_FILE);
+  if (!(await isUsableRemoteFile(archivePath, FLUX_CUDNN_URL))) {
+    await downloadToFile({
+      url: FLUX_CUDNN_URL,
+      outputPath: archivePath,
+      signal: options.signal,
+      progressText: "cuDNN 런타임 다운로드 중",
+      label: FLUX_CUDNN_ZIP_FILE,
+      onProgress: options.onProgress
+    });
+  }
+
+  const binDir = join(options.cudnnDir, "bin");
+  await extractCudnnDlls(archivePath, binDir);
+  options.onProgress?.({
+    progressText: "cuDNN 런타임 준비 완료",
+    detail: "cudnn64_12.dll",
+    progressMode: "log-only",
+    installLogLine: `cuDNN DLL 압축 해제 완료: ${binDir}`
+  });
+  return binDir;
+}
+
+async function extractCudnnDlls(zipPath: string, binDir: string): Promise<void> {
+  await mkdir(binDir, { recursive: true });
+  const zip = new AdmZip(zipPath);
+  const entries = zip
+    .getEntries()
+    .filter((entry) => !entry.isDirectory && /(^|\/)bin\/cudnn[^/\\]*\.dll$/i.test(entry.entryName.replace(/\\/g, "/")));
+  if (entries.length === 0) {
+    throw new Error("cuDNN 압축 파일에서 cudnn DLL을 찾지 못했습니다.");
+  }
+  for (const entry of entries) {
+    await writeFile(join(binDir, basename(entry.entryName)), entry.getData());
+  }
+  if (!hasCudnnDll(binDir)) {
+    throw new Error("cuDNN DLL 압축 해제에 실패했습니다.");
+  }
 }
 
 async function downloadToFile(options: {
@@ -199,6 +272,31 @@ function findFirstExecutable(candidates: Array<string | null | undefined>): stri
   return null;
 }
 
+function findFirstCudnnDirectory(candidates: Array<string | null | undefined>): string | null {
+  for (const candidate of candidates) {
+    if (candidate && hasCudnnDll(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function findCudnnBin(rootDir: string): string | null {
+  const direct = join(rootDir, "bin");
+  if (hasCudnnDll(direct)) {
+    return direct;
+  }
+  return hasCudnnDll(rootDir) ? rootDir : null;
+}
+
+function hasCudnnDll(dir: string): boolean {
+  try {
+    return existsSync(dir) && (existsSync(join(dir, "cudnn64_12.dll")) || existsSync(join(dir, "cudnn.dll")));
+  } catch {
+    return false;
+  }
+}
+
 function findExecutable(rootDir: string, executableNames: string[]): string | null {
   if (!existsSync(rootDir)) {
     return null;
@@ -233,9 +331,9 @@ function findExecutable(rootDir: string, executableNames: string[]): string | nu
   return null;
 }
 
-function isUsableFile(filePath: string): boolean {
+function isUsableFile(filePath: string, minBytes = 1024 * 1024): boolean {
   try {
-    return existsSync(filePath) && statSync(filePath).isFile() && statSync(filePath).size > 1024 * 1024;
+    return existsSync(filePath) && statSync(filePath).isFile() && statSync(filePath).size > minBytes;
   } catch {
     return false;
   }

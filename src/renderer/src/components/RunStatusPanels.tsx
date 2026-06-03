@@ -12,6 +12,10 @@ export function RunPanel({
   onRunPending,
   onRunAll,
   onEnterInpainting,
+  onWebTranslateCurrent,
+  onWebTranslateFullPage,
+  onWebTranslateRegion,
+  webSessionActive,
   onCancelJob
 }: {
   currentChapter: ChapterSnapshot | null;
@@ -22,23 +26,48 @@ export function RunPanel({
   onRunPending: () => void;
   onRunAll: () => void;
   onEnterInpainting: () => void;
+  onWebTranslateCurrent?: () => void;
+  onWebTranslateFullPage?: () => void;
+  onWebTranslateRegion?: () => void;
+  webSessionActive?: boolean;
   onCancelJob: () => void;
 }): React.JSX.Element {
+  const isWebChapter = currentChapter?.sourceKind === "web";
   return (
     <section className="run-panel">
       <div className="run-title">
         <h2>{currentChapter?.title ?? "현재 화 없음"}</h2>
-        <small>{currentChapter ? `${currentChapter.pages.length}페이지` : "보관함에서 화를 열어 주세요."}</small>
+        <small>{currentChapter ? `${currentChapter.pages.length}페이지${isWebChapter ? " · 웹" : ""}` : "보관함에서 화를 열어 주세요."}</small>
       </div>
-      <Button variant="primary" fullWidth onClick={onRunPending} disabled={!currentChapter || jobActive}>
-        이어서 번역
-      </Button>
-      <Button fullWidth onClick={onRunAll} disabled={!currentChapter || jobActive}>
-        전체 다시 번역
-      </Button>
-      <Button fullWidth onClick={onEnterInpainting} disabled={!currentChapter || jobActive}>
-        인페인팅
-      </Button>
+      {isWebChapter ? (
+        <>
+          <Button variant="primary" fullWidth onClick={onWebTranslateCurrent} disabled={!currentChapter || !webSessionActive || jobActive}>
+            현재 화면 번역
+          </Button>
+          <Button fullWidth onClick={onWebTranslateFullPage} disabled={!currentChapter || !webSessionActive || jobActive}>
+            전체 스크롤 번역
+          </Button>
+          <Button fullWidth onClick={onWebTranslateRegion} disabled={!currentChapter || !webSessionActive || jobActive}>
+            선택영역 번역
+          </Button>
+          <Button fullWidth onClick={onEnterInpainting} disabled={!currentChapter || currentChapter.pages.length === 0 || jobActive}>
+            인페인팅
+          </Button>
+          {!webSessionActive ? <small className="muted-line">보관함에서 웹 화를 다시 열어 브라우저 세션을 복원하세요.</small> : null}
+        </>
+      ) : (
+        <>
+          <Button variant="primary" fullWidth onClick={onRunPending} disabled={!currentChapter || jobActive}>
+            이어서 번역
+          </Button>
+          <Button fullWidth onClick={onRunAll} disabled={!currentChapter || jobActive}>
+            전체 다시 번역
+          </Button>
+          <Button fullWidth onClick={onEnterInpainting} disabled={!currentChapter || jobActive}>
+            인페인팅
+          </Button>
+        </>
+      )}
       {jobActive ? (
         <Button variant="danger" fullWidth onClick={onCancelJob}>
           취소

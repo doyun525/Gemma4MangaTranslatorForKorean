@@ -37,6 +37,7 @@ const {
   PROMPT_KO_BBOX_LINES_MULTIVIEW,
   readOcrCandidateText,
   readPositiveInteger,
+  resolveOcrBboxHintLimit,
   resolvePromptCoordinateFrame,
   sanitizeHintLabel,
   sanitizeOcrTextForPrompt
@@ -78,6 +79,12 @@ const {
 function nowMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
+
+const OCR_WORKER_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+let ocrWorkerState = null;
+let ocrWorkerExitCleanupRegistered = false;
+let ocrRuntimeCache = null;
+let ocrRuntimeCachePromise = null;
 
 function truncateText(value, maxLength = MAX_LOG_PREVIEW_LENGTH) {
   const text = String(value ?? "");
@@ -187,6 +194,7 @@ function summarizeImageVariants(imageVariants) {
 function buildRequestSummary(server, options, imageVariants, promptText, systemPrompt) {
   const coordinateFrame = resolvePromptCoordinateFrame(options, imageVariants);
   const ocrBboxHints = Array.isArray(options.ocrBboxHints) ? options.ocrBboxHints : [];
+  const ocrBboxHintLimit = resolveOcrBboxHintLimit(options);
   return {
     endpoint: `${server.baseUrl}/${isOpenAICodexProvider(options) ? "responses" : "chat/completions"}`,
     model: resolveRequestModelName(options),
@@ -198,7 +206,8 @@ function buildRequestSummary(server, options, imageVariants, promptText, systemP
     bboxCoordinateSpace: coordinateFrame.space,
     bboxCoordinateFrame: coordinateFrame.frame,
     ocrBboxHintCount: ocrBboxHints.length,
-    ocrBboxHints: ocrBboxHints.slice(0, 80).map((hint) => ({
+    ocrBboxHintLimit,
+    ocrBboxHints: ocrBboxHints.slice(0, ocrBboxHintLimit).map((hint) => ({
       id: hint.id,
       label: hint.label,
       x1: hint.x1,
@@ -1813,8 +1822,13 @@ function buildCropRetryPrompt(targets = []) {
     "Image 1 is the full page for context only. Each following image is an expanded crop for exactly one target id.",
     "Do not detect new ids or output extra ids.",
     "For each target, ignore any previous model OCR/translation. The crop image itself is the authority.",
-    "Read the real Japanese text inside that crop for the same target id. If the crop contains the target text, return the tight crop-coordinate bbox for the visible Japanese glyphs.",
-    "Several target ids may point to the same crop image. In that case, use the larger crop as context and return separate records for the separate visible Japanese lettering groups represented by those target ids.",
+    "Read all real Japanese or English text inside that crop for the same target id, then translate it naturally into Korean.",
+    "Every ko field must be Korean Hangul. Do not output English, Chinese, Japanese, romaji, or pinyin in ko.",
+    "Preserve Arabic numerals, slashes, decimal points, counters, issue numbers, chapter/page fractions, and UI pagination patterns. Do not spell numbers out in Korean unless the original source itself writes the number as words.",
+    "Preserve sentence-ending intent in ko. If the source is a question, the Korean ko should normally end with ?. If the source is an exclamation or emphatic shout, keep ! when it preserves the tone. Do not drop ? or ! from dialogue, captions, or labels when it changes the reading.",
+    "For UI labels such as Chapter 104/104, Page 2/22, Login, Menu, or Filter, translate labels compactly if useful but keep numbers and separators unchanged, e.g. Chapter 104/104 Page 2/22 -> 챕터 104/104 페이지 2/22.",
+    "If the crop contains the target text, return the tight crop-coordinate bbox for the visible source glyphs.",
+    "Several target ids may point to the same crop image. In that case, use the larger crop as context and return separate records for the separate visible source lettering groups represented by those target ids.",
     "If a large sound effect was split into nearby target ids, keep those ids separate when the visible lettering groups are separate. Do not create one giant combined translation over the whole crop.",
     "For sound-check targets, decide whether the crop is standalone printed sound/reaction lettering, ordinary language, or non-text. Sound/reaction lettering should become compact Korean effect lettering, not a scene description and not a mechanical kana transliteration.",
     "If the crop text is inside a speech bubble, caption, note, sign, or label, treat it as ordinary language unless the visible lettering is unmistakably standalone sound/reaction lettering.",
@@ -1822,17 +1836,18 @@ function buildCropRetryPrompt(targets = []) {
     "# Output",
     "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
     "Output exactly one record for each target id, using exactly these keys: id, type, textRole, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.",
-    "x1, y1, x2, y2 are integer crop image pixel coordinates around the visible Japanese glyph ink for that target, not full-page coordinates.",
+    "x1, y1, x2, y2 are integer crop image pixel coordinates around the visible source glyph ink for that target, not full-page coordinates.",
     "Crop coordinates start at 0,0 in the top-left corner of the crop image. x1 and x2 must be within the crop image width; y1 and y2 must be within the crop image height.",
     "Never copy the target bbox or crop origin numbers into x1/y1/x2/y2; those are page coordinates, not crop coordinates.",
     "textRole is one of sound, ordinary, or nontext.",
     "confidence is 0.00 to 1.00 for the corrected OCR+translation.",
-    "If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real Japanese text and every glyph, including final/trailing kana, is read correctly. If there is any doubt, use confidence below 1.00.",
-    "If the crop is decoration, panel trim, texture, non-Japanese art, or otherwise not real Japanese text, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text].",
-    "If the crop still has readable Japanese, never output only [?]; give the best OCR and concise natural Korean.",
+    "If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real Japanese or English text and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00.",
+    "If the crop is decoration, panel trim, texture, non-Japanese/non-English art, or otherwise not real Japanese or English text, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text].",
+    "If the crop still has readable Japanese or English, never output only [?]; give the best OCR and concise natural Korean.",
     "Use type nonsolid for every accepted text target.",
     "If textRole is ordinary, keep dialogue/caption/label Korean natural, horizontally readable, and do not apply sound-effect rules.",
-    "For ordinary textRole, translate the Japanese lexical meaning. Never replace an ordinary word, noun, label, or dialogue fragment with a Korean sound effect.",
+    "For ordinary textRole, translate the source lexical meaning. Never replace an ordinary word, noun, label, or dialogue fragment with a Korean sound effect.",
+    "For ordinary textRole, keep source numerals as digits in ko. Do not convert 2/22, 104/104, years, grades, counts, or menu/page numbers into Korean number words.",
     "Short kana, handwritten words, or tall vertical bbox shapes are not enough to make textRole sound.",
     "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
     "If textRole is sound, choose compact Korean effect lettering that fits the scene and visible rhythm. Do not mechanically transliterate Japanese kana when that would sound awkward in Korean.",
@@ -2069,9 +2084,31 @@ async function warmupOcrRuntime(options = {}) {
     return { warmed: false, provider, reason: "provider-not-paddle" };
   }
   const runtime = await ensurePaddleOcrRuntime(options);
+  if (!shouldUsePersistentOcrWorker(options, provider)) {
+    return {
+      warmed: true,
+      provider,
+      persistentWorker: false,
+      note: "Paddle OCR runtime was prepared. Persistent OCR worker is disabled by configuration.",
+      runtimeDir: runtime?.runtimeDir || null,
+      runtimeVariant: runtime?.runtimeVariant || null,
+      packageDir: runtime?.packageDir || null,
+      pythonPath: runtime?.pythonPath || null,
+      prepared: Boolean(runtime?.prepared),
+      diagnostics: runtime?.diagnostics || []
+    };
+  }
+  const handleOcrOutput = createOcrCommandProgressHandler(options, {
+    progressText: "Paddle OCR 워커 준비 중"
+  });
+  const worker = await getPersistentOcrWorker(options, provider, runtime, handleOcrOutput);
   return {
     warmed: true,
     provider,
+    persistentWorker: true,
+    workerPid: worker.child?.pid || null,
+    workerKey: worker.key,
+    note: "Paddle OCR worker is running and will reuse loaded OCR model objects across requests.",
     runtimeDir: runtime?.runtimeDir || null,
     runtimeVariant: runtime?.runtimeVariant || null,
     packageDir: runtime?.packageDir || null,
@@ -2088,6 +2125,374 @@ function isPaddleOcrProvider(provider) {
 function isTruthy(value) {
   const text = String(value ?? "").trim().toLowerCase();
   return ["1", "true", "yes", "y", "on"].includes(text);
+}
+
+function shouldUsePersistentOcrWorker(options = {}, provider = resolveOcrBboxProvider(options)) {
+  if (!isPaddleOcrProvider(provider)) {
+    return false;
+  }
+  if (isTruthy(options.disableOcrWorker) || isTruthy(process.env.MANGA_TRANSLATOR_DISABLE_OCR_WORKER)) {
+    return false;
+  }
+  return true;
+}
+
+function buildOcrWorkerKey(options = {}, provider = resolveOcrBboxProvider(options), runtime = null) {
+  return JSON.stringify({
+    provider,
+    device: resolveOcrDevice(options),
+    batchSize: resolveOcrBatchSize(options),
+    pythonPath: resolveOcrRuntimePythonPath(runtime, options),
+    runtimeDir: runtime?.runtimeDir || null,
+    runtimeVariant: runtime?.runtimeVariant || null,
+    packageDir: runtime?.packageDir || null
+  });
+}
+
+async function getPersistentOcrWorker(options = {}, provider = resolveOcrBboxProvider(options), runtime = null, onOutput = null) {
+  const key = buildOcrWorkerKey(options, provider, runtime);
+  if (ocrWorkerState?.key === key && !ocrWorkerState.closed) {
+    ocrWorkerState.touch();
+    await ocrWorkerState.readyPromise;
+    return ocrWorkerState;
+  }
+
+  await stopOcrWorker();
+  const pythonPath = resolveOcrRuntimePythonPath(runtime, options);
+  const scriptPath = path.join(__dirname, "paddleocr-vl-bboxes.py");
+  const args = [
+    "-u",
+    scriptPath,
+    "--serve",
+    "--provider",
+    provider,
+    "--batch-size",
+    String(resolveOcrBatchSize(options)),
+    "--device",
+    resolveOcrDevice(options)
+  ];
+  const child = spawn(pythonPath, args, {
+    shell: false,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: buildOcrRuntimeEnv(options, runtime)
+  });
+
+  const state = {
+    key,
+    child,
+    command: `${quoteCommandArg(pythonPath)} ${args.map(quoteCommandArg).join(" ")}`,
+    stdout: "",
+    stderr: "",
+    closed: false,
+    pending: new Map(),
+    chain: Promise.resolve(),
+    idleTimer: null,
+    ready: false,
+    readyPromise: null,
+    readyResolve: null,
+    readyReject: null,
+    touch() {
+      if (this.idleTimer) {
+        clearTimeout(this.idleTimer);
+      }
+      this.idleTimer = setTimeout(() => {
+        void stopOcrWorker(this);
+      }, OCR_WORKER_IDLE_TIMEOUT_MS);
+      this.idleTimer.unref?.();
+    }
+  };
+  state.readyPromise = new Promise((resolve, reject) => {
+    state.readyResolve = resolve;
+    state.readyReject = reject;
+  });
+  ocrWorkerState = state;
+  registerOcrWorkerExitCleanup();
+  state.touch();
+
+  const stdoutLines = createRawOutputLineEmitter((line) => {
+    state.stdout = shrinkBuffer(state.stdout, `${line}\n`, 30000);
+    handleOcrWorkerStdoutLine(state, line, onOutput);
+  });
+  const stderrLines = createRawOutputLineEmitter((line) => {
+    state.stderr = shrinkBuffer(state.stderr, `${line}\n`, 30000);
+    handleOcrWorkerStderrLine(state, line, onOutput);
+  });
+
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => stdoutLines.write(chunk));
+  child.stderr?.on("data", (chunk) => stderrLines.write(chunk));
+  child.on("error", (error) => {
+    stdoutLines.flush();
+    stderrLines.flush();
+    rejectOcrWorkerState(state, error);
+  });
+  child.on("exit", (code, signal) => {
+    stdoutLines.flush();
+    stderrLines.flush();
+    const error = createDetailedError(`OCR worker exited (${code ?? "null"}, ${signal ?? "null"}).`, {
+      command: state.command,
+      stdoutPreview: truncateText(state.stdout),
+      stderrPreview: truncateText(state.stderr)
+    });
+    state.closed = true;
+    if (ocrWorkerState === state) {
+      ocrWorkerState = null;
+    }
+    if (!state.ready) {
+      state.readyReject?.(error);
+    }
+    rejectOcrWorkerState(state, error);
+  });
+
+  await state.readyPromise;
+  return state;
+}
+
+function createRawOutputLineEmitter(onLine) {
+  let pending = "";
+  const emitLine = (line) => {
+    const text = String(line ?? "").replace(/\u001b\[[0-9;]*m/g, "").trim();
+    if (text) {
+      onLine(text);
+    }
+  };
+  return {
+    write(chunk) {
+      pending += String(chunk ?? "");
+      while (pending.length > 0) {
+        const newlineIndex = pending.search(/[\r\n]/);
+        if (newlineIndex < 0) {
+          if (pending.length > 8192) {
+            emitLine(pending.slice(0, 8192));
+            pending = pending.slice(8192);
+          }
+          return;
+        }
+        const line = pending.slice(0, newlineIndex);
+        let nextIndex = newlineIndex + 1;
+        if (pending[newlineIndex] === "\r" && pending[nextIndex] === "\n") {
+          nextIndex += 1;
+        }
+        pending = pending.slice(nextIndex);
+        emitLine(line);
+      }
+    },
+    flush() {
+      if (!pending) {
+        return;
+      }
+      emitLine(pending);
+      pending = "";
+    }
+  };
+}
+
+function handleOcrWorkerStdoutLine(state, line, fallbackOutput = null) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    parsed = null;
+  }
+  if (parsed?.type === "ready") {
+    state.ready = true;
+    state.readyResolve?.(parsed);
+    return;
+  }
+  if (parsed?.type === "result") {
+    const entry = state.pending.get(String(parsed.id || ""));
+    if (entry) {
+      entry.resolve(parsed);
+    }
+    return;
+  }
+  if (parsed?.type === "error") {
+    const entry = state.pending.get(String(parsed.id || ""));
+    const error = createDetailedError(parsed.message || "OCR worker request failed.", {
+      command: state.command,
+      stdoutPreview: truncateText(state.stdout),
+      stderrPreview: truncateText(state.stderr)
+    });
+    if (entry) {
+      entry.reject(error);
+    } else {
+      fallbackOutput?.(line);
+    }
+    return;
+  }
+
+  const active = findActiveOcrWorkerRequest(state);
+  if (active?.onOutput) {
+    active.onOutput(line);
+    return;
+  }
+  fallbackOutput?.(line);
+}
+
+function handleOcrWorkerStderrLine(state, line, fallbackOutput = null) {
+  const active = findActiveOcrWorkerRequest(state);
+  if (active?.onOutput) {
+    active.onOutput(line);
+    return;
+  }
+  fallbackOutput?.(line);
+}
+
+function findActiveOcrWorkerRequest(state) {
+  for (const entry of state.pending.values()) {
+    return entry;
+  }
+  return null;
+}
+
+function rejectOcrWorkerState(state, error) {
+  for (const entry of state.pending.values()) {
+    entry.reject(error);
+  }
+  state.pending.clear();
+}
+
+async function runPersistentOcrWorkerBatch(options = {}, provider, runtime, items, progressPath, onOutput = null) {
+  const worker = await getPersistentOcrWorker(options, provider, runtime, onOutput);
+  const request = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    items,
+    progress: progressPath || null,
+    batchSize: resolveOcrBatchSize(options)
+  };
+  const run = worker.chain.catch(() => undefined).then(() => executeOcrWorkerRequest(worker, request, {
+    timeoutMs: resolveOcrBboxTimeoutMs(items.length),
+    signal: options.abortSignal,
+    onOutput
+  }));
+  worker.chain = run.catch(() => undefined);
+  return run;
+}
+
+function executeOcrWorkerRequest(worker, request, { timeoutMs, signal, onOutput } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+    if (worker.closed || !worker.child || worker.child.exitCode !== null || worker.child.signalCode !== null) {
+      reject(createDetailedError("OCR worker is not running.", {
+        command: worker.command,
+        stdoutPreview: truncateText(worker.stdout),
+        stderrPreview: truncateText(worker.stderr)
+      }));
+      return;
+    }
+    if (!worker.child.stdin?.writable) {
+      reject(createDetailedError("OCR worker input is not writable.", {
+        command: worker.command,
+        stdoutPreview: truncateText(worker.stdout),
+        stderrPreview: truncateText(worker.stderr)
+      }));
+      return;
+    }
+
+    const id = String(request.id);
+    let timeout = null;
+    let settled = false;
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      signal?.removeEventListener?.("abort", onAbort);
+      worker.pending.delete(id);
+      worker.touch();
+    };
+    const settleResolve = (payload) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({
+        stdout: worker.stdout,
+        stderr: worker.stderr,
+        payload,
+        command: worker.command,
+        persistentWorker: true,
+        workerPid: worker.child?.pid || null,
+        workerKey: worker.key
+      });
+    };
+    const settleReject = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      terminateChildProcessTree(worker.child);
+      settleReject(createAbortError());
+    };
+
+    worker.pending.set(id, {
+      onOutput,
+      resolve: settleResolve,
+      reject: settleReject
+    });
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        terminateChildProcessTree(worker.child);
+        settleReject(createDetailedError("OCR worker request timed out.", {
+          command: worker.command,
+          timeoutMs,
+          stdoutPreview: truncateText(worker.stdout),
+          stderrPreview: truncateText(worker.stderr)
+        }));
+      }, timeoutMs);
+    }
+
+    try {
+      const line = `${JSON.stringify(request)}\n`;
+      worker.child.stdin?.write(line, "utf8", (error) => {
+        if (error) {
+          settleReject(error);
+        }
+      });
+    } catch (error) {
+      settleReject(error);
+    }
+  });
+}
+
+async function stopOcrWorker(expectedState = null) {
+  const state = expectedState || ocrWorkerState;
+  if (!state || state.closed) {
+    return;
+  }
+  state.closed = true;
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+  if (ocrWorkerState === state) {
+    ocrWorkerState = null;
+  }
+  try {
+    if (state.child?.stdin?.writable) {
+      state.child.stdin.write(`${JSON.stringify({ type: "shutdown" })}\n`);
+      state.child.stdin.end();
+    }
+  } catch {
+    // Fall through to process termination.
+  }
+  terminateChildProcessTree(state.child);
+}
+
+function registerOcrWorkerExitCleanup() {
+  if (ocrWorkerExitCleanupRegistered) {
+    return;
+  }
+  ocrWorkerExitCleanupRegistered = true;
+  process.once("exit", () => {
+    if (ocrWorkerState?.child && !ocrWorkerState.child.killed) {
+      ocrWorkerState.child.kill();
+    }
+  });
 }
 
 async function collectOcrBboxHints(options = {}) {
@@ -2133,6 +2538,9 @@ async function collectOcrBboxHints(options = {}) {
         packageDir: commandResult.packageDir || null,
         pythonPath: commandResult.pythonPath || null,
         runtimePrepared: commandResult.runtimePrepared || false,
+        persistentWorker: commandResult.persistentWorker || false,
+        workerPid: commandResult.workerPid || null,
+        workerKey: commandResult.workerKey || null,
         hintCount: hints.length,
         stdoutPreview: truncateText(commandResult.stdout.trim(), 1200),
         stderrPreview: truncateText(commandResult.stderr.trim(), 1200),
@@ -2177,11 +2585,14 @@ function buildOcrBboxResult(hints = [], diagnostics = [], options = {}) {
 }
 
 function countOcrTextEvidence(hints = []) {
-  return hints.reduce((count, hint) => count + (hasJapaneseTextEvidence(readOcrCandidateText(hint)) ? 1 : 0), 0);
+  return hints.reduce((count, hint) => count + (hasTranslatableTextEvidence(readOcrCandidateText(hint)) ? 1 : 0), 0);
 }
 
-function hasJapaneseTextEvidence(value) {
+function hasTranslatableTextEvidence(value) {
   const text = String(value ?? "");
+  if (/[A-Za-z]{2,}/.test(text) || /(^|[^A-Za-z])[AIai]([^A-Za-z]|$)/.test(text)) {
+    return true;
+  }
   for (const char of text) {
     const code = char.codePointAt(0);
     if (
@@ -2212,17 +2623,32 @@ async function runOcrBboxCommand(options = {}, provider = "external-command") {
   await mkdir(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, "ocr-bbox-hints.json");
   const runtime = isPaddleOcrProvider(provider) ? await ensurePaddleOcrRuntime(options) : null;
-  const command = buildOcrBboxCommand(options, provider, outputPath, runtime);
+  const usePersistentWorker = isPaddleOcrProvider(provider) && shouldUsePersistentOcrWorker(options, provider);
+  const command = usePersistentWorker
+    ? buildOcrWorkerKey(options, provider, runtime)
+    : buildOcrBboxCommand(options, provider, outputPath, runtime);
   emitRuntimeProgress(options, "ocr_running", "Paddle OCR 모델 다운로드/위치 분석 중", `장치: ${resolveOcrDeviceLabel(options)}`);
   const handleOcrOutput = createOcrCommandProgressHandler(options, {
     progressText: "Paddle OCR 모델 다운로드/위치 분석 중"
   });
-  const { stdout, stderr } = await runShellCommand(command, {
-    timeoutMs: resolveOcrBboxTimeoutMs(1),
-    env: buildOcrRuntimeEnv(options, runtime),
-    signal: options.abortSignal,
-    onOutput: handleOcrOutput
-  });
+  let workerResult = null;
+  let stdout = "";
+  let stderr = "";
+  if (usePersistentWorker) {
+    workerResult = await runPersistentOcrWorkerBatch(options, provider, runtime, [{
+      image: options.imagePath,
+      output: outputPath
+    }], null, handleOcrOutput);
+    stdout = workerResult.stdout || "";
+    stderr = workerResult.stderr || "";
+  } else {
+    ({ stdout, stderr } = await runShellCommand(command, {
+      timeoutMs: resolveOcrBboxTimeoutMs(1),
+      env: buildOcrRuntimeEnv(options, runtime),
+      signal: options.abortSignal,
+      onOutput: handleOcrOutput
+    }));
+  }
 
   let rawText = "";
   if (existsSync(outputPath)) {
@@ -2249,6 +2675,9 @@ async function runOcrBboxCommand(options = {}, provider = "external-command") {
     pythonPath: runtime?.pythonPath || null,
     runtimePrepared: Boolean(runtime?.prepared),
     runtimeDiagnostics: runtime?.diagnostics || [],
+    persistentWorker: usePersistentWorker,
+    workerPid: workerResult?.workerPid || null,
+    workerKey: workerResult?.workerKey || null,
     stdout,
     stderr,
     payload: JSON.parse(rawText)
@@ -2289,7 +2718,10 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
   await writeFile(batchPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
   await writeFile(progressPath, "", "utf8");
 
-  const command = buildOcrBboxBatchCommand(batchOptions, batchPath, runtime, progressPath);
+  const usePersistentWorker = shouldUsePersistentOcrWorker(batchOptions, provider);
+  const command = usePersistentWorker
+    ? buildOcrWorkerKey(batchOptions, provider, runtime)
+    : buildOcrBboxBatchCommand(batchOptions, batchPath, runtime, progressPath);
   emitRuntimeProgress(batchOptions, "ocr_running", "Paddle OCR 배치 위치 분석 중", `${items.length}페이지, 장치: ${resolveOcrDeviceLabel(batchOptions)}`, {
     pageIndex: null,
     pageTotal: null,
@@ -2319,33 +2751,45 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
       const batchTotal = readPositiveInteger(firstOptions.ocrBatchTotal) || progress.total;
       const pageIndex = readPositiveInteger(pageOptions.ocrPageIndex) || completedBefore + progress.index;
       const pageTotal = readPositiveInteger(pageOptions.ocrPageTotal) || batchTotal;
+      const tileIndex = readPositiveInteger(pageOptions.ocrTileIndex);
+      const tileTotal = readPositiveInteger(pageOptions.ocrTileTotal);
+      const unitIndex = tileIndex || pageIndex;
+      const unitTotal = tileTotal || pageTotal;
+      const unitLabel = tileTotal ? "타일" : "페이지";
       const completedCount = phase === "start"
-        ? Math.max(0, completedBefore + progress.index - 1)
-        : completedBefore + progress.index;
+        ? Math.max(0, (tileIndex || completedBefore + progress.index) - 1)
+        : (tileIndex || completedBefore + progress.index);
       emitRuntimeProgress(
         batchOptions,
         "ocr_running",
-        `${pageIndex} / ${pageTotal} 페이지 Paddle OCR 분석 중`,
-        phase === "start" ? "페이지 처리 시작" : `${progress.count}개 후보`,
+        `${unitIndex} / ${unitTotal} ${unitLabel} Paddle OCR 분석 중`,
+        phase === "start" ? `${unitLabel} 처리 시작` : `${progress.count}개 후보`,
         {
-          progressCurrent: Math.min(pageTotal, completedCount),
-          progressTotal: pageTotal,
-          pageIndex,
-          pageTotal
+          progressCurrent: Math.min(unitTotal, completedCount),
+          progressTotal: unitTotal,
+          pageIndex: tileTotal ? null : pageIndex,
+          pageTotal: tileTotal ? null : pageTotal
         }
       );
   };
   const progressPoller = createOcrBatchProgressFilePoller(progressPath, handleProgressLine);
   let stdout = "";
   let stderr = "";
+  let workerResult = null;
   try {
     progressPoller.start();
-    ({ stdout, stderr } = await runShellCommand(command, {
-      timeoutMs: resolveOcrBboxTimeoutMs(items.length),
-      env: buildOcrRuntimeEnv(batchOptions, runtime),
-      signal: batchOptions.abortSignal,
-      onOutput: handleProgressLine
-    }));
+    if (usePersistentWorker) {
+      workerResult = await runPersistentOcrWorkerBatch(batchOptions, provider, runtime, items, progressPath, handleProgressLine);
+      stdout = workerResult.stdout || "";
+      stderr = workerResult.stderr || "";
+    } else {
+      ({ stdout, stderr } = await runShellCommand(command, {
+        timeoutMs: resolveOcrBboxTimeoutMs(items.length),
+        env: buildOcrRuntimeEnv(batchOptions, runtime),
+        signal: batchOptions.abortSignal,
+        onOutput: handleProgressLine
+      }));
+    }
   } finally {
     progressPoller.stop();
   }
@@ -2374,6 +2818,9 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
         packageDir: runtime?.packageDir || null,
         pythonPath: runtime?.pythonPath || null,
         runtimePrepared: Boolean(runtime?.prepared),
+        persistentWorker: usePersistentWorker,
+        workerPid: workerResult?.workerPid || null,
+        workerKey: workerResult?.workerKey || null,
         hintCount: hints.length,
         stdoutPreview: truncateText(stdout.trim(), 1200),
         stderrPreview: truncateText(stderr.trim(), 1200),
@@ -2394,11 +2841,42 @@ async function ensurePaddleOcrRuntime(options = {}) {
   await mkdir(path.join(runtimeDir, "tmp"), { recursive: true });
 
   emitRuntimeProgress(options, "ocr_preparing", "Paddle OCR 런타임 확인 중", `${resolveOcrDeviceLabel(options)}, ${runtimeVariant}`);
+  const cacheKey = buildOcrRuntimeCacheKey(options, { runtimeDir, runtimeVariant, venvPython, packageDir });
+  if (ocrRuntimeCache?.key === cacheKey) {
+    emitRuntimeProgress(options, "ocr_preparing", "Paddle OCR 런타임 캐시 재사용", `${resolveOcrDeviceLabel(options)}, ${runtimeVariant}`);
+    return cloneCachedOcrRuntime(ocrRuntimeCache.runtime);
+  }
+  if (ocrRuntimeCachePromise?.key === cacheKey) {
+    const runtime = await ocrRuntimeCachePromise.promise;
+    return cloneCachedOcrRuntime(runtime);
+  }
+
+  const runtimePromise = ensurePaddleOcrRuntimeUncached(options, {
+    diagnostics,
+    runtimeDir,
+    runtimeVariant,
+    venvDir,
+    venvPython,
+    packageDir,
+    cacheKey
+  });
+  ocrRuntimeCachePromise = { key: cacheKey, promise: runtimePromise };
+  try {
+    return await runtimePromise;
+  } finally {
+    if (ocrRuntimeCachePromise?.promise === runtimePromise) {
+      ocrRuntimeCachePromise = null;
+    }
+  }
+}
+
+async function ensurePaddleOcrRuntimeUncached(options, state) {
+  const { diagnostics, runtimeDir, runtimeVariant, venvDir, venvPython, packageDir, cacheKey } = state;
   let importCheck = existsSync(venvPython)
     ? await checkPaddleOcrImport(venvPython, options, { runtimeDir, includePackageDir: false })
     : { ok: false, message: "venv python is missing" };
   if (existsSync(venvPython) && importCheck.ok) {
-    return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: venvPython, prepared: true, usesTargetPackageDir: false, diagnostics });
+    return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: venvPython, prepared: true, usesTargetPackageDir: false, diagnostics }, cacheKey);
   }
 
   const bootstrapPython = resolveBootstrapPython(options);
@@ -2410,7 +2888,7 @@ async function ensurePaddleOcrRuntime(options = {}) {
     ? await checkPaddleOcrImport(bootstrapPython, options, { runtimeDir, packageDir, includePackageDir: true })
     : importCheck;
   if (!existsSync(venvPython) && importCheck.ok) {
-    return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: bootstrapPython, prepared: true, usesTargetPackageDir: true, diagnostics: [{ step: "embedded-python-ready", packageDir }] });
+    return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: bootstrapPython, prepared: true, usesTargetPackageDir: true, diagnostics: [{ step: "embedded-python-ready", packageDir }] }, cacheKey);
   }
 
   const targetInstallLooksBroken = hasOcrInstallMarker(packageDir, runtimeVariant) || hasExpectedOcrPackages(packageDir, options);
@@ -2517,12 +2995,34 @@ async function ensurePaddleOcrRuntime(options = {}) {
     installLogLine: "Paddle OCR 설치가 완료되었습니다."
   });
 
-  return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: installPython, prepared: true, usesTargetPackageDir: Boolean(targetDir), diagnostics });
+  return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: installPython, prepared: true, usesTargetPackageDir: Boolean(targetDir), diagnostics }, cacheKey);
 }
 
-async function finalizePaddleOcrRuntime(options, runtime) {
+async function finalizePaddleOcrRuntime(options, runtime, cacheKey = null) {
   await ensurePaddleOcrModelAssetsDownloaded(options, runtime);
+  if (cacheKey) {
+    ocrRuntimeCache = { key: cacheKey, runtime: cloneCachedOcrRuntime(runtime) };
+  }
   return runtime;
+}
+
+function buildOcrRuntimeCacheKey(options = {}, runtime) {
+  return JSON.stringify({
+    provider: resolveOcrBboxProvider(options),
+    device: resolveOcrDevice(options),
+    runtimeDir: path.resolve(runtime.runtimeDir),
+    runtimeVariant: runtime.runtimeVariant,
+    venvPython: path.resolve(runtime.venvPython),
+    packageDir: path.resolve(runtime.packageDir),
+    gpuCudaTag: resolveOcrGpuCudaTag(options)
+  });
+}
+
+function cloneCachedOcrRuntime(runtime) {
+  return {
+    ...runtime,
+    diagnostics: Array.isArray(runtime?.diagnostics) ? [...runtime.diagnostics] : []
+  };
 }
 
 function ensureEmbeddedPythonPackagePath(pythonPath, packageDir, runtimeDir = null) {
@@ -3748,7 +4248,7 @@ async function requestTranslation(server, options) {
     if (ocrBboxResult.diagnostics.length > 0) {
       requestSummary.ocrBboxDiagnostics = ocrBboxResult.diagnostics;
     }
-    emitRuntimeProgress(promptOptions, "page_done", "페이지 텍스트 없음", "Paddle OCR에서 일본어 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다.");
+    emitRuntimeProgress(promptOptions, "page_done", "페이지 텍스트 없음", "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다.");
     return {
       requestBody: requestSummary,
       rawResponse: {
@@ -4321,6 +4821,7 @@ module.exports = {
   requestCropRetryTranslation,
   saveArtifacts,
   startServer,
+  stopOcrWorker,
   stopServer,
   testModelReply,
   warmupOcrRuntime

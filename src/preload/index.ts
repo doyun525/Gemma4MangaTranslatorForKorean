@@ -23,8 +23,12 @@ import type {
   CaptureWebSegmentResult,
   OpenWebBrowseRequest,
   OpenWebBrowseResult,
+  PageImageExportRequest,
+  PageImageExportResult,
   RegionAnalysisRequest,
   RegionAnalysisResult,
+  ReopenWebChapterRequest,
+  RenderWebOverlayRequest,
   SavePageBlocksRequest,
   SampleBlockBackgroundsRequest,
   SampleBlockBackgroundsResult,
@@ -35,9 +39,13 @@ import type {
   StartAnalysisRequest,
   StartAnalysisResult,
   ScrollWebBrowserRequest,
+  SelectWebRegionRequest,
+  SelectWebRegionResult,
   SetWebAutoTranslateRequest,
+  SetWebOverlayInteractionRequest,
   SyncWebBrowserBoundsRequest,
   WebBrowseState,
+  WebOverlayBlockSelectionEvent,
   WorkShareExportRequest,
   WorkShareExportResult,
   WorkShareImportPreview,
@@ -97,21 +105,37 @@ const api = {
     ipcRenderer.invoke("inpainting:sample-color", request),
   exportInpaintingResults: (request: InpaintingExportRequest): Promise<InpaintingExportResult> =>
     ipcRenderer.invoke("inpainting:export-results", request),
+  exportPageImages: (request: PageImageExportRequest): Promise<PageImageExportResult | null> =>
+    ipcRenderer.invoke("page-export:images", request),
   disposeInpaintingEngine: (): Promise<{ disposed: boolean }> => ipcRenderer.invoke("inpainting:dispose-engine"),
   cancelJob: () => ipcRenderer.invoke("job:cancel"),
   openWebBrowse: (request: OpenWebBrowseRequest): Promise<OpenWebBrowseResult> => ipcRenderer.invoke("web:open", request),
+  reopenWebChapter: (request: ReopenWebChapterRequest): Promise<OpenWebBrowseResult> =>
+    ipcRenderer.invoke("web:reopen-chapter", request),
   closeWebBrowse: (sessionId: string): Promise<{ closed: boolean }> => ipcRenderer.invoke("web:close", { sessionId }),
   captureWebSegment: (request: CaptureWebSegmentRequest): Promise<CaptureWebSegmentResult> =>
     ipcRenderer.invoke("web:capture-segment", request),
+  selectWebRegion: (request: SelectWebRegionRequest): Promise<SelectWebRegionResult> => ipcRenderer.invoke("web:select-region", request),
+  renderWebOverlay: (request: RenderWebOverlayRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:render-overlay", request),
+  setWebOverlayInteraction: (request: SetWebOverlayInteractionRequest): Promise<WebBrowseState> =>
+    ipcRenderer.invoke("web:set-overlay-interaction", request),
   syncWebBrowserBounds: (request: SyncWebBrowserBoundsRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:sync-bounds", request),
   setWebAutoTranslate: (request: SetWebAutoTranslateRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:set-auto-translate", request),
   scrollWebBrowser: (request: ScrollWebBrowserRequest): Promise<WebBrowseState> => ipcRenderer.invoke("web:scroll", request),
+  reloadWebBrowse: (sessionId: string): Promise<WebBrowseState> => ipcRenderer.invoke("web:reload", { sessionId }),
   getWebBrowseState: (sessionId: string): Promise<WebBrowseState> => ipcRenderer.invoke("web:get-state", { sessionId }),
   onJobEvent: (callback: (event: JobEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: JobEvent) => callback(payload);
     ipcRenderer.on("job:event", listener);
     return () => {
       ipcRenderer.removeListener("job:event", listener);
+    };
+  },
+  onWebOverlayBlockSelected: (callback: (event: WebOverlayBlockSelectionEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: WebOverlayBlockSelectionEvent) => callback(payload);
+    ipcRenderer.on("web:overlay-block-selected", listener);
+    return () => {
+      ipcRenderer.removeListener("web:overlay-block-selected", listener);
     };
   },
   onModelTestEvent: (callback: (event: ModelTestProgressEvent) => void) => {
