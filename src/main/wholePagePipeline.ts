@@ -47,6 +47,7 @@ export async function runWholePagePipeline({
   onCleanupReady,
   onPageComplete,
   onPageFailed,
+  decodeImage,
   pages,
   runPaths,
   signal,
@@ -80,6 +81,7 @@ export async function runWholePagePipeline({
   const codexSelected = baseOptions.modelProvider === "openai-codex";
   const modelCached = codexSelected || runtime.isModelCached(baseOptions);
   const localModelSelected = !codexSelected && baseOptions.modelSource === "local";
+  const parallelOcrTextMode = codexSelected && !skipOcrPrepass && String(baseOptions.translationMode ?? "") === "ocr-text";
   const warnings: string[] = [];
 
   logInfo("Analysis pipeline initialized", {
@@ -138,7 +140,7 @@ export async function runWholePagePipeline({
   baseOptions.abortSignal = signal;
 
   let ocrHintsByPageId = new Map<string, OcrBboxResult>();
-  if (!skipOcrPrepass) {
+  if (!skipOcrPrepass && !parallelOcrTextMode) {
     const ocrStartedAt = Date.now();
     ocrHintsByPageId = await prepareOcrHintsForPages({
       runtime,
@@ -428,9 +430,417 @@ export async function runWholePagePipeline({
     };
   };
 
+  const completeTranslatedPage = async (
+    page: MangaPage,
+    pageOptions: TranslationOptions,
+    pageIndex: number,
+    attempt: number,
+    translation: {
+      items: OverlayItem[];
+      requestBody: unknown;
+      outputText: string;
+      noTextDetected: boolean;
+    }
+  ): Promise<MangaPage> => {
+    const items = translation.items;
+    if (items.length === 0 && translation.noTextDetected) {
+      const noTextPage = buildNoTextCompletedPage(page);
+      await onPageComplete?.(noTextPage);
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "running",
+        progressText: `${page.name} 텍스트 없음`,
+        phase: "page_done",
+        progressCurrent: pageIndex + 1,
+        progressTotal,
+        pageIndex: pageIndex + 1,
+        pageTotal: pages.length,
+        detail: "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
+      });
+      return noTextPage;
+    }
+    if (items.length === 0) {
+      const bboxError = new Error(`${page.name}: bbox 결과를 만들지 못했습니다.`);
+      Object.assign(bboxError, {
+        outputDir: pageOptions.outputDir,
+        outputPreview: summarizePreview(translation.outputText)
+      });
+      throw bboxError;
+    }
+
+    const overlayItemsPath = join(pageOptions.outputDir, "overlay-items.json");
+    await mkdir(pageOptions.outputDir, { recursive: true });
+    await writeFile(overlayItemsPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
+
+    let normalizedItems = applyOcrCandidateGeometryLocks(
+      normalizeOverlayItemBboxes(items, page, getBboxNormalizationOptions(translation.requestBody)),
+      page,
+      getOcrBboxHints(translation.requestBody),
+      pageOptions
+    );
+    normalizedItems = await maybeRetryLowConfidenceItems({
+      runtime,
+      server,
+      pageOptions,
+      page,
+      items: normalizedItems,
+      emit,
+      jobId,
+      pageIndex: pageIndex + 1,
+      pageTotal: pages.length,
+      progressTotal
+    });
+    const soundFiltered = filterRejectedOrUncertainSoundItems(normalizedItems);
+    normalizedItems = soundFiltered.items;
+    const blocks = await applySampledBackgroundColors(
+      normalizedItems.map((item, itemIndex) =>
+        overlayItemToBlock(item, page, itemIndex, { textOutlineWidthPx: pageOptions.textOutlineWidthPx })
+      ),
+      page,
+      decodeImage
+    );
+    const successPage: MangaPage = {
+      ...page,
+      blocks,
+      analysisStatus: "completed",
+      lastError: undefined,
+      updatedAt: new Date().toISOString()
+    };
+    warnings.push(...buildPageWarnings(page.name, normalizedItems));
+    await onPageComplete?.(successPage);
+    emit({
+      id: jobId,
+      kind: "gemma-analysis",
+      status: "running",
+      progressText: `${page.name} 완료`,
+      phase: "page_done",
+      progressCurrent: pageIndex + 1,
+      progressTotal,
+      pageIndex: pageIndex + 1,
+      pageTotal: pages.length,
+      detail: soundFiltered.droppedCount > 0
+        ? `${normalizedItems.length}개 블록, 불확실한 효과음 ${soundFiltered.droppedCount}개 제외`
+        : `${normalizedItems.length}개 블록`
+    });
+    return successPage;
+  };
+
+  const tryRequestBatchedOcrTextTranslations = async (candidatePages?: MangaPage[]): Promise<void> => {
+    if (skipOcrPrepass) {
+      return;
+    }
+
+    const candidatePageIds = candidatePages ? new Set(candidatePages.map((page) => page.id)) : null;
+    const pageJobs = pagesToTranslate
+      .filter((page) => !candidatePageIds || candidatePageIds.has(page.id))
+      .filter((page) => !completedPagesById.has(page.id))
+      .map((page) => {
+        const pageIndex = pageIndexById.get(page.id) ?? 0;
+        const pageOptions = buildRequestPageOptions(page, pageIndex, 1);
+        const hints = Array.isArray(pageOptions.ocrBboxHints) ? pageOptions.ocrBboxHints : [];
+        return { page, pageIndex, pageOptions, hints };
+      })
+      .filter((job) =>
+        String(job.pageOptions.translationMode ?? "") === "ocr-text" &&
+        job.hints.length > 0
+      );
+
+    if (pageJobs.length < 2) {
+      return;
+    }
+
+    type BatchHintRecord = {
+      globalId: number;
+      originalId: number;
+      pageId: string;
+      pageIndex: number;
+      page: MangaPage;
+      pageOptions: TranslationOptions;
+      rawHint: unknown;
+      promptHint: unknown;
+    };
+
+    const records: BatchHintRecord[] = [];
+    let nextGlobalId = 1;
+    for (const job of pageJobs) {
+      for (const [hintIndex, hint] of job.hints.entries()) {
+        const originalId = readHintId(hint) || hintIndex + 1;
+        const globalId = nextGlobalId;
+        nextGlobalId += 1;
+        records.push({
+          globalId,
+          originalId,
+          pageId: job.page.id,
+          pageIndex: job.pageIndex,
+          page: job.page,
+          pageOptions: job.pageOptions,
+          rawHint: hint,
+          promptHint: buildBatchedPromptHint(hint, job.page, globalId, job.pageIndex + 1)
+        });
+      }
+    }
+
+    if (records.length === 0) {
+      return;
+    }
+
+    const chunks = chunkArray(records, OCR_TEXT_TRANSLATION_CHUNK_SIZE);
+    const itemsByPageId = new Map<string, OverlayItem[]>();
+    const outputsByPageId = new Map<string, string[]>();
+    const pageJobById = new Map(pageJobs.map((job) => [job.page.id, job]));
+    const pageLastGlobalId = new Map<string, number>();
+    for (const record of records) {
+      pageLastGlobalId.set(record.pageId, Math.max(pageLastGlobalId.get(record.pageId) ?? 0, record.globalId));
+    }
+    const scheduledPageIds = new Set<string>();
+    const completionTasks: Promise<void>[] = [];
+    let firstRequestBody: unknown = null;
+    let emptyChunkCount = 0;
+
+    const scheduleCompletedPagesThrough = (lastGlobalId: number) => {
+      for (const [pageId, lastPageGlobalId] of pageLastGlobalId.entries()) {
+        if (lastPageGlobalId > lastGlobalId || scheduledPageIds.has(pageId)) {
+          continue;
+        }
+        const job = pageJobById.get(pageId);
+        if (!job) {
+          continue;
+        }
+        const pageItems = itemsByPageId.get(pageId) ?? [];
+        if (pageItems.length === 0) {
+          scheduledPageIds.add(pageId);
+          warnings.push(`${job.page.name}: 묶음 번역에서 블록이 생성되지 않아 페이지별 번역으로 재시도합니다.`);
+          continue;
+        }
+        scheduledPageIds.add(pageId);
+        logInfo("Batched OCR text translation page completion scheduled", {
+          jobId,
+          pageId,
+          pageName: job.page.name,
+          itemCount: pageItems.length,
+          lastPageGlobalId,
+          lastCompletedGlobalId: lastGlobalId
+        });
+        const task = completeTranslatedPage(job.page, job.pageOptions, job.pageIndex, 1, {
+          items: pageItems,
+          requestBody: buildMergedChunkRequestBody(firstRequestBody, job.hints, job.page),
+          outputText: (outputsByPageId.get(pageId) ?? []).join("\n\n"),
+          noTextDetected: false
+        }).then((successPage) => {
+          completedPagesById.set(pageId, successPage);
+        });
+        completionTasks.push(task);
+      }
+    };
+
+    logInfo("Batched OCR text translation enabled", {
+      jobId,
+      pageCount: pageJobs.length,
+      hintCount: records.length,
+      chunkSize: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+      chunkCount: chunks.length,
+      pages: pageJobs.map((job) => summarizePage(job.page))
+    });
+
+    for (const [chunkIndex, chunkRecords] of chunks.entries()) {
+      throwIfAborted(signal);
+      const chunkNumber = chunkIndex + 1;
+      const chunkOptions: TranslationOptions = {
+        ...chunkRecords[0]!.pageOptions,
+        imagePath: "",
+        imageWidth: 1000,
+        imageHeight: 1000,
+        translationMode: "ocr-text",
+        imageFirst: false,
+        includeEnhancedVariant: false,
+        multiPageOcrTextBatch: true,
+        ocrBboxProvider: "none",
+        ocrBboxHints: chunkRecords.map((record, localIndex) => ({
+          ...(record.promptHint && typeof record.promptHint === "object" ? record.promptHint as Record<string, unknown> : {}),
+          id: localIndex + 1,
+          sourceId: record.globalId
+        })),
+        ocrBboxHintLimit: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+        outputDir: join(runPaths.runDir, "multi-page-translation", `chunk-${String(chunkNumber).padStart(3, "0")}`),
+        label: `${baseOptions.label}-multi-page-chunk-${chunkNumber}-of-${chunks.length}`
+      };
+
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "running",
+        progressText: `묶음 번역 청크 ${chunkNumber}/${chunks.length}`,
+        phase: "page_running",
+        progressCurrent: Math.min(progressTotal, Math.max(...chunkRecords.map((record) => record.pageIndex + 1))),
+        progressTotal,
+        pageTotal: pages.length,
+        attempt: 1,
+        attemptTotal: maxAttempts,
+        detail: `${pageJobs.length}페이지 OCR 후보 중 ${chunkRecords.length}개 번역 중`
+      });
+
+      const result = await runtime.requestTranslation(server, chunkOptions);
+      await runtime.saveArtifacts(chunkOptions, result);
+      if (!firstRequestBody) {
+        firstRequestBody = result.requestBody;
+      }
+
+      const chunkItems = runtime.normalizeItems(runtime.parseJsonLenient(result.outputText));
+      const recordByChunkLocalId = new Map(chunkRecords.map((record, localIndex) => [localIndex + 1, record]));
+      const recordByGlobalId = new Map(chunkRecords.map((record) => [record.globalId, record]));
+      const pagesWithMappedItems = new Set<string>();
+      let acceptedItemCount = 0;
+      let globalIdFallbackCount = 0;
+      for (const item of chunkItems) {
+        const record = recordByChunkLocalId.get(item.id) ?? recordByGlobalId.get(item.id);
+        if (!record) {
+          continue;
+        }
+        if (!recordByChunkLocalId.has(item.id) && recordByGlobalId.has(item.id)) {
+          globalIdFallbackCount += 1;
+        }
+        const pageItems = itemsByPageId.get(record.pageId) ?? [];
+        pageItems.push({
+          ...item,
+          id: record.originalId
+        });
+        itemsByPageId.set(record.pageId, pageItems);
+        pagesWithMappedItems.add(record.pageId);
+        acceptedItemCount += 1;
+      }
+      for (const pageId of pagesWithMappedItems) {
+        const pageOutputs = outputsByPageId.get(pageId) ?? [];
+        pageOutputs.push(result.outputText);
+        outputsByPageId.set(pageId, pageOutputs);
+      }
+      logInfo("Batched OCR text translation chunk mapped", {
+        jobId,
+        chunkNumber,
+        chunkCount: chunks.length,
+        returnedItemCount: chunkItems.length,
+        acceptedItemCount,
+        globalIdFallbackCount,
+        pageCount: pagesWithMappedItems.size
+      });
+
+      const chunkOverlayItemsPath = join(chunkOptions.outputDir, "overlay-items.json");
+      await mkdir(chunkOptions.outputDir, { recursive: true });
+      await writeFile(chunkOverlayItemsPath, `${JSON.stringify({ items: chunkItems }, null, 2)}\n`, "utf8");
+
+      if (acceptedItemCount === 0) {
+        emptyChunkCount += 1;
+        warnings.push(`묶음 번역 청크 ${chunkNumber}/${chunks.length}에서 블록이 생성되지 않았습니다.`);
+      }
+
+      scheduleCompletedPagesThrough(Math.max(...chunkRecords.map((record) => record.globalId)));
+    }
+
+    if (emptyChunkCount > 0) {
+      logWarn("Some batched OCR text translation chunks returned no mapped overlay items", {
+        jobId,
+        emptyChunkCount,
+        chunkCount: chunks.length
+      });
+    }
+
+    if (completionTasks.length > 0) {
+      await Promise.all(completionTasks);
+    }
+  };
+
+  const runParallelOcrTextTranslation = async (): Promise<void> => {
+    if (!parallelOcrTextMode) {
+      return;
+    }
+
+    let translationChain = Promise.resolve();
+    const ocrStartedAt = Date.now();
+    logInfo("Parallel OCR/Codex translation enabled", {
+      jobId,
+      pageCount: pages.length,
+      ocrBatchSize: baseOptions.ocrBatchSize,
+      translationMode: baseOptions.translationMode
+    });
+
+    ocrHintsByPageId = await prepareOcrHintsForPages({
+      runtime,
+      baseOptions,
+      pages,
+      runPaths,
+      emit,
+      jobId,
+      signal,
+      onPagesCompleted: (readyPages) => {
+        for (const ready of readyPages) {
+          ocrHintsByPageId.set(ready.page.id, ready.result);
+        }
+        translationChain = translationChain.then(async () => {
+          throwIfAborted(signal);
+          for (const ready of readyPages) {
+            if (completedPagesById.has(ready.page.id) || !isOcrResultNoTextDetected(ready.result)) {
+              continue;
+            }
+            const noTextPage = buildNoTextCompletedPage(ready.page);
+            completedPagesById.set(ready.page.id, noTextPage);
+            await onPageComplete?.(noTextPage);
+            emit({
+              id: jobId,
+              kind: "gemma-analysis",
+              status: "running",
+              progressText: `${ready.page.name} 텍스트 없음`,
+              phase: "page_done",
+              progressCurrent: ready.index + 1,
+              progressTotal,
+              pageIndex: ready.index + 1,
+              pageTotal: pages.length,
+              detail: "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
+            });
+          }
+          logInfo("Parallel OCR/Codex translation batch queued", {
+            jobId,
+            readyPageCount: readyPages.length,
+            readyPages: readyPages.map((ready) => ({
+              pageId: ready.page.id,
+              pageName: ready.page.name,
+              hintCount: ready.result.hints.length,
+              noTextDetected: Boolean(ready.result.noTextDetected)
+            }))
+          });
+          await tryRequestBatchedOcrTextTranslations(readyPages.map((ready) => ready.page));
+        });
+      }
+    });
+    ocrMs = Date.now() - ocrStartedAt;
+    await translationChain;
+  };
+
   try {
+    try {
+      if (parallelOcrTextMode) {
+        await runParallelOcrTextTranslation();
+      } else {
+        await tryRequestBatchedOcrTextTranslations();
+      }
+    } catch (error) {
+      if (isAbortErrorLike(error) || isNonRetriableRuntimeError(error)) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`묶음 OCR 텍스트 번역 실패 - 페이지별 번역으로 전환합니다. ${message}`);
+      logWarn("Batched OCR text translation failed; falling back to per-page translation", {
+        failureCategory: classifyFailure(error),
+        jobId,
+        pageCount: pagesToTranslate.length,
+        error
+      });
+    }
+
     for (let translateIndex = 0; translateIndex < pagesToTranslate.length; translateIndex += 1) {
       const page = pagesToTranslate[translateIndex];
+      if (completedPagesById.has(page.id)) {
+        continue;
+      }
       const index = pageIndexById.get(page.id) ?? 0;
       throwIfAborted(signal);
       let successPage: MangaPage | null = null;
@@ -460,86 +870,7 @@ export async function runWholePagePipeline({
 
         try {
           const translation = await requestPageOverlayItems(page, pageOptions, index, attempt);
-          const items = translation.items;
-          if (items.length === 0 && translation.noTextDetected) {
-            successPage = buildNoTextCompletedPage(page);
-            await onPageComplete?.(successPage);
-            emit({
-              id: jobId,
-              kind: "gemma-analysis",
-              status: "running",
-              progressText: `${page.name} 텍스트 없음`,
-              phase: "page_done",
-              progressCurrent: index + 1,
-              progressTotal,
-              pageIndex: index + 1,
-              pageTotal: pages.length,
-              detail: "Paddle OCR에서 번역 대상 텍스트 근거를 찾지 못해 모델 호출을 생략했습니다."
-            });
-            break;
-          }
-          if (items.length === 0) {
-            const bboxError = new Error(`${page.name}: bbox 결과를 만들지 못했습니다.`);
-            Object.assign(bboxError, {
-              outputDir: pageOptions.outputDir,
-              outputPreview: summarizePreview(translation.outputText)
-            });
-            throw bboxError;
-          }
-
-          const overlayItemsPath = join(pageOptions.outputDir, "overlay-items.json");
-          await mkdir(pageOptions.outputDir, { recursive: true });
-          await writeFile(overlayItemsPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
-
-          let normalizedItems = applyOcrCandidateGeometryLocks(
-            normalizeOverlayItemBboxes(items, page, getBboxNormalizationOptions(translation.requestBody)),
-            page,
-            getOcrBboxHints(translation.requestBody),
-            pageOptions
-          );
-          normalizedItems = await maybeRetryLowConfidenceItems({
-            runtime,
-            server,
-            pageOptions,
-            page,
-            items: normalizedItems,
-            emit,
-            jobId,
-            pageIndex: index + 1,
-            pageTotal: pages.length,
-            progressTotal
-          });
-          const soundFiltered = filterRejectedOrUncertainSoundItems(normalizedItems);
-          normalizedItems = soundFiltered.items;
-          const blocks = await applySampledBackgroundColors(
-            normalizedItems.map((item, itemIndex) =>
-              overlayItemToBlock(item, page, itemIndex, { textOutlineWidthPx: pageOptions.textOutlineWidthPx })
-            ),
-            page
-          );
-          successPage = {
-            ...page,
-            blocks,
-            analysisStatus: "completed",
-            lastError: undefined,
-            updatedAt: new Date().toISOString()
-          };
-          warnings.push(...buildPageWarnings(page.name, normalizedItems));
-          await onPageComplete?.(successPage);
-          emit({
-            id: jobId,
-            kind: "gemma-analysis",
-            status: "running",
-            progressText: `${page.name} 완료`,
-            phase: "page_done",
-            progressCurrent: index + 1,
-            progressTotal,
-            pageIndex: index + 1,
-            pageTotal: pages.length,
-            detail: soundFiltered.droppedCount > 0
-              ? `${normalizedItems.length}개 블록, 불확실한 효과음 ${soundFiltered.droppedCount}개 제외`
-              : `${normalizedItems.length}개 블록`
-          });
+          successPage = await completeTranslatedPage(page, pageOptions, index, attempt, translation);
           break;
         } catch (error) {
           if (isAbortErrorLike(error)) {
@@ -649,6 +980,46 @@ export async function runWholePagePipeline({
 
 function shouldChunkOcrTextTranslation(options: TranslationOptions, ocrHints: unknown[]): boolean {
   return String(options.translationMode ?? "") === "ocr-text" && ocrHints.length > OCR_TEXT_TRANSLATION_CHUNK_SIZE;
+}
+
+function buildBatchedPromptHint(hint: unknown, page: MangaPage, globalId: number, pageNumber: number): unknown {
+  if (!hint || typeof hint !== "object") {
+    return {
+      id: globalId,
+      label: `page_${pageNumber}_text`,
+      x1: 0,
+      y1: 0,
+      x2: 1,
+      y2: 1
+    };
+  }
+
+  const record = hint as Record<string, unknown>;
+  const x1 = Number(record.x1);
+  const y1 = Number(record.y1);
+  const x2 = Number(record.x2);
+  const y2 = Number(record.y2);
+  const pageWidth = Math.max(1, page.width);
+  const pageHeight = Math.max(1, page.height);
+  const hasValidBox = [x1, y1, x2, y2].every(Number.isFinite);
+
+  return {
+    ...record,
+    id: globalId,
+    label: `page_${pageNumber}_${String(record.label ?? "text")}`,
+    x1: hasValidBox ? Math.round((Math.min(x1, x2) / pageWidth) * 1000) : 0,
+    y1: hasValidBox ? Math.round((Math.min(y1, y2) / pageHeight) * 1000) : 0,
+    x2: hasValidBox ? Math.round((Math.max(x1, x2) / pageWidth) * 1000) : 1,
+    y2: hasValidBox ? Math.round((Math.max(y1, y2) / pageHeight) * 1000) : 1
+  };
+}
+
+function readHintId(hint: unknown): number | null {
+  if (!hint || typeof hint !== "object") {
+    return null;
+  }
+  const id = Number((hint as Record<string, unknown>).id);
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {

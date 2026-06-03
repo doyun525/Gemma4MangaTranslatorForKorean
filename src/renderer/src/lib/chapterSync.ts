@@ -39,13 +39,6 @@ export function mergeLiveChapterPreservingDirtyPages(
   }
 
   const dirtyPageIdSet = new Set(dirtyPageIds);
-  if (dirtyPageIdSet.size === 0) {
-    return {
-      chapter: liveChapter,
-      preservedDirtyPageIds: []
-    };
-  }
-
   const localPages = new Map(localChapter.pages.map((page) => [page.id, page]));
   const preservedDirtyPageIds: string[] = [];
 
@@ -54,7 +47,17 @@ export function mergeLiveChapterPreservingDirtyPages(
       ...liveChapter,
       pages: liveChapter.pages.map((page) => {
         const localPage = localPages.get(page.id);
-        if (!localPage || !dirtyPageIdSet.has(page.id)) {
+        if (!localPage) {
+          return page;
+        }
+
+        const localUpdatedAt = Date.parse(localPage.updatedAt ?? "");
+        const liveUpdatedAt = Date.parse(page.updatedAt ?? "");
+        const localIsNewer =
+          Number.isFinite(localUpdatedAt) &&
+          Number.isFinite(liveUpdatedAt) &&
+          localUpdatedAt > liveUpdatedAt;
+        if (!dirtyPageIdSet.has(page.id) && !localIsNewer) {
           return page;
         }
 

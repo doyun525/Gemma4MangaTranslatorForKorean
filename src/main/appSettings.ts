@@ -180,6 +180,7 @@ export type TranslationOptions = {
   ocrBboxHintsPath?: string;
   ocrBboxHints?: unknown;
   ocrBboxHintLimit?: number;
+  multiPageOcrTextBatch?: boolean;
   skipOcrBboxHints?: boolean;
   regionCropMode?: boolean;
   ocrPageIndex?: number;

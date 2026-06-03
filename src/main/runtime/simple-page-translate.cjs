@@ -1796,7 +1796,8 @@ function describeImageVariant(variant, index, options = {}) {
   return `Image ${index + 1}: the original full manga page. Use it as the geometry authority.${sizeText}${originalSizeText}`;
 }
 
-function buildCropRetryPrompt(targets = []) {
+function buildCropRetryPrompt(targets = [], options = {}) {
+  const includeSoundEffects = shouldIncludeSoundEffects(options);
   const targetLines = targets.map((target, index) => {
     const cropImageIndex = Number.isFinite(Number(target.cropImageIndex)) ? Number(target.cropImageIndex) : index + 2;
     const confidence = Number.isFinite(Number(target.confidence)) ? Number(target.confidence).toFixed(2) : "unknown";
@@ -1824,13 +1825,26 @@ function buildCropRetryPrompt(targets = []) {
     "For each target, ignore any previous model OCR/translation. The crop image itself is the authority.",
     "Read all real Japanese or English text inside that crop for the same target id, then translate it naturally into Korean.",
     "Every ko field must be Korean Hangul. Do not output English, Chinese, Japanese, romaji, or pinyin in ko.",
+    ...(includeSoundEffects
+      ? []
+      : [
+          "Sound effects are disabled for this job.",
+          "If the crop is standalone printed sound/reaction lettering, background sound lettering, decorative SFX, or ambient effect text, reject it instead of translating it.",
+          "Never output textRole: sound. Accepted text targets must use textRole: ordinary."
+        ]),
     "Preserve Arabic numerals, slashes, decimal points, counters, issue numbers, chapter/page fractions, and UI pagination patterns. Do not spell numbers out in Korean unless the original source itself writes the number as words.",
     "Preserve sentence-ending intent in ko. If the source is a question, the Korean ko should normally end with ?. If the source is an exclamation or emphatic shout, keep ! when it preserves the tone. Do not drop ? or ! from dialogue, captions, or labels when it changes the reading.",
     "For UI labels such as Chapter 104/104, Page 2/22, Login, Menu, or Filter, translate labels compactly if useful but keep numbers and separators unchanged, e.g. Chapter 104/104 Page 2/22 -> 챕터 104/104 페이지 2/22.",
     "If the crop contains the target text, return the tight crop-coordinate bbox for the visible source glyphs.",
     "Several target ids may point to the same crop image. In that case, use the larger crop as context and return separate records for the separate visible source lettering groups represented by those target ids.",
-    "If a large sound effect was split into nearby target ids, keep those ids separate when the visible lettering groups are separate. Do not create one giant combined translation over the whole crop.",
-    "For sound-check targets, decide whether the crop is standalone printed sound/reaction lettering, ordinary language, or non-text. Sound/reaction lettering should become compact Korean effect lettering, not a scene description and not a mechanical kana transliteration.",
+    ...(includeSoundEffects
+      ? [
+          "If a large sound effect was split into nearby target ids, keep those ids separate when the visible lettering groups are separate. Do not create one giant combined translation over the whole crop.",
+          "For sound-check targets, decide whether the crop is standalone printed sound/reaction lettering, ordinary language, or non-text. Sound/reaction lettering should become compact Korean effect lettering, not a scene description and not a mechanical kana transliteration."
+        ]
+      : [
+          "For sound-check targets, decide whether the crop is ordinary language or rejected sound/non-text. Sound/reaction lettering must be rejected when sound effects are disabled."
+        ]),
     "If the crop text is inside a speech bubble, caption, note, sign, or label, treat it as ordinary language unless the visible lettering is unmistakably standalone sound/reaction lettering.",
     "",
     "# Output",
@@ -1839,19 +1853,31 @@ function buildCropRetryPrompt(targets = []) {
     "x1, y1, x2, y2 are integer crop image pixel coordinates around the visible source glyph ink for that target, not full-page coordinates.",
     "Crop coordinates start at 0,0 in the top-left corner of the crop image. x1 and x2 must be within the crop image width; y1 and y2 must be within the crop image height.",
     "Never copy the target bbox or crop origin numbers into x1/y1/x2/y2; those are page coordinates, not crop coordinates.",
-    "textRole is one of sound, ordinary, or nontext.",
+    includeSoundEffects ? "textRole is one of sound, ordinary, or nontext." : "textRole is one of ordinary or nontext. Never output sound.",
     "confidence is 0.00 to 1.00 for the corrected OCR+translation.",
-    "If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real Japanese or English text and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00.",
+    ...(includeSoundEffects
+      ? [
+          "If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real Japanese or English text and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00."
+        ]
+      : [
+          "If the target is standalone sound/reaction/background lettering, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text]."
+        ]),
     "If the crop is decoration, panel trim, texture, non-Japanese/non-English art, or otherwise not real Japanese or English text, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text].",
     "If the crop still has readable Japanese or English, never output only [?]; give the best OCR and concise natural Korean.",
     "Use type nonsolid for every accepted text target.",
     "If textRole is ordinary, keep dialogue/caption/label Korean natural, horizontally readable, and do not apply sound-effect rules.",
     "For ordinary textRole, translate the source lexical meaning. Never replace an ordinary word, noun, label, or dialogue fragment with a Korean sound effect.",
     "For ordinary textRole, keep source numerals as digits in ko. Do not convert 2/22, 104/104, years, grades, counts, or menu/page numbers into Korean number words.",
-    "Short kana, handwritten words, or tall vertical bbox shapes are not enough to make textRole sound.",
-    "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
-    "If textRole is sound, choose compact Korean effect lettering that fits the scene and visible rhythm. Do not mechanically transliterate Japanese kana when that would sound awkward in Korean.",
-    "If textRole is sound, avoid Korean grammar endings, particles, connective endings, explanatory spacing, adverbs, and action descriptions.",
+    ...(includeSoundEffects
+      ? [
+          "Short kana, handwritten words, or tall vertical bbox shapes are not enough to make textRole sound.",
+          "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, stage directions, action descriptions, or explanatory notes.",
+          "If textRole is sound, choose compact Korean effect lettering that fits the scene and visible rhythm. Do not mechanically transliterate Japanese kana when that would sound awkward in Korean.",
+          "If textRole is sound, avoid Korean grammar endings, particles, connective endings, explanatory spacing, adverbs, and action descriptions."
+        ]
+      : [
+          "Short kana, handwritten words, or tall vertical bbox shapes are not enough to accept a target. If it is standalone sound/reaction/background lettering, reject it."
+        ]),
     "",
     "# Targets",
     ...targetLines
@@ -4370,7 +4396,7 @@ async function requestCropRetryTranslation(server, options, targets = []) {
     };
   }
 
-  const promptText = options.promptOverrideText || buildCropRetryPrompt(retryTargets);
+  const promptText = options.promptOverrideText || buildCropRetryPrompt(retryTargets, options);
   const promptOptions = {
     ...options,
     promptOverrideText: promptText,

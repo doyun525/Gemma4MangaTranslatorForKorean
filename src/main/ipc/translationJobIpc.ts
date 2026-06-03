@@ -61,7 +61,8 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         },
         pages: resolved.pages,
         runPaths,
-        signal: abortController.signal
+        signal: abortController.signal,
+        decodeImage: context.decodeImage
       });
 
       if (abortController.signal.aborted) {
@@ -196,7 +197,8 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         pages: [cropPage],
         runPaths,
         signal: abortController.signal,
-        skipOcrPrepass: true
+        skipOcrPrepass: true,
+        decodeImage: context.decodeImage
       });
 
       if (abortController.signal.aborted) {

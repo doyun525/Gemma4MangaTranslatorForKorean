@@ -18,6 +18,12 @@ import type {
   WebOverlayRenderBlock,
   WebPageSourceMeta
 } from "../shared/types";
+import {
+  BLOCK_CORNER_RADIUS_SCALE,
+  DEFAULT_BLOCK_CORNER_RADIUS_PX,
+  MAX_BLOCK_CORNER_RADIUS_PX,
+  MIN_BLOCK_CORNER_RADIUS_PX
+} from "../shared/blockVisuals";
 import { appendWebCapturePage, createWebChapter, openChapter, saveChapterSnapshot } from "./library";
 import { logInfo } from "./logger";
 
@@ -1679,6 +1685,14 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
     box.style.wordBreak = "break-word";
     box.style.color = block.textColor || "#111";
     box.style.background = toRgba(block.backgroundColor || "#fff", block.opacity);
+    const cornerRadius = Math.round(Math.max(
+      ${MIN_BLOCK_CORNER_RADIUS_PX},
+      Math.min(
+        ${MAX_BLOCK_CORNER_RADIUS_PX},
+        Math.min(Number(layoutBlock.w) || 0, Number(layoutBlock.h) || 0) * ${BLOCK_CORNER_RADIUS_SCALE} || ${DEFAULT_BLOCK_CORNER_RADIUS_PX}
+      )
+    ));
+    box.style.borderRadius = cornerRadius + "px";
     box.style.fontFamily = block.fontFamily || "sans-serif";
     box.style.boxShadow = "none";
     box.style.textShadow = "none";

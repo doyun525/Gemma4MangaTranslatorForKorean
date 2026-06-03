@@ -1846,7 +1846,15 @@ export default function App(): React.JSX.Element {
       }
 
       const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
-      let appliedCount = 0;
+      const applicableIds = new Set(
+        selectedPage.blocks
+          .filter((block) => {
+            const sample = sampleById.get(block.id);
+            return Boolean(sample?.flat && sample.backgroundColor);
+          })
+          .map((block) => block.id)
+      );
+      const appliedCount = applicableIds.size;
       recordEditHistoryBeforeChange();
       updateCurrentChapter(selectedPage.id, (current) => ({
         ...current,
@@ -1861,11 +1869,10 @@ export default function App(): React.JSX.Element {
                   if (!sample?.flat || !sample.backgroundColor) {
                     return block;
                   }
-                  appliedCount += 1;
                   return {
                     ...block,
                     backgroundColor: sample.backgroundColor,
-                    opacity: Math.max(block.opacity, FLAT_BACKGROUND_OPACITY)
+                    opacity: Math.max(block.opacity ?? 0, FLAT_BACKGROUND_OPACITY)
                   };
                 })
               }

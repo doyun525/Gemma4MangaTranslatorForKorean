@@ -1,4 +1,5 @@
 import React from "react";
+import { resolveBlockCornerRadiusPx } from "../../../shared/blockVisuals";
 import type { TranslationBlock } from "../../../shared/types";
 import { resolveOverlayBlockBackground, resolveOverlayBlockRenderModel, type ViewportSize } from "../lib/blockRenderModel";
 
@@ -43,6 +44,7 @@ export function OverlayBlock({
     overflow: "visible",
     color: block.textColor,
     border: "none",
+    borderRadius: resolveBlockCornerRadiusPx(layout.rect.width, layout.rect.height),
     backgroundColor: resolveOverlayBlockBackground(block, model, showChrome),
     fontFamily: model.fontFamily,
     fontSize: `${layout.fontSizePx}px`,

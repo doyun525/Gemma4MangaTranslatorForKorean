@@ -18,7 +18,8 @@ export async function prepareOcrHintsForPages({
   runPaths,
   emit,
   jobId,
-  signal
+  signal,
+  onPagesCompleted
 }: {
   runtime: TranslationRuntimePort;
   baseOptions: TranslationOptions;
@@ -27,6 +28,7 @@ export async function prepareOcrHintsForPages({
   emit: (event: JobEvent) => void;
   jobId: string;
   signal: AbortSignal;
+  onPagesCompleted?: (pages: Array<{ page: MangaPage; index: number; result: OcrBboxResult }>) => void;
 }): Promise<Map<string, OcrBboxResult>> {
   const results = new Map<string, OcrBboxResult>();
   const total = pages.length;
@@ -44,7 +46,8 @@ export async function prepareOcrHintsForPages({
     const cachePath = getOcrHintsCachePath(runPaths, page);
     const cached = await readCachedOcrHints(cachePath, page);
     if (cached) {
-      results.set(page.id, cached);
+      const filtered = applyOcrTextlineScorePolicy(cached, baseOptions);
+      results.set(page.id, filtered);
       logInfo("OCR hint cache reused", {
         jobId,
         chapterDir: runPaths.chapterDir,
@@ -52,9 +55,11 @@ export async function prepareOcrHintsForPages({
         pageName: page.name,
         imageWidth: page.width,
         imageHeight: page.height,
-        hintCount: cached.hints.length,
-        textEvidenceCount: cached.textEvidenceCount,
-        noTextDetected: Boolean(cached.noTextDetected)
+        hintCount: filtered.hints.length,
+        originalHintCount: cached.hints.length,
+        filteredHintCount: cached.hints.length - filtered.hints.length,
+        textEvidenceCount: filtered.textEvidenceCount,
+        noTextDetected: Boolean(filtered.noTextDetected)
       });
       emit({
         id: jobId,
@@ -66,8 +71,9 @@ export async function prepareOcrHintsForPages({
         progressTotal: total,
         pageIndex: index + 1,
         pageTotal: total,
-        detail: formatOcrHintDetail(cached)
+        detail: formatOcrHintDetail(filtered)
       });
+      onPagesCompleted?.([{ page, index, result: filtered }]);
       continue;
     }
 
@@ -136,11 +142,15 @@ export async function prepareOcrHintsForPages({
     const persistentOcrWorkerEnabled = !["1", "true", "yes", "y", "on"].includes(
       String(process.env.MANGA_TRANSLATOR_DISABLE_OCR_WORKER ?? "").trim().toLowerCase()
     );
+    const hasTiledPages = pendingPages.some((entry) => entry.mergeGroupId);
+    const ocrBatchSize = Math.max(1, Math.floor(Number(baseOptions.ocrBatchSize) || 1));
+    const processingBatches = hasTiledPages ? [pendingPages] : chunkArray(pendingPages, ocrBatchSize);
     logInfo("OCR batch started", {
       jobId,
       chapterDir: runPaths.chapterDir,
       pageCount: pendingPages.length,
       totalPageCount: total,
+      processingBatchCount: processingBatches.length,
       ocrEngine: baseOptions.ocrEngine,
       ocrBboxProvider: baseOptions.ocrBboxProvider,
       ocrDevice: baseOptions.ocrDevice,
@@ -158,7 +168,54 @@ export async function prepareOcrHintsForPages({
       }))
     });
 
-    const batchResults = await runtime.collectOcrHintsBatch(pendingPages.map((entry) => entry.options));
+    const batchResults: OcrBboxResult[] = [];
+    for (const [processingBatchIndex, processingBatch] of processingBatches.entries()) {
+      throwIfAborted(signal);
+      const partialStartedAt = Date.now();
+      logInfo("OCR processing batch started", {
+        jobId,
+        chapterDir: runPaths.chapterDir,
+        processingBatchIndex: processingBatchIndex + 1,
+        processingBatchCount: processingBatches.length,
+        pageCount: processingBatch.length,
+        ocrBatchSize: baseOptions.ocrBatchSize,
+        pages: processingBatch.map((entry) => ({
+          pageId: entry.page.id,
+          pageName: entry.page.name,
+          imageWidth: entry.options.imageWidth ?? entry.page.width,
+          imageHeight: entry.options.imageHeight ?? entry.page.height,
+          tile: entry.tile
+        }))
+      });
+      const partialResults = await runtime.collectOcrHintsBatch(processingBatch.map((entry) => entry.options));
+      const partialElapsedMs = Date.now() - partialStartedAt;
+      batchResults.push(...partialResults);
+      logInfo("OCR processing batch completed", {
+        jobId,
+        chapterDir: runPaths.chapterDir,
+        processingBatchIndex: processingBatchIndex + 1,
+        processingBatchCount: processingBatches.length,
+        pageCount: processingBatch.length,
+        elapsedMs: partialElapsedMs,
+        elapsedText: formatDuration(partialElapsedMs),
+        ocrBatchSize: baseOptions.ocrBatchSize
+      });
+
+      if (!hasTiledPages) {
+        const completedInBatch: Array<{ page: MangaPage; index: number; result: OcrBboxResult }> = [];
+        for (const [localIndex, result] of partialResults.entries()) {
+          const entry = processingBatch[localIndex];
+          if (!entry) {
+            continue;
+          }
+          const filtered = applyOcrTextlineScorePolicy(result, baseOptions);
+          await writeCachedOcrHints(entry.cachePath, entry.page, filtered);
+          results.set(entry.page.id, filtered);
+          completedInBatch.push({ page: entry.page, index: entry.index, result: filtered });
+        }
+        onPagesCompleted?.(completedInBatch);
+      }
+    }
     const batchElapsedMs = Date.now() - batchStartedAt;
     const averagePageElapsedMs = pendingPages.length > 0 ? Math.round(batchElapsedMs / pendingPages.length) : batchElapsedMs;
 
@@ -186,8 +243,10 @@ export async function prepareOcrHintsForPages({
       if (entry.mergeGroupId) {
         continue;
       }
-      await writeCachedOcrHints(entry.cachePath, entry.page, result);
-      results.set(entry.page.id, result);
+      if (!results.has(entry.page.id)) {
+        await writeCachedOcrHints(entry.cachePath, entry.page, result);
+        results.set(entry.page.id, result);
+      }
       logInfo("OCR page completed", {
         jobId,
         chapterDir: runPaths.chapterDir,
@@ -207,9 +266,11 @@ export async function prepareOcrHintsForPages({
         ocrBatchSize: baseOptions.ocrBatchSize,
         imageWidth: entry.page.width,
         imageHeight: entry.page.height,
-        hintCount: result.hints.length,
-        textEvidenceCount: result.textEvidenceCount,
-        noTextDetected: Boolean(result.noTextDetected)
+        hintCount: results.get(entry.page.id)?.hints.length ?? result.hints.length,
+        originalHintCount: result.hints.length,
+        filteredHintCount: result.hints.length - (results.get(entry.page.id)?.hints.length ?? result.hints.length),
+        textEvidenceCount: results.get(entry.page.id)?.textEvidenceCount ?? result.textEvidenceCount,
+        noTextDetected: Boolean(results.get(entry.page.id)?.noTextDetected ?? result.noTextDetected)
       });
       emit({
         id: jobId,
@@ -221,13 +282,15 @@ export async function prepareOcrHintsForPages({
         progressTotal: pendingPages.length,
         pageIndex: entry.index + 1,
         pageTotal: total,
-        detail: `${formatOcrHintDetail(result)}, OCR ${pendingPages.length === 1 ? formatDuration(batchElapsedMs) : `${formatDuration(averagePageElapsedMs)} 평균`}`
+        detail: `${formatOcrHintDetail(results.get(entry.page.id) ?? result)}, OCR ${pendingPages.length === 1 ? formatDuration(batchElapsedMs) : `${formatDuration(averagePageElapsedMs)} 평균`}`
       });
     }
     for (const merged of mergedTileResults) {
       throwIfAborted(signal);
-      await writeCachedOcrHints(merged.cachePath, merged.page, merged.result);
-      results.set(merged.page.id, merged.result);
+      const filtered = applyOcrTextlineScorePolicy(merged.result, baseOptions);
+      await writeCachedOcrHints(merged.cachePath, merged.page, filtered);
+      results.set(merged.page.id, filtered);
+      onPagesCompleted?.([{ page: merged.page, index: merged.index, result: filtered }]);
       logInfo("OCR tiled page completed", {
         jobId,
         chapterDir: runPaths.chapterDir,
@@ -244,9 +307,11 @@ export async function prepareOcrHintsForPages({
         ocrBatchSize: baseOptions.ocrBatchSize,
         imageWidth: merged.page.width,
         imageHeight: merged.page.height,
-        hintCount: merged.result.hints.length,
-        textEvidenceCount: merged.result.textEvidenceCount,
-        noTextDetected: Boolean(merged.result.noTextDetected)
+        hintCount: filtered.hints.length,
+        originalHintCount: merged.result.hints.length,
+        filteredHintCount: merged.result.hints.length - filtered.hints.length,
+        textEvidenceCount: filtered.textEvidenceCount,
+        noTextDetected: Boolean(filtered.noTextDetected)
       });
       emit({
         id: jobId,
@@ -258,7 +323,7 @@ export async function prepareOcrHintsForPages({
         progressTotal: total,
         pageIndex: merged.index + 1,
         pageTotal: total,
-        detail: `${merged.tileCount}개 타일 병합, ${formatOcrHintDetail(merged.result)}`
+        detail: `${merged.tileCount}개 타일 병합, ${formatOcrHintDetail(filtered)}`
       });
     }
   }
@@ -296,6 +361,14 @@ function formatOcrHintDetail(result: OcrBboxResult): string {
     return `${result.hints.length}개 후보, 텍스트 근거 ${result.textEvidenceCount}개`;
   }
   return `${result.hints.length}개 후보`;
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 function buildOcrPageOptions(baseOptions: TranslationOptions, page: MangaPage, runPaths: ChapterRunPaths, index: number, total: number): TranslationOptions {
@@ -444,6 +517,77 @@ function renumberOcrHints(hints: unknown[]): unknown[] {
       id: index + 1
     };
   });
+}
+
+function applyOcrTextlineScorePolicy(result: OcrBboxResult, options: TranslationOptions): OcrBboxResult {
+  const hints = Array.isArray(result.hints) ? result.hints : [];
+  const threshold = options.includeSoundEffects === false ? 0.7 : 0.5;
+  const filteredHints = hints.filter((hint) => {
+    if (!hint || typeof hint !== "object") {
+      return true;
+    }
+    const record = hint as Record<string, unknown>;
+    const label = String(record.label ?? "").trim();
+    if (label !== "ocr_textline" && label !== "ocr_textgroup") {
+      return true;
+    }
+    const score = Number(record.score ?? record.confidence);
+    if (!Number.isFinite(score)) {
+      return false;
+    }
+    return options.includeSoundEffects === false ? score >= threshold : score > threshold;
+  });
+  if (filteredHints.length === hints.length) {
+    return result;
+  }
+  const textEvidenceCount = countOcrTextEvidence(filteredHints);
+  return {
+    ...result,
+    hints: renumberOcrHints(filteredHints),
+    textEvidenceCount,
+    noTextDetected: filteredHints.length === 0 || textEvidenceCount === 0,
+    diagnostics: [
+      ...(Array.isArray(result.diagnostics) ? result.diagnostics : []),
+      {
+        provider: "ocr-textline-score-filter",
+        labels: ["ocr_textline", "ocr_textgroup"],
+        threshold,
+        includeSoundEffects: options.includeSoundEffects !== false,
+        originalHintCount: hints.length,
+        filteredHintCount: hints.length - filteredHints.length,
+        remainingHintCount: filteredHints.length
+      }
+    ]
+  };
+}
+
+function countOcrTextEvidence(hints: unknown[]): number {
+  return hints.reduce<number>((count, hint) => count + (hasTranslatableTextEvidence(readHintText(hint)) ? 1 : 0), 0);
+}
+
+function hasTranslatableTextEvidence(value: string): boolean {
+  const text = String(value ?? "");
+  if (/[A-Za-z]{2,}/.test(text) || /(^|[^A-Za-z])[AIai]([^A-Za-z]|$)/.test(text)) {
+    return true;
+  }
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (
+      typeof code === "number" &&
+      (
+        (code >= 0x3040 && code <= 0x30ff) ||
+        (code >= 0x31f0 && code <= 0x31ff) ||
+        (code >= 0x3400 && code <= 0x4dbf) ||
+        (code >= 0x4e00 && code <= 0x9fff) ||
+        (code >= 0xf900 && code <= 0xfaff) ||
+        code === 0x3005 ||
+        code === 0x30fc
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isDuplicateOcrHint(candidate: unknown, accepted: unknown[]): boolean {

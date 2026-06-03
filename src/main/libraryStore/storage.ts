@@ -16,11 +16,38 @@ export async function writeJsonFile(path: string, payload: unknown): Promise<voi
   const tmpPath = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
   try {
     await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    await rename(tmpPath, path);
+    await renameWithRetry(tmpPath, path);
   } catch (error) {
     await safeUnlink(tmpPath);
     throw error;
   }
+}
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  const retryDelaysMs = [40, 80, 160, 320, 640];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableRenameError(error) || attempt >= retryDelaysMs.length) {
+        throw error;
+      }
+      await delay(retryDelaysMs[attempt] ?? 40);
+    }
+  }
+  throw lastError;
+}
+
+function isRetryableRenameError(error: unknown): boolean {
+  const code = typeof error === "object" && error ? (error as { code?: unknown }).code : undefined;
+  return code === "EPERM" || code === "EBUSY" || code === "EACCES";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function readJsonFile<T>(path: string, fallback?: T): Promise<T> {

@@ -13,7 +13,7 @@ import { registerWebBrowseIpc } from "./webBrowseIpc";
 export function registerIpc(context: IpcContext): void {
   registerLogsIpc();
   registerSettingsIpc(context);
-  registerLibraryIpc();
+  registerLibraryIpc(context);
   registerFontsIpc(context);
   registerImportShareIpc(context);
   registerTranslationJobIpc(context);

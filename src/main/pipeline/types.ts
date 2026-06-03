@@ -1,5 +1,6 @@
 import type { TranslationOptions } from "../appSettings";
 import type { OpenAIOAuthEndpoint } from "../openaiOauthEndpoint";
+import type { ImageDecodeFallback } from "../regionCrop";
 import type { AppSettings, BBox, JobEvent, MangaPage, SourceTextDirection } from "../../shared/types";
 import type { ChapterRunPaths } from "../library";
 
@@ -13,6 +14,7 @@ export type PipelineOptions = {
   onCleanupReady?: (cleanup: () => Promise<void>) => void;
   onPageComplete?: (page: MangaPage) => Promise<void>;
   onPageFailed?: (page: MangaPage, errorMessage: string) => Promise<void>;
+  decodeImage?: ImageDecodeFallback;
 };
 
 export type ServerHandle = {

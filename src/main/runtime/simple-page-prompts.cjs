@@ -143,6 +143,7 @@ const OVERLAY_PROMPT_SECTIONS = [
 const PROMPT_KO_BBOX_LINES_MULTIVIEW = buildOverlayPrompt();
 
 function buildSystemPrompt(options = {}) {
+  const includeSoundEffects = shouldIncludeSoundEffects(options);
   const lines = [
     "You are an OCR and manga-translation engine.",
     "Translate all Japanese and English source text into natural Korean.",
@@ -150,11 +151,23 @@ function buildSystemPrompt(options = {}) {
     "Return only the machine-readable record format requested by the user prompt.",
     "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
     "Never merge separate speech bubbles, including touching or stacked balloon lobes.",
-    "Render ordinary speech/caption/label Korean horizontally by default; source vertical direction is not a reason to make Korean vertical.",
-    "For SFX records, output bare Korean effect lettering only; do not wrap it in parentheses/brackets/quotes or turn it into a stage direction.",
-    "For SFX records, choose compact Korean effect lettering that fits the scene and rhythm. Do not mechanically transliterate Japanese kana, and do not force ambient sounds into dialogue words or action descriptions.",
-    "For SFX records, confidence must be 1.00 only when the complete sound effect is unquestionably real Japanese or English text and fully read; otherwise use confidence below 1.00."
+    "Render ordinary speech/caption/label Korean horizontally by default; source vertical direction is not a reason to make Korean vertical."
   ];
+
+  if (includeSoundEffects) {
+    lines.push(
+      "For SFX records, output bare Korean effect lettering only; do not wrap it in parentheses/brackets/quotes or turn it into a stage direction.",
+      "For SFX records, choose compact Korean effect lettering that fits the scene and rhythm. Do not mechanically transliterate Japanese kana, and do not force ambient sounds into dialogue words or action descriptions.",
+      "For SFX records, confidence must be 1.00 only when the complete sound effect is unquestionably real Japanese or English text and fully read; otherwise use confidence below 1.00."
+    );
+  } else {
+    lines.push(
+      "Sound effects are disabled for this job.",
+      "Do not output sound effects, background sound lettering, reaction lettering, decorative SFX, ambient sound text, or standalone effect lettering.",
+      "Never output textRole: sound. Every accepted record must use textRole: ordinary.",
+      "If a source item is standalone sound/reaction/background lettering, skip it entirely instead of translating it."
+    );
+  }
 
   if (options.regionCropMode) {
     lines.push(
@@ -214,8 +227,21 @@ function applySoundEffectPreference(sections, options = {}) {
   const renderingHints = sections.find((section) => section[0] === "Rendering hints");
   if (renderingHints) {
     const kept = renderingHints.filter((line, index) => index === 0 || !/\bSFX\b|sound-effect|reaction lettering/i.test(line));
-    kept.push("When sound-effect or reaction lettering is present, ignore it instead of translating it.");
+    kept.push(
+      "When sound-effect, background sound, decorative SFX, or reaction lettering is present, ignore it instead of translating it.",
+      "All accepted records must use textRole ordinary. Never output textRole sound when sound effects are disabled."
+    );
     renderingHints.splice(0, renderingHints.length, ...kept);
+  }
+
+  const output = sections.find((section) => section[0] === "Output");
+  if (output) {
+    output.splice(
+      Math.min(output.length, 6),
+      0,
+      "Sound effects are disabled. Do not output textRole sound; skip standalone sound/reaction/background/decorative effect lettering entirely.",
+      "Every accepted record must use textRole ordinary."
+    );
   }
 }
 
@@ -223,9 +249,12 @@ function buildTaskSection(options = {}, imageVariants = []) {
   const hasAssistImages = imageVariants.length > 1;
   const regionCropMode = Boolean(options.regionCropMode);
   const textOnlyMode = String(options.translationMode ?? "image") === "ocr-text";
+  const multiPageTextBatch = Boolean(options.multiPageOcrTextBatch);
   return [
     "Task",
-    textOnlyMode
+    textOnlyMode && multiPageTextBatch
+      ? "You are given OCR candidate records from multiple manga pages. No image is included in this request."
+      : textOnlyMode
       ? "You are given OCR candidate records from a manga page. No image is included in this request."
       : hasAssistImages
         ? "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English."
@@ -233,7 +262,9 @@ function buildTaskSection(options = {}, imageVariants = []) {
           ? "You are given one user-selected crop from a manga page. Source text may be Japanese, English, or mixed Japanese/English."
           : "You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.",
     textOnlyMode
-      ? "Use the OCR text and bbox candidates as the only source of evidence."
+      ? multiPageTextBatch
+        ? "Use the OCR text and bbox candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
+        : "Use the OCR text and bbox candidates as the only source of evidence."
       : hasAssistImages
         ? "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page."
         : regionCropMode
@@ -253,10 +284,15 @@ function buildRegionCropSection(options = {}) {
     return [];
   }
 
+  const includeSoundEffects = shouldIncludeSoundEffects(options);
   return [
     "Selected region grouping",
-    "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or SFX inside it.",
-    "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate containers: separate speech bubbles/lobes, separate caption plates, or separate SFX glyph groups.",
+    includeSoundEffects
+      ? "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or SFX inside it."
+      : "This image is a crop selected by the user, so there may be one speech bubble, part of one bubble, multiple bubbles, captions, or ignored sound-effect lettering inside it.",
+    includeSoundEffects
+      ? "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate containers: separate speech bubbles/lobes, separate caption plates, or separate SFX glyph groups."
+      : "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate ordinary text containers: separate speech bubbles/lobes or separate caption plates. Ignore SFX glyph groups.",
     "If the crop contains one speech bubble or one caption plate, output exactly one record for all readable Japanese or English text in that container.",
     "Inside one speech bubble, never split by source text column, text line, word, sentence fragment, punctuation gap, or line break.",
     "For vertical dialogue in one bubble, jp must include all columns in natural Japanese reading order, and ko must be one coherent Korean translation for that bubble.",
@@ -313,6 +349,8 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
 
   const hintLimit = resolveOcrBboxHintLimit(options);
   const textOnlyMode = String(options.translationMode ?? "image") === "ocr-text";
+  const multiPageTextBatch = Boolean(options.multiPageOcrTextBatch);
+  const includeSoundEffects = shouldIncludeSoundEffects(options);
   const frame = resolvePromptCoordinateFrame(options, imageVariants);
   const originalWidth = readPositiveInteger(options.imageWidth);
   const originalHeight = readPositiveInteger(options.imageHeight);
@@ -335,6 +373,12 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
     "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together.",
     "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
+    ...(multiPageTextBatch
+      ? [
+          "This request contains candidates from multiple pages. Candidate labels are prefixed like page_1, page_2, etc.",
+          "Never merge candidates across different page labels. Return each accepted record with the same numeric candidate id shown below."
+        ]
+      : []),
     "For every translatable record, ko must be Korean Hangul. If the source text is Japanese, English, or mixed, translate it into Korean only.",
     "Keep Arabic numerals and compact UI numbering exactly as digits and separators in ko. Examples: 2/22 stays 2/22, 104/104 stays 104/104, Chapter 104/104 Page 2/22 may become 챕터 104/104 페이지 2/22.",
     `Required candidate ids: ${candidateIds.join(", ")}.`,
@@ -342,9 +386,13 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
     "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
     "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the source line breaks.",
-    "For every accepted candidate, output type nonsolid and set textRole to ordinary or sound.",
+    includeSoundEffects
+      ? "For every accepted candidate, output type nonsolid and set textRole to ordinary or sound."
+      : "For every accepted candidate, output type nonsolid and set textRole to ordinary. Never output textRole sound.",
     "If a candidate is a sweat drop, texture, decoration, panel trim, or other non-text mark, skip it instead of inventing text.",
-    "For candidate SFX, confidence must be 1.00 only when the complete effect text is clearly read; otherwise use confidence below 1.00.",
+    includeSoundEffects
+      ? "For candidate SFX, confidence must be 1.00 only when the complete effect text is clearly read; otherwise use confidence below 1.00."
+      : "If a candidate is standalone SFX, background sound lettering, reaction lettering, or decorative effect text, skip it instead of translating it.",
     "You may change a candidate bbox only when Image 1 clearly proves the candidate clips visible glyph strokes or includes non-text art; then change the minimum amount needed.",
     "Do not merge two candidates into one record, even when the sentence continues across them. Candidate rectangles are separate output records.",
     "If two candidates are stacked or touching speech bubbles, output two separate dialogue records with their original ids.",
@@ -357,8 +405,14 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
           "OCR candidates are a floor, not a ceiling. After processing candidates, inspect the whole Image 1 again for missing Japanese or English text.",
           `If the detector missed visible Japanese or English text, add a new record with id greater than ${maxCandidateId}. Never reuse a candidate id for missing text outside that candidate rectangle.`,
           "New records are allowed only for clear Japanese or English glyphs that are not covered by any candidate.",
-          "For new missing SFX records, search especially near character bodies, panel edges, and lower panels where OCR often misses gray or outlined kana. The bbox must visibly cover kana/SFX glyph strokes.",
-          "Never add SFX on panel trim, furniture lines, wall patterns, or isolated vertical strokes."
+          ...(includeSoundEffects
+            ? [
+                "For new missing SFX records, search especially near character bodies, panel edges, and lower panels where OCR often misses gray or outlined kana. The bbox must visibly cover kana/SFX glyph strokes.",
+                "Never add SFX on panel trim, furniture lines, wall patterns, or isolated vertical strokes."
+              ]
+            : [
+                "Do not add missing records for SFX, background sound lettering, reaction lettering, decorative effect text, or ambient sound marks."
+              ])
         ]),
     "The candidate coordinates below are already converted into the same coordinate frame required for your output.",
     "",

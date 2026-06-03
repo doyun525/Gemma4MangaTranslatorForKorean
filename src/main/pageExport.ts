@@ -6,6 +6,7 @@ import { basename, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { deflateSync } from "node:zlib";
 import { bboxToPixels, clamp, resolveBlockRenderBbox } from "../shared/geometry";
+import { resolveBlockCornerRadiusPx } from "../shared/blockVisuals";
 import type { CustomFont, MangaPage, TranslationBlock } from "../shared/types";
 import { getAppPaths } from "./appPaths";
 import { listCustomFonts } from "./customFonts";
@@ -159,7 +160,7 @@ async function renderPageExportTile(
 export function sanitizeOutputBaseName(value: string): string {
   const raw = basename(value, extname(value)) || "page";
   const cleaned = raw.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim();
-  return (cleaned || "page").slice(0, 80);
+  return cleaned || "page";
 }
 
 async function loadImageForPngExport(imagePath: string, decodeFallback: ImageDecodeFallback): Promise<Electron.NativeImage> {
@@ -439,7 +440,7 @@ function drawExportBlock(ctx, block) {
   }
   if (block.showChrome) {
     ctx.fillStyle = block.backgroundRgba;
-    ctx.fillRect(drawRect.left, drawRect.top, drawRect.width, drawRect.height);
+    fillRoundedRect(ctx, drawRect.left, drawRect.top, drawRect.width, drawRect.height, block.cornerRadiusPx);
   }
   if (block.renderDirection === "vertical") {
     drawVerticalText(ctx, block, drawRect, fontSize);
@@ -447,6 +448,29 @@ function drawExportBlock(ctx, block) {
     drawHorizontalText(ctx, block, drawRect, fontSize);
   }
   ctx.restore();
+}
+
+function fillRoundedRect(ctx, left, top, width, height, radius) {
+  const resolvedRadius = Math.max(0, Math.min(Number(radius) || 0, width / 2, height / 2));
+  if (resolvedRadius <= 0) {
+    ctx.fillRect(left, top, width, height);
+    return;
+  }
+  ctx.beginPath();
+  if (typeof ctx.roundRect === "function") {
+    ctx.roundRect(left, top, width, height, resolvedRadius);
+  } else {
+    ctx.moveTo(left + resolvedRadius, top);
+    ctx.lineTo(left + width - resolvedRadius, top);
+    ctx.quadraticCurveTo(left + width, top, left + width, top + resolvedRadius);
+    ctx.lineTo(left + width, top + height - resolvedRadius);
+    ctx.quadraticCurveTo(left + width, top + height, left + width - resolvedRadius, top + height);
+    ctx.lineTo(left + resolvedRadius, top + height);
+    ctx.quadraticCurveTo(left, top + height, left, top + height - resolvedRadius);
+    ctx.lineTo(left, top + resolvedRadius);
+    ctx.quadraticCurveTo(left, top, left + resolvedRadius, top);
+  }
+  ctx.fill();
 }
 
 function loadExportImage() {
@@ -608,6 +632,7 @@ type PageExportBlock = {
   autoFitText: boolean;
   showChrome: boolean;
   backgroundRgba: string;
+  cornerRadiusPx: number;
 };
 
 function buildPageExportBlock(
@@ -657,7 +682,8 @@ function buildPageExportBlock(
     outlineWidthScale: block.outlineWidthScale == null ? 1 : Math.max(0, block.outlineWidthScale),
     autoFitText: block.autoFitText ?? false,
     showChrome,
-    backgroundRgba: buildRgbaColor(normalizeExportColor(block.backgroundColor, "#ffffff"), clamp(block.opacity ?? 1, 0, 1))
+    backgroundRgba: buildRgbaColor(normalizeExportColor(block.backgroundColor, "#ffffff"), clamp(block.opacity ?? 1, 0, 1)),
+    cornerRadiusPx: resolveBlockCornerRadiusPx(rect.w * scaleX, scaledHeight)
   };
 }
 

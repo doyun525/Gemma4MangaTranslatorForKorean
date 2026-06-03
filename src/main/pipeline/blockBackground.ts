@@ -1,4 +1,5 @@
 import { nativeImage } from "electron";
+import type { ImageDecodeFallback } from "../regionCrop";
 import {
   FLAT_BACKGROUND_OPACITY,
   sampleBlockBackgroundsFromBitmap,
@@ -8,12 +9,12 @@ import {
 import { logInfo } from "../logger";
 import type { MangaPage, TranslationBlock } from "../../shared/types";
 
-export async function applySampledBackgroundColors(blocks: TranslationBlock[], page: MangaPage): Promise<TranslationBlock[]> {
+export async function applySampledBackgroundColors(blocks: TranslationBlock[], page: MangaPage, decodeFallback?: ImageDecodeFallback): Promise<TranslationBlock[]> {
   if (blocks.length === 0) {
     return blocks;
   }
 
-  const bitmapData = await loadPageBitmap(page.imagePath);
+  const bitmapData = await loadPageBitmap(page.imagePath, decodeFallback);
   if (!bitmapData) {
     return blocks;
   }
@@ -36,14 +37,33 @@ export async function sampleBlockBackgrounds(
   imagePath: string,
   pageWidth: number,
   pageHeight: number,
-  blocks: BlockBackgroundSampleInput[]
+  blocks: BlockBackgroundSampleInput[],
+  decodeFallback?: ImageDecodeFallback
 ): Promise<BlockBackgroundSampleResult[]> {
+  logInfo("Block background sampling requested", {
+    source: "manual",
+    imagePath,
+    pageWidth,
+    pageHeight,
+    blockCount: blocks.length,
+    blocks: blocks.slice(0, 5)
+  });
   if (blocks.length === 0) {
+    logInfo("Block background sampling skipped", {
+      source: "manual",
+      imagePath,
+      reason: "no-blocks"
+    });
     return [];
   }
 
-  const bitmapData = await loadPageBitmap(imagePath);
+  const bitmapData = await loadPageBitmap(imagePath, decodeFallback);
   if (!bitmapData) {
+    logInfo("Block background sampling skipped", {
+      source: "manual",
+      imagePath,
+      reason: "image-load-failed"
+    });
     return blocks.map((block) => ({ id: block.id, flat: false }));
   }
 
@@ -67,12 +87,12 @@ function applySampleToBlock(block: TranslationBlock, sample: BlockBackgroundSamp
   return {
     ...block,
     backgroundColor: sample.backgroundColor,
-    opacity: Math.max(block.opacity, FLAT_BACKGROUND_OPACITY)
+    opacity: Math.max(block.opacity ?? 0, FLAT_BACKGROUND_OPACITY)
   };
 }
 
-async function loadPageBitmap(imagePath: string): Promise<{ bitmap: Buffer; width: number; height: number } | null> {
-  const image = nativeImage.createFromPath(imagePath);
+async function loadPageBitmap(imagePath: string, decodeFallback?: ImageDecodeFallback): Promise<{ bitmap: Buffer; width: number; height: number } | null> {
+  const image = await loadPageImage(imagePath, decodeFallback);
   if (image.isEmpty()) {
     return null;
   }
@@ -86,6 +106,24 @@ async function loadPageBitmap(imagePath: string): Promise<{ bitmap: Buffer; widt
   return { bitmap, width: size.width, height: size.height };
 }
 
+async function loadPageImage(imagePath: string, decodeFallback?: ImageDecodeFallback): Promise<Electron.NativeImage> {
+  const direct = nativeImage.createFromPath(imagePath);
+  if (!direct.isEmpty()) {
+    return direct;
+  }
+
+  const pngBuffer = decodeFallback ? await decodeFallback(imagePath) : null;
+  if (pngBuffer) {
+    const converted = nativeImage.createFromBuffer(pngBuffer);
+    if (!converted.isEmpty()) {
+      logInfo("Block background decoded image through png conversion", { imagePath });
+      return converted;
+    }
+  }
+
+  return direct;
+}
+
 function logBackgroundSampleSummary(
   source: "pipeline" | "manual",
   imagePath: string,
@@ -94,6 +132,7 @@ function logBackgroundSampleSummary(
   samples: BlockBackgroundSampleResult[]
 ): void {
   const flatCount = samples.filter((sample) => sample.flat).length;
+  const accepted = samples.filter((sample) => sample.flat).slice(0, 12);
   const failed = samples.filter((sample) => !sample.flat).slice(0, 12);
   logInfo("Block background sampling completed", {
     source,
@@ -103,6 +142,7 @@ function logBackgroundSampleSummary(
     blockCount: samples.length,
     flatCount,
     failedCount: samples.length - flatCount,
+    accepted,
     failed
   });
 }

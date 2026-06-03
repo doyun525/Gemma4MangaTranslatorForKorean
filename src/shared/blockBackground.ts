@@ -23,9 +23,26 @@ export type BlockBackgroundSampleResult = {
   dominance?: number;
   maxStddev?: number;
   sampleCount?: number;
+  sampledColor?: Rgb;
+  sampledHex?: string;
+  luminance?: number;
+  imageRect?: BBox;
+  candidates?: BackgroundCandidateDiagnostic[];
 };
 
 export const FLAT_BACKGROUND_OPACITY = 0.96;
+export const DOMINANT_BACKGROUND_MIN_RATIO = 0.5;
+export const BRIGHT_PAPER_BACKGROUND_MIN_RATIO = 0.7;
+
+export type BackgroundCandidateDiagnostic = {
+  kind: "bucket" | "bright-paper";
+  color: Rgb;
+  hex: string;
+  dominance: number;
+  maxStddev: number;
+  luminance: number;
+  accepted: boolean;
+};
 
 export function estimateBackgroundFromBitmap(
   bitmap: Uint8Array,
@@ -79,7 +96,7 @@ export function estimateBackgroundFromBitmap(
     color,
     dominance,
     maxStddev,
-    flat: dominance >= 0.56 && maxStddev <= 18
+    flat: dominance >= DOMINANT_BACKGROUND_MIN_RATIO && maxStddev <= 18
   };
 }
 
@@ -90,7 +107,12 @@ function estimateBackgroundWithReason(
   blockBbox: BBox,
   pageWidth: number,
   pageHeight: number
-): (SampledBackground & { sampleCount: number; reason?: string }) | { reason: string; sampleCount?: number } {
+): (SampledBackground & {
+  sampleCount: number;
+  reason?: string;
+  imageRect: BBox;
+  candidates: BackgroundCandidateDiagnostic[];
+}) | { reason: string; sampleCount?: number; imageRect?: BBox; candidates?: BackgroundCandidateDiagnostic[] } {
   const rect = blockBboxToImageRect(blockBbox, pageWidth, pageHeight, imageWidth, imageHeight);
   if (!rect || rect.w < 3 || rect.h < 3) {
     return { reason: "bbox-too-small" };
@@ -118,9 +140,10 @@ function estimateBackgroundWithReason(
     }
   }
 
+  const candidates = buildBackgroundCandidates([...buckets.values()], samples.length);
   const dominant = chooseBackgroundBucket([...buckets.values()], samples.length);
   if (!dominant) {
-    return { reason: "no-dominant-bucket", sampleCount: samples.length };
+    return { reason: "no-dominant-bucket", sampleCount: samples.length, imageRect: rect, candidates: candidates.slice(0, 5) };
   }
 
   const dominantSamples = dominant.samples;
@@ -139,7 +162,9 @@ function estimateBackgroundWithReason(
     maxStddev,
     flat,
     sampleCount: samples.length,
-    reason: flat ? undefined : dominance < 0.56 ? "low-dominance" : "high-variance"
+    imageRect: rect,
+    candidates: candidates.slice(0, 5),
+    reason: flat ? undefined : dominance < DOMINANT_BACKGROUND_MIN_RATIO ? "low-dominance" : "high-variance"
   };
 }
 
@@ -160,7 +185,12 @@ export function sampleBlockBackgroundsFromBitmap(
         reason: sampled.reason,
         dominance: "dominance" in sampled ? sampled.dominance : undefined,
         maxStddev: "maxStddev" in sampled ? sampled.maxStddev : undefined,
-        sampleCount: sampled.sampleCount
+        sampleCount: sampled.sampleCount,
+        sampledColor: "color" in sampled ? sampled.color : undefined,
+        sampledHex: "color" in sampled ? rgbToHex(sampled.color) : undefined,
+        luminance: "color" in sampled ? rgbLuminance(sampled.color) : undefined,
+        imageRect: sampled.imageRect,
+        candidates: sampled.candidates
       };
     }
     return {
@@ -169,6 +199,11 @@ export function sampleBlockBackgroundsFromBitmap(
       dominance: sampled.dominance,
       maxStddev: sampled.maxStddev,
       sampleCount: sampled.sampleCount,
+      sampledColor: sampled.color,
+      sampledHex: rgbToHex(sampled.color),
+      luminance: rgbLuminance(sampled.color),
+      imageRect: sampled.imageRect,
+      candidates: sampled.candidates,
       backgroundColor: rgbToHex(sampled.color)
     };
   });
@@ -205,7 +240,13 @@ function readRgb(bitmap: Uint8Array, width: number, x: number, y: number): Rgb {
 }
 
 function chooseBackgroundBucket(buckets: Rgb[][], sampleCount: number): { samples: Rgb[]; accepted: boolean } | null {
-  const candidates = buckets
+  const candidates = buildBackgroundCandidates(buckets, sampleCount);
+  const best = candidates[0];
+  return best ? { samples: best.samples, accepted: best.accepted } : null;
+}
+
+function buildBackgroundCandidates(buckets: Rgb[][], sampleCount: number): Array<BackgroundCandidateDiagnostic & { samples: Rgb[] }> {
+  const candidates: Array<BackgroundCandidateDiagnostic & { samples: Rgb[] }> = buckets
     .filter((bucket) => bucket.length > 0)
     .map((bucket) => {
       const color = {
@@ -217,17 +258,52 @@ function chooseBackgroundBucket(buckets: Rgb[][], sampleCount: number): { sample
       const maxStddev = Math.max(stddev.r, stddev.g, stddev.b);
       const dominance = bucket.length / Math.max(1, sampleCount);
       const luminance = rgbLuminance(color);
-      const accepted = (dominance >= 0.56 && maxStddev <= 18) || (luminance >= 190 && dominance >= 0.28 && maxStddev <= 24);
-      return { bucket, dominance, maxStddev, luminance, accepted };
-    })
+      const accepted =
+        (dominance >= DOMINANT_BACKGROUND_MIN_RATIO && maxStddev <= 18) ||
+        (luminance >= 190 && dominance >= BRIGHT_PAPER_BACKGROUND_MIN_RATIO && maxStddev <= 24);
+      return { kind: "bucket" as const, samples: bucket, color, hex: rgbToHex(color), dominance, maxStddev, luminance, accepted };
+    });
+
+  const brightPaperSamples = collectBrightPaperSamples(buckets.flat());
+  if (brightPaperSamples.length > 0) {
+    const color = {
+      r: median(brightPaperSamples.map((sample) => sample.r)),
+      g: median(brightPaperSamples.map((sample) => sample.g)),
+      b: median(brightPaperSamples.map((sample) => sample.b))
+    };
+    const stddev = colorStddev(brightPaperSamples, color);
+    const maxStddev = Math.max(stddev.r, stddev.g, stddev.b);
+    const dominance = brightPaperSamples.length / Math.max(1, sampleCount);
+    const luminance = rgbLuminance(color);
+    candidates.push({
+      kind: "bright-paper",
+      samples: brightPaperSamples,
+      color,
+      hex: rgbToHex(color),
+      dominance,
+      maxStddev,
+      luminance,
+      accepted: luminance >= 185 && dominance >= BRIGHT_PAPER_BACKGROUND_MIN_RATIO && maxStddev <= 32
+    });
+  }
+
+  const sorted = candidates
     .sort((left, right) => {
       if (left.accepted !== right.accepted) {
         return left.accepted ? -1 : 1;
       }
       return right.dominance - left.dominance || right.luminance - left.luminance;
     });
-  const best = candidates[0];
-  return best ? { samples: best.bucket, accepted: best.accepted } : null;
+  return sorted;
+}
+
+function collectBrightPaperSamples(samples: Rgb[]): Rgb[] {
+  return samples.filter((sample) => {
+    const max = Math.max(sample.r, sample.g, sample.b);
+    const min = Math.min(sample.r, sample.g, sample.b);
+    const luminance = rgbLuminance(sample);
+    return luminance >= 175 && max - min <= 58;
+  });
 }
 
 function rgbLuminance(color: Rgb): number {

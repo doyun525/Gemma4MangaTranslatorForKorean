@@ -30,8 +30,10 @@ import {
 } from "../library";
 import { sampleBlockBackgrounds } from "../pipeline/blockBackground";
 import { createLibraryImageUrl } from "../imageProtocol";
+import { logInfo } from "../logger";
+import type { IpcContext } from "./context";
 
-export function registerLibraryIpc(): void {
+export function registerLibraryIpc(context: IpcContext): void {
   ipcMain.handle("library:get-index", async () => listLibrary());
   ipcMain.handle("library:open-folder", async () => {
     await shell.openPath(getLibraryRoot());
@@ -51,7 +53,14 @@ export function registerLibraryIpc(): void {
   );
   ipcMain.handle("library:sample-block-backgrounds", async (_event, raw: unknown) => {
     const request = parseIpcPayload(SampleBlockBackgroundsRequestSchema, raw, "블록 배경색 샘플");
-    const results = await sampleBlockBackgrounds(request.imagePath, request.pageWidth, request.pageHeight, request.blocks);
+    logInfo("Block background sample IPC received", {
+      imagePath: request.imagePath,
+      pageWidth: request.pageWidth,
+      pageHeight: request.pageHeight,
+      blockCount: request.blocks.length,
+      blocks: request.blocks.slice(0, 5)
+    });
+    const results = await sampleBlockBackgrounds(request.imagePath, request.pageWidth, request.pageHeight, request.blocks, context.decodeImage);
     return { results };
   });
   ipcMain.handle("library:rename-work", async (_event, workId: unknown, title: unknown) => {
