@@ -83,6 +83,8 @@ export function SettingsModal({
   );
   const [customModelRepo, setCustomModelRepo] = React.useState(initialSettings.gemma.modelRepo);
   const [customModelFile, setCustomModelFile] = React.useState(initialSettings.gemma.modelFile);
+  const [customMmprojRepo, setCustomMmprojRepo] = React.useState(initialSettings.gemma.mmprojRepo ?? "");
+  const [customMmprojFile, setCustomMmprojFile] = React.useState(initialSettings.gemma.mmprojFile ?? "");
   const [customModelPresets, setCustomModelPresets] = React.useState<GemmaCustomModelPreset[]>(
     initialSettings.gemma.customModelPresets ?? []
   );
@@ -133,6 +135,8 @@ export function SettingsModal({
     setSelectedPreset(resolveModelPreset(initialSettings.gemma.modelRepo, initialSettings.gemma.modelFile));
     setCustomModelRepo(initialSettings.gemma.modelRepo);
     setCustomModelFile(initialSettings.gemma.modelFile);
+    setCustomMmprojRepo(initialSettings.gemma.mmprojRepo ?? "");
+    setCustomMmprojFile(initialSettings.gemma.mmprojFile ?? "");
     setCustomModelPresets(initialSettings.gemma.customModelPresets ?? []);
     setSelectedCustomPresetId(
       resolveInitialCustomPresetId(
@@ -190,8 +194,9 @@ export function SettingsModal({
   const activePreset = modelSource === "huggingface" && selectedPreset !== "custom" ? MODEL_PRESETS[selectedPreset] : null;
   const trimmedModelRepo = (activePreset?.modelRepo ?? customModelRepo).trim();
   const trimmedModelFile = (activePreset?.modelFile ?? customModelFile).trim();
-  const trimmedMmprojRepo = activePreset?.mmprojRepo;
-  const trimmedMmprojFile = activePreset?.mmprojFile;
+  const resolvedCustomMmproj = resolveStoredCustomMmproj(customModelRepo, customMmprojRepo, customMmprojFile);
+  const trimmedMmprojRepo = activePreset?.mmprojRepo ?? resolvedCustomMmproj.mmprojRepo;
+  const trimmedMmprojFile = activePreset?.mmprojFile ?? resolvedCustomMmproj.mmprojFile;
   const normalizedCustomModelPresets = React.useMemo(
     () => normalizeCustomModelPresetsForSettings(customModelPresets),
     [customModelPresets]
@@ -210,10 +215,13 @@ export function SettingsModal({
       id: existingPreset?.id ?? createCustomPresetId(modelRepo, modelFile, normalizedCustomModelPresets),
       label: existingPreset?.label ?? buildCustomPresetLabel(modelRepo, modelFile),
       modelRepo,
-      modelFile
+      modelFile,
+      ...resolveStoredCustomMmproj(modelRepo, customMmprojRepo, customMmprojFile)
     };
     return normalizeCustomModelPresetsForSettings(upsertCustomModelPreset(normalizedCustomModelPresets, currentPreset));
   }, [
+    customMmprojFile,
+    customMmprojRepo,
     customModelFile,
     customModelRepo,
     modelSource,
@@ -380,13 +388,14 @@ export function SettingsModal({
       id: existingPreset?.id ?? createCustomPresetId(modelRepo, modelFile, customModelPresets),
       label: existingPreset?.label ?? buildCustomPresetLabel(modelRepo, modelFile),
       modelRepo,
-      modelFile
+      modelFile,
+      ...resolveStoredCustomMmproj(modelRepo, customMmprojRepo, customMmprojFile)
     };
 
     setCustomModelPresets((current) => upsertCustomModelPreset(current, nextPreset));
     setSelectedCustomPresetId(nextPreset.id);
     clearTestState();
-  }, [clearTestState, customModelFile, customModelPresets, customModelRepo, selectedCustomPresetId]);
+  }, [clearTestState, customMmprojFile, customMmprojRepo, customModelFile, customModelPresets, customModelRepo, selectedCustomPresetId]);
 
   const deleteSelectedCustomPreset = React.useCallback(() => {
     if (!selectedCustomPresetId) {
@@ -804,6 +813,8 @@ export function SettingsModal({
                         if (preset) {
                           setCustomModelRepo(preset.modelRepo);
                           setCustomModelFile(preset.modelFile);
+                          setCustomMmprojRepo(preset.mmprojRepo ?? "");
+                          setCustomMmprojFile(preset.mmprojFile ?? "");
                         }
                       }}
                     >
@@ -850,6 +861,46 @@ export function SettingsModal({
                       }}
                     />
                   </label>
+                  <label>
+                    mmproj HF repo (선택)
+                    <input
+                      value={customMmprojRepo}
+                      disabled={controlsBusy}
+                      placeholder="비우면 위 HF repo와 동일"
+                      onChange={(event) => {
+                        clearTestState();
+                        setSelectedCustomPresetId("");
+                        setCustomMmprojRepo(event.target.value);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          submit();
+                        }
+                      }}
+                    />
+                  </label>
+                  <label>
+                    mmproj 파일명
+                    <input
+                      value={customMmprojFile}
+                      disabled={controlsBusy}
+                      placeholder="예: gemma-4-....mmproj-f16.gguf"
+                      onChange={(event) => {
+                        clearTestState();
+                        setSelectedCustomPresetId("");
+                        setCustomMmprojFile(event.target.value);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          submit();
+                        }
+                      }}
+                    />
+                  </label>
+                  <p className="muted-line modal-note">
+                    이미지 번역 모드에는 vision용 mmproj가 필요합니다. 모델 테스트·번역 시작 시 GGUF와 함께 Hugging Face에서
+                    다운로드합니다. repo를 비우면 GGUF와 같은 HF repo를 사용합니다.
+                  </p>
                   <div className="settings-inline-actions">
                     <button
                       type="button"
@@ -1047,6 +1098,25 @@ export function SettingsModal({
         </section>
     </Modal>
   );
+}
+
+function resolveStoredCustomMmproj(
+  modelRepo: string,
+  mmprojRepo: string,
+  mmprojFile: string
+): Pick<GemmaCustomModelPreset, "mmprojRepo" | "mmprojFile"> {
+  const trimmedFile = mmprojFile.trim();
+  if (!trimmedFile) {
+    return {};
+  }
+  const trimmedRepo = mmprojRepo.trim() || modelRepo.trim();
+  if (!trimmedRepo) {
+    return {};
+  }
+  return {
+    mmprojRepo: trimmedRepo,
+    mmprojFile: trimmedFile
+  };
 }
 
 function resolveInitialCustomPresetId(

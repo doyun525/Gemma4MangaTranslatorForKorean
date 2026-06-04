@@ -42,6 +42,12 @@ const GEMMA_26B_OCR_ANCHOR_LINES = [
   "Use the OCR text hint and candidate rectangle together to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
 ];
 
+const GEMMA_26B_OCR_TEXT_ANCHOR_LINES = [
+  "OCR text hints may be wrong, incomplete, or split strangely, but keep each record anchored to the listed candidate id and rectangle.",
+  "Prefer the provided ocrText and bbox together; fix obvious OCR splits or garbling only when the text clearly belongs to one readable item.",
+  "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
+];
+
 const GEMMA_26B_OCR_DUPLICATE_LINES = [
   "Each candidate id is single-use. A candidate rectangle can produce at most one output record, even when the text has several vertical columns or several visible lines.",
   "Do not create another record whose bbox sits on the same place as an accepted candidate. If the text is inside or mostly inside a candidate rectangle, it belongs to that candidate id.",
@@ -180,6 +186,10 @@ const OVERLAY_PROMPT_SECTIONS = [
 
 const PROMPT_KO_BBOX_LINES_MULTIVIEW = buildOverlayPrompt();
 
+function isOcrTextOnlyTranslationMode(options = {}) {
+  return String(options.translationMode ?? "image").trim() === "ocr-text";
+}
+
 function buildSystemPrompt(options = {}) {
   const includeSoundEffects = shouldIncludeSoundEffects(options);
   const lines = [
@@ -187,7 +197,9 @@ function buildSystemPrompt(options = {}) {
     "Translate all Japanese and English source text into natural Korean.",
     "Every ko field must be Korean Hangul. Never answer ko in English, Chinese, Japanese, romaji, or pinyin.",
     "Return only the machine-readable record format requested by the user prompt.",
-    "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
+    isOcrTextOnlyTranslationMode(options)
+      ? "Geometry accuracy comes before Korean text fit: preserve each candidate bbox from the OCR list unless a minimal correction is clearly required."
+      : "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
     "Never merge separate speech bubbles, including touching or stacked balloon lobes.",
     "Render ordinary speech/caption/label Korean horizontally by default; source vertical direction is not a reason to make Korean vertical."
   ];
@@ -224,7 +236,120 @@ function buildSystemPrompt(options = {}) {
   return lines.join("\n\n");
 }
 
+function buildOcrTextTaskSection(options = {}) {
+  const multiPageTextBatch = Boolean(options.multiPageOcrTextBatch);
+  return [
+    "Task",
+    multiPageTextBatch
+      ? "You are given OCR candidate records from multiple manga pages. No image is included in this request."
+      : "You are given OCR candidate records from one manga page. No image is included in this request.",
+    multiPageTextBatch
+      ? "Use the OCR text and bbox candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
+      : "Use the OCR text and bbox candidates as the only source of evidence.",
+    "Translate every listed candidate that contains real Japanese or English text into concise Korean.",
+    "Do not add records beyond the listed candidate ids, and do not invent text that is not supported by a candidate's ocrText or label.",
+    "Only output real Japanese or English text. Skip decorative marks, unreadable scraps, and non-text OCR noise."
+  ];
+}
+
+function buildOcrTextOutputSection(options = {}) {
+  const includeSoundEffects = shouldIncludeSoundEffects(options);
+  const lines = [
+    "Output",
+    "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
+    "Use exactly these keys, one per line: id, type, textRole, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.",
+    "Derive jp primarily from ocrText when present; fix obvious OCR garbling only when the corrected reading is still clearly the same item.",
+    "Copy each candidate's x1, y1, x2, y2 unless a minimal correction is clearly required.",
+    "textRole is ordinary for speech bubbles, captions, narration, labels, signs, and notes.",
+    includeSoundEffects
+      ? "textRole is sound only for standalone printed sound/reaction lettering supported by the candidate text."
+      : "Never output textRole sound. Every accepted record must use textRole ordinary.",
+    "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese or English text, correctly read, correctly typed, and correctly translated.",
+    "Use confidence below 0.72 when ocrText is empty, garbled, possibly decorative, or the translation may be uncertain.",
+    "The jp field stores the original source text even when the source language is English. If jp has multiple readable source lines, put every readable source line in jp.",
+    "The ko field MUST be Korean written in Hangul. Never write English, Chinese, romaji, pinyin, or source-language text in ko except unavoidable names, numbers, or short symbols.",
+    "If you are unsure, still write the best concise Korean translation in ko. Do not copy jp into ko and do not translate ko into English.",
+    "Preserve Arabic numerals, slashes, decimal points, counters, issue numbers, chapter/page fractions, and UI pagination patterns.",
+    "Preserve sentence-ending intent in ko. If the source is a question, the Korean ko should normally end with ?. If the source is an exclamation or emphatic shout, keep ! when it preserves the tone.",
+    "For UI labels such as Chapter 104/104, Page 2/22, Login, Menu, or Filter, translate labels compactly if useful but keep numbers and separators unchanged.",
+    "Write ko as natural Korean for horizontal reading. Do not mirror source line breaks; use commas or short Korean phrases unless a real list or dialogue pause needs a line break.",
+    "Use the candidate rectangle size to choose natural line breaks for ko. Prefer 1-3 short lines for dialogue and captions.",
+    "If the entire jp or ko would be only [?], skip that record instead of outputting an unreadable placeholder.",
+    "Skip records whose jp is only punctuation, decorative marks, page numbers, a lone Latin letter, or a clipped one-character fragment.",
+    "Put one blank line between records.",
+    "Record template:",
+    OVERLAY_OUTPUT_SCHEMA
+  ];
+
+  if (shouldUse26BDuplicatePromptProfile(options)) {
+    lines.splice(4, 0, ...GEMMA_26B_DUPLICATE_OUTPUT_LINES);
+  }
+
+  return lines;
+}
+
+function buildOcrTextCandidateGeometrySection() {
+  return [
+    "Candidate geometry",
+    "Coordinates use the same frame as the OCR candidate list below, with top-left origin.",
+    "Copy each candidate's x1, y1, x2, y2 unless a minimal correction is clearly required.",
+    "direction is the original source writing direction: horizontal or vertical. Use horizontal when unclear.",
+    "angle is the visible slant in degrees from -30 to 30. Use 0 when unclear.",
+    "fontSize is an approximate overlay size in page pixels inferred from the candidate rectangle height.",
+    "For ordinary speech/caption/label text, Korean rendering should be horizontal by default even when direction is vertical."
+  ];
+}
+
+function buildOcrTextRenderingHintsSection(options = {}) {
+  const includeSoundEffects = shouldIncludeSoundEffects(options);
+  const lines = [
+    "Rendering hints",
+    "type must always be nonsolid.",
+    "For ordinary textRole, write ko as natural horizontal Korean.",
+    "For ordinary textRole, translate the source lexical meaning. Never replace an ordinary word with a Korean sound effect.",
+    "For ordinary textRole, keep source numerals as digits in ko.",
+    "Keep Korean short enough for an on-image overlay while preserving meaning.",
+    "If OCR is uncertain, write [?] only for the uncertain fragment and still output the item when the candidate is otherwise valid."
+  ];
+
+  if (includeSoundEffects) {
+    lines.push(
+      "For sound-effect or reaction lettering, ko must be bare Korean effect lettering only: no parentheses, brackets, quotes, or stage directions.",
+      "Do not mechanically transliterate Japanese kana when that would sound awkward in Korean.",
+      "For printed sound/reaction lettering, confidence must be 1.00 only for a complete, clearly read SFX; otherwise use confidence below 1.00."
+    );
+  } else {
+    lines.push(
+      "Sound effects are disabled. Skip standalone sound/reaction/background/decorative effect candidates instead of translating them.",
+      "Every accepted record must use textRole ordinary."
+    );
+  }
+
+  return lines;
+}
+
+function buildOcrTextOverlayPrompt(options = {}, imageVariants = []) {
+  const sections = [
+    buildOcrTextTaskSection(options),
+    buildOcrTextOutputSection(options),
+    buildOcrTextCandidateGeometrySection(),
+    buildOcrTextRenderingHintsSection(options)
+  ];
+  const ocrHintSection = buildOcrBboxHintSection(options, imageVariants);
+  if (ocrHintSection.length > 1) {
+    sections.push(ocrHintSection);
+  }
+
+  return sections
+    .map(([title, ...lines]) => [`# ${title}`, ...lines].join("\n"))
+    .join("\n\n");
+}
+
 function buildOverlayPrompt(options = {}, imageVariants = []) {
+  if (isOcrTextOnlyTranslationMode(options)) {
+    return buildOcrTextOverlayPrompt(options, imageVariants);
+  }
+
   const sections = OVERLAY_PROMPT_SECTIONS.map(([title, ...lines]) => [title, ...lines]);
   applySoundEffectPreference(sections, options);
   sections[0] = buildTaskSection(options, imageVariants);
@@ -249,7 +374,7 @@ function buildOverlayPrompt(options = {}, imageVariants = []) {
 }
 
 function applyModelSpecificPromptProfile(sections, options = {}) {
-  if (!shouldUse26BDuplicatePromptProfile(options)) {
+  if (!shouldUse26BDuplicatePromptProfile(options) || isOcrTextOnlyTranslationMode(options)) {
     return;
   }
 
@@ -447,11 +572,18 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     "OCR bbox candidates",
     "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
     ...(use26bDuplicateProfile
-      ? GEMMA_26B_OCR_ANCHOR_LINES
-      : [
-          "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
-          "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
-        ]),
+      ? textOnlyMode
+        ? GEMMA_26B_OCR_TEXT_ANCHOR_LINES
+        : GEMMA_26B_OCR_ANCHOR_LINES
+      : textOnlyMode
+        ? [
+            "OCR text hints may be wrong, incomplete, or split strangely. Treat ocrText as the primary source for jp and Korean translation.",
+            "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
+          ]
+        : [
+            "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
+            "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
+          ]),
     "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
     ...(use26bDuplicateProfile ? [GEMMA_26B_OCR_DUPLICATE_LINES[0]] : []),
     ...(multiPageTextBatch
@@ -463,9 +595,13 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     "For every translatable record, ko must be Korean Hangul. If the source text is Japanese, English, or mixed, translate it into Korean only.",
     "Keep Arabic numerals and compact UI numbering exactly as digits and separators in ko. Examples: 2/22 stays 2/22, 104/104 stays 104/104, Chapter 104/104 Page 2/22 may become 챕터 104/104 페이지 2/22.",
     `Required candidate ids: ${candidateIds.join(", ")}.`,
-    "Read and translate only the text inside that candidate rectangle plus a tiny visual margin; do not move the rectangle to a different nearby text group.",
+    textOnlyMode
+      ? "Translate only the text supported by that candidate's ocrText and label; do not move the rectangle to a different nearby text group."
+      : "Read and translate only the text inside that candidate rectangle plus a tiny visual margin; do not move the rectangle to a different nearby text group.",
     ...(use26bDuplicateProfile ? GEMMA_26B_OCR_DUPLICATE_LINES.slice(1) : []),
-    "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
+    textOnlyMode
+      ? "For each candidate, include every readable Japanese or English line supported by ocrText. A candidate record is incomplete if jp or ko omits a clearly present line from the same candidate."
+      : "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
     "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
     "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the source line breaks.",
     includeSoundEffects
@@ -475,7 +611,9 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     includeSoundEffects
       ? "For candidate SFX, confidence must be 1.00 only when the complete effect text is clearly read; otherwise use confidence below 1.00."
       : "If a candidate is standalone SFX, background sound lettering, reaction lettering, or decorative effect text, skip it instead of translating it.",
-    "You may change a candidate bbox only when Image 1 clearly proves the candidate clips visible glyph strokes or includes non-text art; then change the minimum amount needed.",
+    textOnlyMode
+      ? "Change a candidate bbox only when ocrText and the listed rectangle clearly conflict; then change the minimum amount needed."
+      : "You may change a candidate bbox only when Image 1 clearly proves the candidate clips visible glyph strokes or includes non-text art; then change the minimum amount needed.",
     "Do not merge two candidates into one record, even when the sentence continues across them. Candidate rectangles are separate output records.",
     "If two candidates are stacked or touching speech bubbles, output two separate dialogue records with their original ids.",
     ...(textOnlyMode

@@ -489,6 +489,40 @@ describe("app settings helpers", () => {
     });
   });
 
+  it("resolves custom mmproj repo from the model repo when only mmproj file is stored", () => {
+    const defaults = resolveDefaultAppSettings();
+    const settings = parseStoredAppSettings(
+      JSON.stringify({
+        gemma: {
+          modelRepo: "custom/vision-repo",
+          modelFile: "model.gguf",
+          mmprojFile: "vision.mmproj.gguf"
+        }
+      }),
+      defaults
+    );
+
+    expect(settings.gemma.mmprojRepo).toBe("custom/vision-repo");
+    expect(settings.gemma.mmprojFile).toBe("vision.mmproj.gguf");
+
+    const options = buildBaseTranslationOptions({
+      jobId: "custom-mmproj",
+      runDir: "C:/runs/custom-mmproj",
+      paths: {
+        dataRoot: "C:/app-data",
+        toolsDir: "C:/tools",
+        llamaServerPath: "C:/tools/llama-server.exe",
+        hfHomeDir: "C:/hf-home",
+        hfHubCacheDir: "C:/hf-home/hub"
+      },
+      settings,
+      env: {}
+    });
+
+    expect(options.mmprojRepo).toBe("custom/vision-repo");
+    expect(options.mmprojFile).toBe("vision.mmproj.gguf");
+  });
+
   it("normalizes saved custom Gemma model presets", () => {
     const defaults = resolveDefaultAppSettings();
 
@@ -501,7 +535,9 @@ describe("app settings helpers", () => {
                 id: " Translate Gemma ",
                 label: " TranslateGemma ",
                 modelRepo: "  owner/model-repo  ",
-                modelFile: "  model.Q8_0.gguf  "
+                modelFile: "  model.Q8_0.gguf  ",
+                mmprojRepo: " owner/mmproj-repo ",
+                mmprojFile: " vision.mmproj.gguf "
               },
               {
                 id: "broken",
@@ -519,7 +555,9 @@ describe("app settings helpers", () => {
         id: "translate-gemma",
         label: "TranslateGemma",
         modelRepo: "owner/model-repo",
-        modelFile: "model.Q8_0.gguf"
+        modelFile: "model.Q8_0.gguf",
+        mmprojRepo: "owner/mmproj-repo",
+        mmprojFile: "vision.mmproj.gguf"
       }
     ]);
   });
@@ -532,7 +570,8 @@ describe("app settings helpers", () => {
         JSON.stringify({
           gemma: {
             modelRepo: "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
-            modelFile: "gemma-4-E4B-it-uncensored-Q8_0.gguf"
+            modelFile: "gemma-4-E4B-it-uncensored-Q8_0.gguf",
+            mmprojFile: "gemma-4-E4B-it-uncensored-mmproj.gguf"
           }
         }),
         defaults
@@ -542,7 +581,9 @@ describe("app settings helpers", () => {
         id: "trevorjs-gemma-4-e4b-it-uncensored-gguf-gemma-4-e4b-it-uncensored-q8_0-gguf",
         label: "gemma-4-E4B-it-uncensored-GGUF / gemma-4-E4B-it-uncensored-Q8_0",
         modelRepo: "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
-        modelFile: "gemma-4-E4B-it-uncensored-Q8_0.gguf"
+        modelFile: "gemma-4-E4B-it-uncensored-Q8_0.gguf",
+        mmprojRepo: "TrevorJS/gemma-4-E4B-it-uncensored-GGUF",
+        mmprojFile: "gemma-4-E4B-it-uncensored-mmproj.gguf"
       }
     ]);
   });

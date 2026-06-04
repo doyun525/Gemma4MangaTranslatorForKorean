@@ -39,7 +39,10 @@ const runtimeHelpers = require("../src/main/runtime/simple-page-translate.cjs") 
     noTextDetected: boolean;
     textEvidenceCount: number;
   }>;
-  collectRequiredHfDownloads: (options: { [key: string]: unknown }) => Array<{ kind: string; file: string; destination: string }>;
+  collectRequiredHfDownloads: (
+    options: { [key: string]: unknown },
+    launchTarget?: { [key: string]: unknown }
+  ) => Array<{ kind: string; file: string; destination: string; url?: string }>;
   collectRequiredPaddleOcrModelDownloads: (
     options: { [key: string]: unknown },
     runtime?: { runtimeDir?: string }
@@ -506,6 +509,77 @@ describe("runtime model launch helpers", () => {
     expect(ranges[0].end).toBeLessThan(0.39);
     expect(ranges[1].start).toBeCloseTo(ranges[0].end);
     expect(ranges[1].end).toBeCloseTo(0.86);
+  });
+
+  it("plans mmproj download for custom huggingface models with configured mmproj file", () => {
+    const hubCacheDir = join(mkdtempSync(join(tmpdir(), "custom-mmproj-hub-")), "hub");
+    const options = {
+      modelSource: "huggingface",
+      modelRepo: "custom/vision-repo",
+      modelFile: "model.gguf",
+      mmprojFile: "vision.mmproj.gguf",
+      translationMode: "image",
+      hfHubCacheDir: hubCacheDir
+    };
+    const launch = inspectModelLaunch(options) as {
+      launchMode: string;
+      mmprojUrl?: string | null;
+    };
+
+    expect(launch.launchMode).toBe("huggingface");
+    expect(launch.mmprojUrl).toBe("https://huggingface.co/custom/vision-repo/resolve/main/vision.mmproj.gguf");
+
+    const tasks = collectRequiredHfDownloads(options, launch);
+    expect(tasks.some((task) => task.kind === "mmproj" && task.file === "vision.mmproj.gguf")).toBe(true);
+  });
+
+  it("omits mmproj launch and download tasks in ocr-text mode", () => {
+    const hubCacheDir = join(mkdtempSync(join(tmpdir(), "ocr-text-no-mmproj-")), "hub");
+    const options = {
+      translationMode: "ocr-text",
+      modelSource: "huggingface",
+      modelRepo: DEFAULT_31B_REPO,
+      modelFile: DEFAULT_31B_FILE,
+      mmprojRepo: DEFAULT_MMPROJ_REPO,
+      mmprojFile: DEFAULT_MMPROJ_FILE,
+      hfHubCacheDir: hubCacheDir,
+      port: 18180,
+      fitTargetMb: 2048,
+      ctx: 8192,
+      batch: 1024,
+      ubatch: 1024,
+      gemmaVramMode: "economy"
+    };
+    const launch = inspectModelLaunch(options) as { mmprojUrl?: string | null; mmprojPath?: string | null };
+
+    expect(launch.mmprojUrl).toBeNull();
+    expect(launch.mmprojPath).toBeNull();
+    expect(collectRequiredHfDownloads(options, launch).some((task) => task.kind === "mmproj")).toBe(false);
+
+    const args = buildLaunchArgs(options);
+    expect(args).not.toContain("--mmproj");
+    expect(args).not.toContain("--mmproj-url");
+  });
+
+  it("keeps mmproj launch args for ocr-text-with-image-retry mode", () => {
+    const options = {
+      translationMode: "ocr-text-with-image-retry",
+      modelSource: "huggingface",
+      modelRepo: DEFAULT_31B_REPO,
+      modelFile: DEFAULT_31B_FILE,
+      mmprojRepo: DEFAULT_MMPROJ_REPO,
+      mmprojFile: DEFAULT_MMPROJ_FILE,
+      port: 18180,
+      fitTargetMb: 1024,
+      ctx: 8192,
+      batch: 1024,
+      ubatch: 1024,
+      gemmaVramMode: "full"
+    };
+    const launch = inspectModelLaunch(options) as { mmprojUrl?: string | null };
+
+    expect(launch.mmprojUrl).toBeTruthy();
+    expect(buildLaunchArgs(options).some((arg) => arg === "--mmproj-url" || arg === "--mmproj")).toBe(true);
   });
 
   it("treats OpenAI Codex as a remote OAuth-backed endpoint", () => {

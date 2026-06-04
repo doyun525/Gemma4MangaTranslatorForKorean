@@ -843,18 +843,39 @@ function findPreferredMmprojFile(rootDir) {
 }
 
 function resolveConfiguredMmprojRepo(options = {}) {
-  return String(options.mmprojRepo ?? process.env.MANGA_TRANSLATOR_MMPROJ_HF ?? "").trim() || DEFAULT_MMPROJ_HF;
+  const explicitRepo = String(options.mmprojRepo ?? process.env.MANGA_TRANSLATOR_MMPROJ_HF ?? "").trim();
+  if (explicitRepo) {
+    return explicitRepo;
+  }
+  const explicitFile = String(options.mmprojFile ?? process.env.LLAMA_ARG_MMPROJ_FILE ?? "").trim();
+  if (explicitFile) {
+    return resolveConfiguredModelRepo(options);
+  }
+  if (resolveConfiguredModelRepo(options) === DEFAULT_MODEL_HF) {
+    return DEFAULT_MMPROJ_HF;
+  }
+  return "";
 }
 
 function resolveConfiguredMmprojFile(options = {}) {
-  return String(options.mmprojFile ?? process.env.LLAMA_ARG_MMPROJ_FILE ?? "").trim() || DEFAULT_MMPROJ_FILE;
+  const explicitFile = String(options.mmprojFile ?? process.env.LLAMA_ARG_MMPROJ_FILE ?? "").trim();
+  if (explicitFile) {
+    return explicitFile;
+  }
+  if (resolveConfiguredModelRepo(options) === DEFAULT_MODEL_HF) {
+    return DEFAULT_MMPROJ_FILE;
+  }
+  return "";
 }
 
 function shouldUseConfiguredMmproj(options = {}) {
+  if (!shouldLoadVisionMmproj(options)) {
+    return false;
+  }
   const explicitRepo = String(options.mmprojRepo ?? process.env.MANGA_TRANSLATOR_MMPROJ_HF ?? "").trim();
   const explicitFile = String(options.mmprojFile ?? process.env.LLAMA_ARG_MMPROJ_FILE ?? "").trim();
   if (explicitRepo || explicitFile) {
-    return true;
+    return Boolean(resolveConfiguredMmprojRepo(options) && resolveConfiguredMmprojFile(options));
   }
   return resolveConfiguredModelRepo(options) === DEFAULT_MODEL_HF;
 }
@@ -1778,8 +1799,8 @@ function resolveCachedConfiguredDraftModelPath(options = {}) {
 
 function resolveCachedModelAssets(options = {}) {
   const hubCacheDir = resolveHubCacheDir(options);
-  const configuredMmprojPath = resolveCachedConfiguredMmprojPath(options);
-  const configuredMmprojUrl = configuredMmprojPath ? null : resolveConfiguredMmprojUrl(options);
+  const configuredMmprojPath = shouldLoadVisionMmproj(options) ? resolveCachedConfiguredMmprojPath(options) : null;
+  const configuredMmprojUrl = configuredMmprojPath ? null : shouldLoadVisionMmproj(options) ? resolveConfiguredMmprojUrl(options) : null;
   const draftModelPath = resolveCachedConfiguredDraftModelPath(options);
   const draftModelUrl = draftModelPath ? null : resolveConfiguredDraftModelUrl(options);
   const requiresDraftDownload = Boolean(options.useDraft && !draftModelPath && draftModelUrl);
@@ -1821,7 +1842,7 @@ function resolveCachedModelAssets(options = {}) {
       continue;
     }
 
-    const mmprojPath = configuredMmprojPath || findPreferredMmprojFile(snapshotDir);
+    const mmprojPath = shouldLoadVisionMmproj(options) ? configuredMmprojPath || findPreferredMmprojFile(snapshotDir) : null;
     if (mmprojPath) {
       return {
         hubCacheDir,
@@ -1870,7 +1891,7 @@ function resolveCachedModelAssets(options = {}) {
   }
 
   const snapshotDir = path.dirname(modelPath);
-  const mmprojPath = configuredMmprojPath || findPreferredMmprojFile(snapshotDir);
+  const mmprojPath = shouldLoadVisionMmproj(options) ? configuredMmprojPath || findPreferredMmprojFile(snapshotDir) : null;
   return {
     hubCacheDir,
     repoDir,
@@ -1897,8 +1918,9 @@ function inspectModelLaunch(options = {}) {
 
   if (resolveConfiguredModelSource(options) === "local") {
     const modelPath = resolveConfiguredLocalModelPath(options);
-    const explicitMmprojPath = resolveConfiguredLocalMmprojPath(options);
-    const detectedMmprojPath = modelPath ? findPreferredMmprojFile(path.dirname(modelPath)) : null;
+    const explicitMmprojPath = shouldLoadVisionMmproj(options) ? resolveConfiguredLocalMmprojPath(options) : null;
+    const detectedMmprojPath =
+      shouldLoadVisionMmproj(options) && modelPath ? findPreferredMmprojFile(path.dirname(modelPath)) : null;
     const mmprojPath = explicitMmprojPath || detectedMmprojPath;
     const draftModelPath = options.useDraft ? resolveCachedConfiguredDraftModelPath(options) : null;
     const draftModelUrl = options.useDraft ? resolveConfiguredDraftModelUrl(options) : null;
@@ -2664,6 +2686,10 @@ function buildResponsesRequestBody(options, imageVariants, promptText, systemPro
 function resolveTranslationMode(options = {}) {
   const mode = String(options.translationMode ?? process.env.MANGA_TRANSLATOR_TRANSLATION_MODE ?? "image").trim();
   return mode === "ocr-text" || mode === "ocr-text-with-image-retry" ? mode : "image";
+}
+
+function shouldLoadVisionMmproj(options = {}) {
+  return resolveTranslationMode(options) !== "ocr-text";
 }
 
 function shouldSendInitialImages(options = {}) {
@@ -5685,6 +5711,7 @@ module.exports = {
   parsePaddleModelFetchProgress,
   parsePipRawProgress,
   resolveTranslationMode,
+  shouldLoadVisionMmproj,
   resolvePaddleOcrImportCheckTimeoutMs,
   resolveOcrBboxTimeoutMs,
   resolveOcrGpuCudaTag,

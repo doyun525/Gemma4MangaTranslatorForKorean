@@ -365,7 +365,11 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
   const localMmprojPath = resolveOptionalString(asRecord(gemma)?.localMmprojPath);
   const customModelPresets = ensureCurrentGemmaModelPreset(
     normalizeGemmaCustomModelPresets(asRecord(gemma)?.customModelPresets),
-    resolvedModel,
+    {
+      ...resolvedModel,
+      ...(resolvedMmproj.mmprojRepo ? { mmprojRepo: resolvedMmproj.mmprojRepo } : {}),
+      ...(resolvedMmproj.mmprojFile ? { mmprojFile: resolvedMmproj.mmprojFile } : {})
+    },
     modelSource
   );
   const storageSettings = normalizeStorageSettings(storage);
@@ -1007,8 +1011,14 @@ function resolveStoredGemmaMmproj(
   }
   if (storedMmprojRepo || storedMmprojFile) {
     return {
-      mmprojRepo: storedMmprojRepo ?? defaults.gemma.mmprojRepo ?? builtInMmproj?.mmprojRepo ?? DEFAULT_GEMMA_MMPROJ_REPO,
-      mmprojFile: storedMmprojFile ?? defaults.gemma.mmprojFile ?? builtInMmproj?.mmprojFile ?? DEFAULT_GEMMA_MMPROJ_FILE
+      mmprojRepo:
+        storedMmprojRepo ??
+        (storedMmprojFile ? model.modelRepo : undefined) ??
+        defaults.gemma.mmprojRepo ??
+        builtInMmproj?.mmprojRepo ??
+        DEFAULT_GEMMA_MMPROJ_REPO,
+      mmprojFile:
+        storedMmprojFile ?? defaults.gemma.mmprojFile ?? builtInMmproj?.mmprojFile ?? DEFAULT_GEMMA_MMPROJ_FILE
     };
   }
   if (builtInMmproj) {
@@ -1056,7 +1066,7 @@ function normalizeGemmaCustomModelPresets(value: unknown): GemmaCustomModelPrese
 
 function ensureCurrentGemmaModelPreset(
   presets: GemmaCustomModelPreset[],
-  model: Pick<AppSettings["gemma"], "modelRepo" | "modelFile">,
+  model: Pick<AppSettings["gemma"], "modelRepo" | "modelFile" | "mmprojRepo" | "mmprojFile">,
   modelSource: ModelSource
 ): GemmaCustomModelPreset[] {
   if (modelSource !== "huggingface") {
@@ -1076,13 +1086,17 @@ function ensureCurrentGemmaModelPreset(
     id = `${baseId}-${suffix}`;
   }
 
+  const mmprojRepo = resolveOptionalString(model.mmprojRepo);
+  const mmprojFile = resolveOptionalString(model.mmprojFile);
   return [
     ...presets,
     {
       id,
       label: buildCustomPresetFallbackLabel(model.modelRepo, model.modelFile),
       modelRepo: model.modelRepo,
-      modelFile: model.modelFile
+      modelFile: model.modelFile,
+      ...(mmprojRepo ? { mmprojRepo } : {}),
+      ...(mmprojFile ? { mmprojFile } : {})
     }
   ];
 }
