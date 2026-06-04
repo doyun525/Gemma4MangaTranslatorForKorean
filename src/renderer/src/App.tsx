@@ -42,6 +42,7 @@ import { useChapterPersistence } from "./hooks/useChapterPersistence";
 import { useJobEvents } from "./hooks/useJobEvents";
 import { usePageImageDataUrls } from "./hooks/usePageImageDataUrls";
 import { useSettingsDialog } from "./hooks/useSettingsDialog";
+import { buildSmartKoLineBreakPersistPatch } from "./lib/koreanLineBreaks";
 import { useStageSize } from "./hooks/useStageSize";
 import { useStatusLog } from "./hooks/useStatusLog";
 import {
@@ -327,7 +328,7 @@ export default function App(): React.JSX.Element {
   const [patternMaskStrokesByPage, setPatternMaskStrokesByPage] = useState<Record<string, InpaintingMaskStroke[]>>({});
   const [retouchUndoStack, setRetouchUndoStack] = useState<RetouchHistoryEntry[]>([]);
   const [retouchRedoStack, setRetouchRedoStack] = useState<RetouchHistoryEntry[]>([]);
-  const [showBlockChrome, setShowBlockChrome] = useState(false);
+  const [showBlockChrome, setShowBlockChrome] = useState(true);
   const [showTextBlocks, setShowTextBlocks] = useState(true);
   const [pageDownloadSelectionMode, setPageDownloadSelectionMode] = useState(false);
   const [selectedDownloadPageIds, setSelectedDownloadPageIds] = useState<Set<string>>(() => new Set());
@@ -1767,6 +1768,12 @@ export default function App(): React.JSX.Element {
       return;
     }
 
+    if (!stageSize) {
+      return;
+    }
+
+    const pageSize = { width: Math.max(1, selectedPage.width), height: Math.max(1, selectedPage.height) };
+
     recordEditHistoryBeforeChange();
     updateCurrentChapter(selectedPage.id, (current) => ({
       ...current,
@@ -1783,7 +1790,7 @@ export default function App(): React.JSX.Element {
 
                 const nextType = normalizeBlockType(patch.type ?? block.type);
                 const nextRenderDirection = normalizeRenderDirection(patch.renderDirection ?? block.renderDirection, block.renderDirection);
-                return {
+                let nextBlock: TranslationBlock = {
                   ...block,
                   ...patch,
                   type: nextType,
@@ -1796,6 +1803,11 @@ export default function App(): React.JSX.Element {
                   renderBbox: patch.renderBbox ? clampBbox(patch.renderBbox) : block.renderBbox,
                   renderBboxSpace: patch.renderBbox ? "normalized_1000" : block.renderBboxSpace
                 };
+                const persistPatch = buildSmartKoLineBreakPersistPatch(nextBlock, pageSize, stageSize);
+                if (persistPatch) {
+                  nextBlock = { ...nextBlock, ...persistPatch };
+                }
+                return nextBlock;
               })
             }
       )
@@ -2382,8 +2394,33 @@ export default function App(): React.JSX.Element {
       return;
     }
 
-    if (dragRef.current && stageRef.current) {
+    const endedDrag = dragRef.current;
+    if (endedDrag && stageRef.current) {
       stageRef.current.releasePointerCapture(event.pointerId);
+      if (endedDrag.mode === "resize" && selectedPage && stageSize) {
+        const pageSize = { width: Math.max(1, selectedPage.width), height: Math.max(1, selectedPage.height) };
+        updateCurrentChapter(selectedPage.id, (chapter) => ({
+          ...chapter,
+          pages: chapter.pages.map((page) => {
+            if (page.id !== selectedPage.id) {
+              return page;
+            }
+            const resizedBlock = page.blocks.find((block) => block.id === endedDrag.blockId);
+            if (!resizedBlock) {
+              return page;
+            }
+            const persistPatch = buildSmartKoLineBreakPersistPatch(resizedBlock, pageSize, stageSize);
+            if (!persistPatch) {
+              return page;
+            }
+            return {
+              ...page,
+              updatedAt: new Date().toISOString(),
+              blocks: page.blocks.map((block) => (block.id === resizedBlock.id ? { ...block, ...persistPatch } : block))
+            };
+          })
+        }));
+      }
     }
     dragRef.current = null;
   };
@@ -2793,6 +2830,7 @@ export default function App(): React.JSX.Element {
           areaTranslateSelecting={Boolean(regionSelection?.active)}
           onToggleChrome={() => setShowBlockChrome((value) => !value)}
           onToggleBlocks={() => setShowTextBlocks((value) => !value)}
+          onEnableBlockChrome={() => setShowBlockChrome(true)}
           onRunPending={() => void runAnalysis("pending")}
           onRunAll={() => void runAnalysis("all")}
           onEnterInpainting={() => void enterInpaintingMode()}

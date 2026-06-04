@@ -1,6 +1,7 @@
 import type { TranslationBlock, WebOverlayRenderBlock } from "../../../shared/types";
 import { resolveBlockVisualStyle } from "../../../shared/blockVisuals";
 import { resolveBlockFontFamily } from "./fonts";
+import { resolveBlockDisplayText } from "./koreanLineBreaks";
 import { hexToRgba, resolveBlockTextLayout, type BlockTextLayout, type ViewportSize } from "./overlayLayout";
 
 export type { ViewportSize };
@@ -19,8 +20,9 @@ export function resolveOverlayBlockRenderModel(
   pageSize: ViewportSize,
   stageSize: ViewportSize
 ): OverlayBlockRenderModel {
-  const displayText = block.translatedText || block.sourceText || "...";
-  const layout = resolveBlockTextLayout(block, displayText, pageSize, stageSize);
+  const rawText = block.translatedText || block.sourceText || "...";
+  const displayText = resolveBlockDisplayText(block, rawText, pageSize, stageSize);
+  const layout = resolveBlockTextLayout(block, rawText, pageSize, stageSize);
   const visualStyle = resolveBlockVisualStyle(block.type);
   return {
     displayText,

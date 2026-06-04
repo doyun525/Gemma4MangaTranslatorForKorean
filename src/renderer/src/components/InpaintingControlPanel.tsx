@@ -305,14 +305,30 @@ export function DisplayControlPanel({
   return (
     <section className="display-panel">
       <h2>표시</h2>
+      <p className="display-panel-lead">캔버스 위 번역 블록의 배경·외곽선·블록 프레임 표시를 전환합니다.</p>
       <div className="display-toggle-row">
-        <button className={showBlockChrome ? "active" : ""} onClick={onToggleChrome}>
+        <button
+          type="button"
+          className={showBlockChrome ? "active" : ""}
+          onClick={onToggleChrome}
+          title="블록 배경색·외곽선·테두리 표시"
+          aria-pressed={showBlockChrome}
+        >
           배경/테두리
         </button>
-        <button className={showTextBlocks ? "active" : ""} onClick={onToggleBlocks}>
+        <button
+          type="button"
+          className={showTextBlocks ? "active" : ""}
+          onClick={onToggleBlocks}
+          title="번역 블록 전체 표시"
+          aria-pressed={showTextBlocks}
+        >
           블록 표시
         </button>
       </div>
+      {!showBlockChrome ? (
+        <p className="muted-line display-panel-hint">배경/테두리가 꺼져 있어 편집 패널의 배경색·외곽선이 캔버스에 보이지 않습니다.</p>
+      ) : null}
     </section>
   );
 }

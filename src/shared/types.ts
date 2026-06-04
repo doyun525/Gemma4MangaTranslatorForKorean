@@ -174,6 +174,10 @@ export type TranslationBlock = {
   backgroundColor: string;
   opacity: number;
   autoFitText?: boolean;
+  /** 가로 블록에서 띄어쓰기 단위 줄바꿈으로 한국어 가독성 개선 */
+  smartKoLineBreaks?: boolean;
+  /** true면 줄바꿈 결과를 translatedText에 저장 */
+  smartKoLineBreaksPersist?: boolean;
   inpaintExcluded?: boolean;
 };
 

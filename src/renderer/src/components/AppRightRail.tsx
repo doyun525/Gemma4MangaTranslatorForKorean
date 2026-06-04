@@ -22,6 +22,7 @@ type AppRightRailProps = {
   areaTranslateSelecting: boolean;
   onToggleChrome: () => void;
   onToggleBlocks: () => void;
+  onEnableBlockChrome: () => void;
   onRunPending: () => void;
   onRunAll: () => void;
   onEnterInpainting: () => void;
@@ -56,6 +57,7 @@ export function AppRightRail({
   areaTranslateSelecting,
   onToggleChrome,
   onToggleBlocks,
+  onEnableBlockChrome,
   onRunPending,
   onRunAll,
   onEnterInpainting,
@@ -83,6 +85,8 @@ export function AppRightRail({
             <EditorPanel
               block={selectedBlock}
               disabled={editorDisabled}
+              showBlockChrome={showBlockChrome}
+              onEnableBlockChrome={onEnableBlockChrome}
               pageBlockCount={selectedPage?.blocks.length ?? 0}
               onSampleBackground={onSampleBlockBackground}
               onSamplePageBackgrounds={onSamplePageBackgrounds}
@@ -118,6 +122,8 @@ export function AppRightRail({
           <EditorPanel
             block={selectedBlock}
             disabled={editorDisabled}
+            showBlockChrome={showBlockChrome}
+            onEnableBlockChrome={onEnableBlockChrome}
             areaTranslateAvailable={Boolean(selectedPage && selectedPageImageDataUrl && !jobActive)}
             areaTranslateSelecting={areaTranslateSelecting}
             onStartAreaTranslate={onStartAreaTranslate}

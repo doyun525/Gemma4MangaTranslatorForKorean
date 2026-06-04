@@ -604,6 +604,24 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   resize: vertical;
 }
 
+.korean-text-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.korean-line-break-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.smart-ko-toggle {
+  font-size: 12px;
+}
+
 .panel-header,
 .run-title,
 .page-list h2,
@@ -988,6 +1006,17 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .display-panel {
   align-content: start;
+}
+
+.display-panel-lead {
+  margin: 0 0 8px;
+  color: var(--text-muted, #9f998f);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.display-panel-hint {
+  margin-top: 8px;
 }
 
 .display-toggle-row {
@@ -1797,6 +1826,27 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   gap: var(--sp-3);
 }
 
+.editor-chrome-hint {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.text-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text, #c9a227);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.text-link-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .background-sample-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2438,8 +2488,11 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   line-height: inherit;
   overflow: visible;
   overflow-wrap: anywhere;
-  word-break: break-word;
-  pointer-events: none;
+}
+
+.overlay-text-content.overlay-text-smart-wrap {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .resize-handle {

@@ -1,6 +1,7 @@
 import React from "react";
 import { resolveBlockCornerRadiusPx } from "../../../shared/blockVisuals";
 import type { TranslationBlock } from "../../../shared/types";
+import { isSmartKoLineBreaksEnabled } from "../lib/koreanLineBreaks";
 import { resolveOverlayBlockBackground, resolveOverlayBlockRenderModel, type ViewportSize } from "../lib/blockRenderModel";
 
 type OverlayBlockProps = {
@@ -123,11 +124,30 @@ export function OverlayBlock({
       <div className="overlay-text" style={textWrapStyle}>
         <span className="overlay-text-stack" style={textStackStyle}>
           {outlineWidthPx > 0 ? (
-            <span className="overlay-text-content overlay-text-outline" style={outlineStyle} aria-hidden="true">
+            <span
+              className={[
+                "overlay-text-content",
+                "overlay-text-outline",
+                isSmartKoLineBreaksEnabled(block) ? "overlay-text-smart-wrap" : ""
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              style={outlineStyle}
+              aria-hidden="true"
+            >
               {displayText}
             </span>
           ) : null}
-          <span className="overlay-text-content overlay-text-fill" style={fillStyle}>
+          <span
+            className={[
+              "overlay-text-content",
+              "overlay-text-fill",
+              isSmartKoLineBreaksEnabled(block) ? "overlay-text-smart-wrap" : ""
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            style={fillStyle}
+          >
             {displayText}
           </span>
         </span>

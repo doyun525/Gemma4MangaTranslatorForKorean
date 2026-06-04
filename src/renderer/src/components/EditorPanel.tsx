@@ -1,5 +1,6 @@
 import React from "react";
 import type { RenderTextDirection, TranslationBlock } from "../../../shared/types";
+import { DEFAULT_SMART_KO_LINE_BREAKS, DEFAULT_SMART_KO_LINE_BREAKS_PERSIST } from "../lib/koreanLineBreaks";
 import { FontSelect } from "./FontSelect";
 import { Button, IconButton, RangeInput } from "./ui";
 import { AlignCenterIcon, AlignLeftIcon, AlignRightIcon, BoldIcon, ItalicIcon } from "./ui/icons";
@@ -14,6 +15,8 @@ type EditorPanelProps = {
   onSamplePageBackgrounds?: () => void;
   pageBlockCount?: number;
   onApplyFont?: (scope: "page" | "chapter") => void;
+  showBlockChrome?: boolean;
+  onEnableBlockChrome?: () => void;
   onUpdate: (patch: Partial<TranslationBlock>) => void;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -29,6 +32,8 @@ export function EditorPanel({
   onSamplePageBackgrounds,
   pageBlockCount = 0,
   onApplyFont,
+  showBlockChrome = true,
+  onEnableBlockChrome,
   onUpdate,
   onDelete,
   onDuplicate
@@ -52,12 +57,48 @@ export function EditorPanel({
   const backgroundColor = resolveColor(block.backgroundColor, "#ffffff");
   const autoFitText = block.autoFitText ?? false;
   const fontSizePx = clampFontSize(block.fontSizePx);
+  const smartKoLineBreaks = block.smartKoLineBreaks ?? DEFAULT_SMART_KO_LINE_BREAKS;
+  const smartKoLineBreaksPersist = block.smartKoLineBreaksPersist ?? DEFAULT_SMART_KO_LINE_BREAKS_PERSIST;
+  const smartKoLineBreaksAvailable = block.renderDirection === "horizontal";
 
   return (
     <section className="editor-panel has-block">
       <h2>블록</h2>
-      <label>
-        한국어
+      <label className="korean-text-field">
+        <div className="korean-text-field-header">
+          <span>한국어</span>
+          <div className="korean-line-break-toggles" role="group" aria-label="한국어 줄바꿈">
+            <label
+              className="inline-toggle smart-ko-toggle"
+              title="블록 너비에 맞춰 띄어쓰기 단위로 줄바꿈합니다."
+            >
+              <input
+                type="checkbox"
+                checked={smartKoLineBreaks && smartKoLineBreaksAvailable}
+                disabled={disabled || !smartKoLineBreaksAvailable}
+                onChange={(event) =>
+                  onUpdate({
+                    smartKoLineBreaks: event.target.checked,
+                    ...(event.target.checked ? {} : { smartKoLineBreaksPersist: false })
+                  })
+                }
+              />
+              줄나눔
+            </label>
+            <label
+              className="inline-toggle smart-ko-toggle"
+              title="줄바꿈 결과를 한국어 텍스트에 저장합니다. 끄면 화면에만 적용됩니다."
+            >
+              <input
+                type="checkbox"
+                checked={smartKoLineBreaksPersist}
+                disabled={disabled || !smartKoLineBreaksAvailable || !smartKoLineBreaks}
+                onChange={(event) => onUpdate({ smartKoLineBreaksPersist: event.target.checked })}
+              />
+              저장
+            </label>
+          </div>
+        </div>
         <textarea value={block.translatedText} disabled={disabled} onChange={(event) => onUpdate({ translatedText: event.target.value })} />
       </label>
       <label>
@@ -176,6 +217,19 @@ export function EditorPanel({
         <ColorField label="외곽선" value={outlineColor} disabled={disabled} onChange={(nextOutlineColor) => onUpdate({ outlineColor: nextOutlineColor })} />
       </div>
       <div className="background-color-field">
+        {!showBlockChrome ? (
+          <p className="editor-chrome-hint muted-line">
+            배경·외곽선이 캔버스에 숨겨져 있습니다. 오른쪽 패널 <strong>표시</strong>에서{" "}
+            {onEnableBlockChrome ? (
+              <button type="button" className="text-link-button" disabled={disabled} onClick={onEnableBlockChrome}>
+                배경/테두리
+              </button>
+            ) : (
+              "배경/테두리"
+            )}{" "}
+            를 켜세요.
+          </p>
+        ) : null}
         <ColorField label="배경색" value={backgroundColor} disabled={disabled} onChange={(nextBackgroundColor) => onUpdate({ backgroundColor: nextBackgroundColor })} />
         <div className="background-sample-actions">
           <Button variant="secondary" disabled={disabled || !onSampleBackground} onClick={onSampleBackground}>

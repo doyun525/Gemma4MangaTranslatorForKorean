@@ -63,6 +63,8 @@ export const TranslationBlockSchema = z
     backgroundColor: hexColor,
     opacity: finiteNumber.min(0).max(1),
     autoFitText: z.boolean().optional(),
+    smartKoLineBreaks: z.boolean().optional(),
+    smartKoLineBreaksPersist: z.boolean().optional(),
     inpaintExcluded: z.boolean().optional()
   })
   .strict();
