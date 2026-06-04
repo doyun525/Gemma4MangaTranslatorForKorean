@@ -8,6 +8,7 @@ translation model still reads the source image as the authority.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -296,6 +297,27 @@ def build_pipeline_kwargs(args: argparse.Namespace) -> dict:
     }
     if args.device:
       pipeline_kwargs["device"] = args.device
+    vl_rec_backend = os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_BACKEND", "").strip()
+    vl_rec_server_url = os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_SERVER_URL", "").strip()
+    vl_rec_api_model_name = os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_MODEL_NAME", "").strip()
+    vl_rec_api_key = os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_KEY", "").strip()
+    vl_rec_max_concurrency = os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_MAX_CONCURRENCY", "").strip()
+    if vl_rec_backend:
+      pipeline_kwargs["vl_rec_backend"] = vl_rec_backend
+    if vl_rec_server_url:
+      pipeline_kwargs["vl_rec_server_url"] = vl_rec_server_url
+    if vl_rec_api_model_name:
+      pipeline_kwargs["vl_rec_api_model_name"] = vl_rec_api_model_name
+    if vl_rec_api_key:
+      pipeline_kwargs["vl_rec_api_key"] = vl_rec_api_key
+    if vl_rec_max_concurrency:
+      try:
+        pipeline_kwargs["vl_rec_max_concurrency"] = max(1, int(vl_rec_max_concurrency))
+      except ValueError:
+        print(
+            f"[paddleocr-vl-bboxes] ignoring invalid MANGA_TRANSLATOR_PADDLEOCR_VL_REC_MAX_CONCURRENCY={vl_rec_max_concurrency!r}",
+            file=sys.stderr,
+        )
     return pipeline_kwargs
 
 
@@ -379,11 +401,15 @@ def write_vl_batch_bboxes(
             },
         )
 
+      image_infos = []
       try:
-        image_paths = [Path(item["image"]) for item in chunk]
-        vl_result_groups = predict_vl_layout_batch(pipeline, image_paths)
-        textline_result_groups = predict_textlines_batch(textline_detector, image_paths) if textline_detector is not None else [[] for _ in image_paths]
+        image_infos = [prepare_vl_input_image(Path(item["image"]), Path(item["output"])) for item in chunk]
+        input_paths = [info["input_path"] for info in image_infos]
+        vl_result_groups = predict_vl_layout_batch(pipeline, input_paths)
+        textline_result_groups = predict_textlines_batch(textline_detector, input_paths) if textline_detector is not None else [[] for _ in input_paths]
       except Exception as exc:
+        for image_info in image_infos:
+          cleanup_vl_input_image(image_info)
         print(f"[paddleocr-vl-bboxes] VL batch predict failed, falling back to sequential: {exc}", file=sys.stderr)
         summaries.extend(
             write_sequential_bboxes(
@@ -397,27 +423,37 @@ def write_vl_batch_bboxes(
                 total_count=total,
             )
         )
+        release_batch_memory()
         continue
 
-      for offset, (item, vl_results, textline_results) in enumerate(zip(chunk, vl_result_groups, textline_result_groups), start=1):
-        summary = write_page_bboxes_from_vl_results(
-            image_path=Path(item["image"]),
-            output_path=Path(item["output"]),
-            vl_results=vl_results,
-            textline_results=textline_results,
-            provider="paddleocr-vl",
-        )
-        summaries.append(summary)
-        emit_progress(
-            progress_path,
-            {
-                "phase": "done",
-                "index": start + offset,
-                "total": total,
-                "output": summary["output"],
-                "count": summary["count"],
-            },
-        )
+      try:
+        for offset, (item, image_info, vl_results, textline_results) in enumerate(zip(chunk, image_infos, vl_result_groups, textline_result_groups), start=1):
+          summary = write_page_bboxes_from_vl_results(
+              image_info=image_info,
+              output_path=Path(item["output"]),
+              vl_results=vl_results,
+              textline_results=textline_results,
+              provider="paddleocr-vl",
+          )
+          summaries.append(summary)
+          emit_progress(
+              progress_path,
+              {
+                  "phase": "done",
+                  "index": start + offset,
+                  "total": total,
+                  "output": summary["output"],
+                  "count": summary["count"],
+              },
+          )
+      finally:
+        for image_info in image_infos:
+          cleanup_vl_input_image(image_info)
+        del vl_result_groups
+        del textline_result_groups
+        del input_paths
+        del image_infos
+        release_batch_memory()
     return summaries
 
 
@@ -459,6 +495,7 @@ def write_ppocr_v5_batch_bboxes(
                 total_count=total,
             )
         )
+        release_batch_memory()
         continue
 
       for offset, (item, results) in enumerate(zip(chunk, result_groups), start=1):
@@ -479,7 +516,21 @@ def write_ppocr_v5_batch_bboxes(
                 "count": summary["count"],
             },
         )
+      del result_groups
+      release_batch_memory()
     return summaries
+
+
+def release_batch_memory() -> None:
+    gc.collect()
+    try:
+      import paddle
+      empty_cache = getattr(getattr(paddle, "device", None), "cuda", None)
+      empty_cache = getattr(empty_cache, "empty_cache", None)
+      if callable(empty_cache):
+        empty_cache()
+    except Exception:
+      pass
 
 
 def predict_vl_layout_batch(pipeline: object, image_paths: list[Path]) -> list[list[object]]:
@@ -529,48 +580,183 @@ def normalize_result_groups(raw_results: object, expected_count: int) -> list[li
     return [raw_results]
 
 
+def resolve_vl_max_long_side() -> int:
+    raw = os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_VL_MAX_LONG_SIDE", "").strip()
+    if not raw:
+      raw = "2560"
+    try:
+      value = int(raw)
+    except ValueError:
+      print(f"[paddleocr-vl-bboxes] ignoring invalid MANGA_TRANSLATOR_PADDLEOCR_VL_MAX_LONG_SIDE={raw!r}", file=sys.stderr)
+      return 2560
+    return max(0, value)
+
+
+def make_passthrough_image_info(image_path: Path) -> dict:
+    with Image.open(image_path) as image:
+      width, height = image.size
+    return {
+        "original_path": image_path,
+        "input_path": image_path,
+        "original_width": width,
+        "original_height": height,
+        "input_width": width,
+        "input_height": height,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "resized": False,
+        "cleanup": False,
+    }
+
+
+def prepare_vl_input_image(image_path: Path, output_path: Path | None = None) -> dict:
+    with Image.open(image_path) as image:
+      width, height = image.size
+      max_long_side = resolve_vl_max_long_side()
+      long_side = max(width, height)
+      if max_long_side <= 0 or long_side <= max_long_side:
+        return {
+            "original_path": image_path,
+            "input_path": image_path,
+            "original_width": width,
+            "original_height": height,
+            "input_width": width,
+            "input_height": height,
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "resized": False,
+            "cleanup": False,
+        }
+
+      ratio = max_long_side / float(long_side)
+      input_width = max(1, int(round(width * ratio)))
+      input_height = max(1, int(round(height * ratio)))
+      temp_dir = output_path.parent if output_path is not None else image_path.parent
+      temp_dir.mkdir(parents=True, exist_ok=True)
+      temp_path = temp_dir / f".{image_path.stem}.vl-ocr-{os.getpid()}-{input_width}x{input_height}.png"
+      resized = image.convert("RGB").resize((input_width, input_height), resample=get_resize_filter())
+      resized.save(temp_path)
+      print(
+          f"[paddleocr-vl-bboxes] resized VL OCR input {image_path.name}: {width}x{height} -> {input_width}x{input_height}",
+          file=sys.stderr,
+          flush=True,
+      )
+      return {
+          "original_path": image_path,
+          "input_path": temp_path,
+          "original_width": width,
+          "original_height": height,
+          "input_width": input_width,
+          "input_height": input_height,
+          "scale_x": width / float(input_width),
+          "scale_y": height / float(input_height),
+          "resized": True,
+          "cleanup": True,
+          "max_long_side": max_long_side,
+      }
+
+
+def get_resize_filter():
+    resampling = getattr(Image, "Resampling", None)
+    if resampling is not None:
+      return resampling.LANCZOS
+    return Image.LANCZOS
+
+
+def cleanup_vl_input_image(image_info: dict) -> None:
+    if not image_info.get("cleanup"):
+      return
+    try:
+      Path(image_info["input_path"]).unlink(missing_ok=True)
+    except Exception:
+      pass
+
+
+def scale_ocr_items_to_original(items: list[dict], image_info: dict) -> None:
+    scale_x = float(image_info.get("scale_x") or 1.0)
+    scale_y = float(image_info.get("scale_y") or 1.0)
+    width = int(image_info["original_width"])
+    height = int(image_info["original_height"])
+    if abs(scale_x - 1.0) < 0.000001 and abs(scale_y - 1.0) < 0.000001:
+      return
+    for item in items:
+      item["x1"] = clamp(int(round(float(item.get("x1", 0)) * scale_x)), 0, width)
+      item["y1"] = clamp(int(round(float(item.get("y1", 0)) * scale_y)), 0, height)
+      item["x2"] = clamp(int(round(float(item.get("x2", 0)) * scale_x)), 0, width)
+      item["y2"] = clamp(int(round(float(item.get("y2", 0)) * scale_y)), 0, height)
+      if item["x2"] <= item["x1"]:
+        item["x2"] = clamp(item["x1"] + 1, 0, width)
+      if item["y2"] <= item["y1"]:
+        item["y2"] = clamp(item["y1"] + 1, 0, height)
+
+
+def build_ocr_input_metadata(image_info: dict) -> dict:
+    return {
+        "resized": True,
+        "maxLongSide": image_info.get("max_long_side"),
+        "originalWidth": image_info.get("original_width"),
+        "originalHeight": image_info.get("original_height"),
+        "inputWidth": image_info.get("input_width"),
+        "inputHeight": image_info.get("input_height"),
+        "scaleX": image_info.get("scale_x"),
+        "scaleY": image_info.get("scale_y"),
+    }
+
+
 def write_page_bboxes(image_path: Path, output_path: Path, pipeline: object, textline_detector: object, provider: str) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with Image.open(image_path) as image:
-      width, height = image.size
+    image_info = prepare_vl_input_image(image_path, output_path) if provider == "paddleocr-vl" else make_passthrough_image_info(image_path)
+    width = int(image_info["original_width"])
+    height = int(image_info["original_height"])
+    input_path = image_info["input_path"]
+    input_width = int(image_info["input_width"])
+    input_height = int(image_info["input_height"])
 
-    items = []
-    if pipeline is not None:
-      results = pipeline.predict(
-          str(image_path),
-          use_doc_orientation_classify=False,
-          use_doc_unwarping=False,
-          use_layout_detection=True,
-          use_chart_recognition=False,
-          use_seal_recognition=False,
-          use_ocr_for_image_block=False,
-          format_block_content=False,
-          merge_layout_blocks=False,
-      )
-      items.extend(collect_vl_layout_candidates(results, width, height))
-
-    items.extend(
-        collect_textline_candidates(
-            image_path=image_path,
-            existing_items=items,
-            width=width,
-            height=height,
-            ocr=textline_detector,
+    try:
+      items = []
+      if pipeline is not None:
+        results = pipeline.predict(
+            str(input_path),
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_layout_detection=True,
+            use_chart_recognition=False,
+            use_seal_recognition=False,
+            use_ocr_for_image_block=False,
+            format_block_content=False,
+            merge_layout_blocks=False,
         )
-    )
-    finalize_ocr_text_fields(items)
-    renumber_items(items)
+        items.extend(collect_vl_layout_candidates(results, input_width, input_height))
 
-    payload = {
-        "source": provider,
-        "coordinateSpace": "pixels",
-        "width": width,
-        "height": height,
-        "items": items,
-    }
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"output": str(output_path), "count": len(items)}
+      items.extend(
+          collect_textline_candidates(
+              image_path=input_path,
+              existing_items=items,
+              width=input_width,
+              height=input_height,
+              ocr=textline_detector,
+          )
+      )
+      if provider == "paddleocr-vl":
+        scale_ocr_items_to_original(items, image_info)
+      finalize_ocr_text_fields(items)
+      renumber_items(items)
+
+      payload = {
+          "source": provider,
+          "coordinateSpace": "pixels",
+          "width": width,
+          "height": height,
+          "items": items,
+      }
+      if image_info.get("resized"):
+        payload["ocrInput"] = build_ocr_input_metadata(image_info)
+      output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+      return {"output": str(output_path), "count": len(items)}
+    finally:
+      if provider == "paddleocr-vl":
+        cleanup_vl_input_image(image_info)
 
 
 def collect_vl_layout_candidates(results: object, width: int, height: int) -> list[dict]:
@@ -602,7 +788,7 @@ def collect_vl_layout_candidates(results: object, width: int, height: int) -> li
 
 
 def write_page_bboxes_from_vl_results(
-    image_path: Path,
+    image_info: dict,
     output_path: Path,
     vl_results: list[object],
     textline_results: list[object],
@@ -610,18 +796,21 @@ def write_page_bboxes_from_vl_results(
 ) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with Image.open(image_path) as image:
-      width, height = image.size
+    width = int(image_info["original_width"])
+    height = int(image_info["original_height"])
+    input_width = int(image_info["input_width"])
+    input_height = int(image_info["input_height"])
 
-    items = collect_vl_layout_candidates(vl_results, width, height)
+    items = collect_vl_layout_candidates(vl_results, input_width, input_height)
     items.extend(
         collect_textline_candidates_from_results(
             results=textline_results,
             existing_items=items,
-            width=width,
-            height=height,
+            width=input_width,
+            height=input_height,
         )
     )
+    scale_ocr_items_to_original(items, image_info)
     finalize_ocr_text_fields(items)
     renumber_items(items)
 
@@ -632,6 +821,8 @@ def write_page_bboxes_from_vl_results(
         "height": height,
         "items": items,
     }
+    if image_info.get("resized"):
+      payload["ocrInput"] = build_ocr_input_metadata(image_info)
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"output": str(output_path), "count": len(items)}
 
@@ -707,7 +898,9 @@ def create_textline_detector(required: bool = False) -> object:
           "use_doc_orientation_classify": False,
           "use_doc_unwarping": False,
           "use_textline_orientation": False,
-          "text_det_limit_side_len": int(os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_DET_LIMIT", "1600")),
+          "text_detection_model_name": os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_DET_MODEL", "PP-OCRv5_server_det"),
+          "text_recognition_model_name": os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_REC_MODEL", "PP-OCRv5_server_rec"),
+          "text_det_limit_side_len": int(os.environ.get("MANGA_TRANSLATOR_PADDLEOCR_DET_LIMIT", "3200")),
           "text_det_limit_type": "max",
           "enable_mkldnn": False,
       }

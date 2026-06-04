@@ -504,7 +504,9 @@ export const AppSettingsSchema = z
         device: z.enum(["cpu", "gpu"]),
         engine: z.enum(["paddleocr-vl", "paddleocr-v5"]),
         batchSize: z.number().int().min(1).max(16),
-        gpuCudaTag: z.string().regex(/^cu\d+$/i).optional()
+        gpuCudaTag: z.string().regex(/^cu\d+$/i).optional(),
+        vlServerMode: z.enum(["direct", "external", "auto-fastdeploy"]).optional(),
+        vlMaxLongSide: z.number().int().min(0).optional()
       })
       .strict(),
     translation: z

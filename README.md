@@ -13,7 +13,7 @@
 - `Gemma 4` 로컬 모델 또는 `OpenAI Codex` 기반 번역 엔진 선택
 - 작품/화/페이지 단위 보관함 관리
 - 번역 텍스트 블록 위치, 크기, 문장 수정
-- PaddleOCR-VL 기반 OCR 보조와 말풍선/텍스트 영역 추정
+- PaddleOCR-VL 기반 OCR 보조와 말풍선/텍스트 영역 추정 (vl 모드 direct, external, auto-fastdeploy)
 - Flux 기반 인페인팅으로 원문 배경 지우기
 - 마스크 붓, 일반 붓, 복원, 색 뽑기, 원본 비교로 남은 자국 보정
 - 번역과 인페인팅 결과를 PNG로 출력

@@ -80,6 +80,7 @@ export class WebBrowserManager {
     if (!isAllowedWebUrl(request.url)) {
       throw new Error("웹 페이지는 http 또는 https URL만 열 수 있습니다.");
     }
+    this.closeStaleSessionsBeforeOpen("open");
     const mainWindow = this.requireMainWindow();
     const sessionId = randomUUID();
     const partition = `persist:mgt-web-${sessionId}`;
@@ -150,6 +151,7 @@ export class WebBrowserManager {
     if (openedChapter.sourceKind !== "web" || !openedChapter.webOrigin?.startUrl) {
       throw new Error("웹 주소가 저장된 화가 아닙니다.");
     }
+    this.closeStaleSessionsBeforeOpen("reopen");
     const startUrl = openedChapter.webOrigin.finalUrl || openedChapter.webOrigin.startUrl;
     if (!isAllowedWebUrl(startUrl)) {
       throw new Error("저장된 웹 주소가 http 또는 https URL이 아닙니다.");
@@ -233,6 +235,18 @@ export class WebBrowserManager {
     for (const sessionId of [...this.sessions.keys()]) {
       this.close(sessionId);
     }
+  }
+
+  private closeStaleSessionsBeforeOpen(reason: "open" | "reopen"): void {
+    if (this.sessions.size === 0) {
+      return;
+    }
+    logInfo("Closing stale web browser sessions before opening a new one", {
+      reason,
+      sessionCount: this.sessions.size,
+      sessionIds: [...this.sessions.keys()]
+    });
+    this.closeAll();
   }
 
   hasActiveSessions(): boolean {

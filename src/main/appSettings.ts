@@ -9,6 +9,7 @@ import type {
   ModelSource,
   OcrDevice,
   OcrEngine,
+  OcrVlServerMode,
   StorageSettings,
   TranslationMode
 } from "../shared/types";
@@ -49,6 +50,8 @@ export const MAX_MAX_TOKENS = 12000;
 export const DEFAULT_OCR_DEVICE: OcrDevice = "cpu";
 export const DEFAULT_OCR_ENGINE: OcrEngine = "paddleocr-v5";
 export const DEFAULT_OCR_BATCH_SIZE = 1;
+export const DEFAULT_OCR_VL_SERVER_MODE: OcrVlServerMode = "direct";
+export const DEFAULT_OCR_VL_MAX_LONG_SIDE = 2560;
 export const MIN_OCR_BATCH_SIZE = 1;
 export const MAX_OCR_BATCH_SIZE = 16;
 export const DEFAULT_TRANSLATION_MODE: TranslationMode = "image";
@@ -192,6 +195,8 @@ export type TranslationOptions = {
   ocrEngine: OcrEngine;
   ocrBatchSize: number;
   ocrGpuCudaTag?: string;
+  ocrVlServerMode?: OcrVlServerMode;
+  ocrVlMaxLongSide?: number;
   ocrBboxProvider?: string;
   ocrBboxCommand?: string;
   ocrBboxHintsPath?: string;
@@ -277,6 +282,14 @@ export function resolveDefaultAppSettings(
           env.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG ??
           env.MANGA_TRANSLATOR_OCR_GPU_CUDA,
         hardwareDefaults.ocrGpuCudaTag
+      ),
+      vlServerMode: resolveOcrVlServerMode(
+        env.MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_MODE ?? env.MANGA_TRANSLATOR_OCR_VL_SERVER_MODE,
+        DEFAULT_OCR_VL_SERVER_MODE
+      ),
+      vlMaxLongSide: resolveOcrVlMaxLongSide(
+        env.MANGA_TRANSLATOR_PADDLEOCR_VL_MAX_LONG_SIDE ?? env.MANGA_TRANSLATOR_OCR_VL_MAX_LONG_SIDE,
+        DEFAULT_OCR_VL_MAX_LONG_SIDE
       )
     },
     translation: {
@@ -399,7 +412,15 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
         defaults.ocr.engine
       ),
       batchSize: resolveOcrBatchSize(resolvedOcr?.batchSize ?? record?.ocrBatchSize, defaults.ocr.batchSize),
-      gpuCudaTag: resolveStoredOcrGpuCudaTag(resolvedOcr, defaults)
+      gpuCudaTag: resolveStoredOcrGpuCudaTag(resolvedOcr, defaults),
+      vlServerMode: resolveOcrVlServerMode(
+        resolvedOcr?.vlServerMode ?? record?.ocrVlServerMode,
+        defaults.ocr.vlServerMode ?? DEFAULT_OCR_VL_SERVER_MODE
+      ),
+      vlMaxLongSide: resolveOcrVlMaxLongSide(
+        resolvedOcr?.vlMaxLongSide ?? record?.ocrVlMaxLongSide,
+        defaults.ocr.vlMaxLongSide ?? DEFAULT_OCR_VL_MAX_LONG_SIDE
+      )
     },
     translation: {
       mode: resolveTranslationMode(asRecord(translation)?.mode ?? record?.translationMode, defaults.translation.mode),
@@ -597,6 +618,14 @@ export function buildBaseTranslationOptions({
         runtimeEnv.MANGA_TRANSLATOR_OCR_GPU_CUDA,
       settings.ocr.gpuCudaTag ?? DEFAULT_OCR_GPU_CUDA_TAG
     ),
+    ocrVlServerMode: resolveOcrVlServerMode(
+      runtimeEnv.MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_MODE ?? runtimeEnv.MANGA_TRANSLATOR_OCR_VL_SERVER_MODE,
+      settings.ocr.vlServerMode ?? DEFAULT_OCR_VL_SERVER_MODE
+    ),
+    ocrVlMaxLongSide: resolveOcrVlMaxLongSide(
+      runtimeEnv.MANGA_TRANSLATOR_PADDLEOCR_VL_MAX_LONG_SIDE ?? runtimeEnv.MANGA_TRANSLATOR_OCR_VL_MAX_LONG_SIDE,
+      settings.ocr.vlMaxLongSide ?? DEFAULT_OCR_VL_MAX_LONG_SIDE
+    ),
     ocrBboxProvider:
       resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_OCR_BBOX_PROVIDER) ??
       resolveOcrEngine(runtimeEnv.MANGA_TRANSLATOR_OCR_ENGINE, settings.ocr.engine),
@@ -711,12 +740,24 @@ function resolveOcrEngine(value: unknown, fallback: OcrEngine): OcrEngine {
   return value === "paddleocr-v5" || value === "paddleocr-vl" ? value : fallback;
 }
 
+function resolveOcrVlServerMode(value: unknown, fallback: OcrVlServerMode): OcrVlServerMode {
+  return value === "external" || value === "auto-fastdeploy" || value === "direct" ? value : fallback;
+}
+
 function resolveOcrBatchSize(value: unknown, fallback: number): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isInteger(parsed)) {
     return fallback;
   }
   return clampInteger(parsed, MIN_OCR_BATCH_SIZE, MAX_OCR_BATCH_SIZE);
+}
+
+function resolveOcrVlMaxLongSide(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed)) {
+    return fallback;
+  }
+  return Math.max(0, parsed);
 }
 
 function resolveTranslationMode(value: unknown, fallback: TranslationMode): TranslationMode {

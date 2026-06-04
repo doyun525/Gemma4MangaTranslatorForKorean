@@ -29,6 +29,7 @@ import type {
 } from "./pipeline/types";
 
 const OCR_TEXT_TRANSLATION_CHUNK_SIZE = 80;
+const LOCAL_OCR_TEXT_TRANSLATION_CHUNK_SIZE = 50;
 
 export type PipelineTimingSummary = {
   totalMs: number;
@@ -355,7 +356,8 @@ export async function runWholePagePipeline({
     outputText: string;
     noTextDetected: boolean;
   }> => {
-    const chunks = chunkArray(ocrHints, OCR_TEXT_TRANSLATION_CHUNK_SIZE);
+    const chunkSize = resolveOcrTextTranslationChunkSize(pageOptions);
+    const chunks = chunkArray(ocrHints, chunkSize);
     const mergedItems: OverlayItem[] = [];
     const mergedOutputs: string[] = [];
     let firstRequestBody: unknown = null;
@@ -365,17 +367,26 @@ export async function runWholePagePipeline({
       jobId,
       page: summarizePage(page),
       hintCount: ocrHints.length,
-      chunkSize: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+      chunkSize,
       chunkCount: chunks.length
     });
 
     for (const [chunkIndex, chunkHints] of chunks.entries()) {
       throwIfAborted(signal);
       const chunkNumber = chunkIndex + 1;
+      const chunkRecords = chunkHints.map((hint, localIndex) => ({
+        hint,
+        localId: localIndex + 1,
+        originalId: readHintId(hint, localIndex + 1 + chunkIndex * chunkSize) ?? localIndex + 1 + chunkIndex * chunkSize
+      }));
       const chunkOptions: TranslationOptions = {
         ...pageOptions,
-        ocrBboxHints: chunkHints,
-        ocrBboxHintLimit: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+        ocrBboxHints: chunkRecords.map((record) => ({
+          ...(record.hint && typeof record.hint === "object" ? record.hint as Record<string, unknown> : {}),
+          id: record.localId,
+          sourceId: record.originalId
+        })),
+        ocrBboxHintLimit: chunkSize,
         outputDir: join(pageOptions.outputDir, "chunks", `chunk-${String(chunkNumber).padStart(3, "0")}`),
         label: `${pageOptions.label}-chunk-${chunkNumber}-of-${chunks.length}`
       };
@@ -401,11 +412,40 @@ export async function runWholePagePipeline({
         firstRequestBody = result.requestBody;
       }
 
-      const items = parseTranslationOverlayItems(result.outputText, page, chunkOptions);
+      const parsedRecords = parseOcrTextResponseRecords(result.outputText);
+      const recordByLocalId = new Map(chunkRecords.map((record) => [record.localId, record]));
+      const recordByOriginalId = new Map(chunkRecords.map((record) => [record.originalId, record]));
+      let originalIdFallbackCount = 0;
+      const items = parsedRecords.flatMap((item) => {
+        const record = recordByLocalId.get(item.id) ?? recordByOriginalId.get(item.id);
+        if (!record) {
+          return [];
+        }
+        if (!recordByLocalId.has(item.id) && recordByOriginalId.has(item.id)) {
+          originalIdFallbackCount += 1;
+        }
+        return [
+          buildOverlayItemFromOcrTextRecord(item, record.hint, page, record.originalId)
+        ];
+      });
       mergedOutputs.push(result.outputText);
       const chunkOverlayItemsPath = join(chunkOptions.outputDir, "overlay-items.json");
       await mkdir(chunkOptions.outputDir, { recursive: true });
       await writeFile(chunkOverlayItemsPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
+
+      const suspiciouslyShortChunk = chunkHints.length >= 20 && items.length > 0 && items.length < Math.ceil(chunkHints.length * 0.35);
+      if (suspiciouslyShortChunk) {
+        logWarn("OCR text translation chunk returned suspiciously few mapped items", {
+          jobId,
+          page: summarizePage(page),
+          chunkNumber,
+          chunkCount: chunks.length,
+          hintCount: chunkHints.length,
+          parsedItemCount: parsedRecords.length,
+          mappedItemCount: items.length,
+          originalIdFallbackCount
+        });
+      }
 
       if (items.length === 0) {
         emptyChunkCount += 1;
@@ -588,7 +628,8 @@ export async function runWholePagePipeline({
       return;
     }
 
-    const chunks = chunkArray(records, OCR_TEXT_TRANSLATION_CHUNK_SIZE);
+    const chunkSize = resolveOcrTextTranslationChunkSize(baseOptions);
+    const chunks = chunkArray(records, chunkSize);
     const itemsByPageId = new Map<string, OverlayItem[]>();
     const outputsByPageId = new Map<string, string[]>();
     const pageJobById = new Map(pageJobs.map((job) => [job.page.id, job]));
@@ -641,7 +682,7 @@ export async function runWholePagePipeline({
       jobId,
       pageCount: pageJobs.length,
       hintCount: records.length,
-      chunkSize: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+      chunkSize,
       chunkCount: chunks.length,
       pages: pageJobs.map((job) => summarizePage(job.page))
     });
@@ -664,7 +705,7 @@ export async function runWholePagePipeline({
           id: localIndex + 1,
           sourceId: record.globalId
         })),
-        ocrBboxHintLimit: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+        ocrBboxHintLimit: chunkSize,
         outputDir: join(runPaths.runDir, "multi-page-translation", `chunk-${String(chunkNumber).padStart(3, "0")}`),
         label: `${baseOptions.label}-multi-page-chunk-${chunkNumber}-of-${chunks.length}`
       };
@@ -689,7 +730,7 @@ export async function runWholePagePipeline({
         firstRequestBody = result.requestBody;
       }
 
-      const chunkItems = runtime.normalizeItems(runtime.parseJsonLenient(result.outputText));
+      const chunkItems = parseOcrTextResponseRecords(result.outputText);
       const recordByChunkLocalId = new Map(chunkRecords.map((record, localIndex) => [localIndex + 1, record]));
       const recordByGlobalId = new Map(chunkRecords.map((record) => [record.globalId, record]));
       const pagesWithMappedItems = new Set<string>();
@@ -704,10 +745,7 @@ export async function runWholePagePipeline({
           globalIdFallbackCount += 1;
         }
         const pageItems = itemsByPageId.get(record.pageId) ?? [];
-        pageItems.push({
-          ...item,
-          id: record.originalId
-        });
+        pageItems.push(buildOverlayItemFromOcrTextRecord(item, record.rawHint, record.page, record.originalId));
         itemsByPageId.set(record.pageId, pageItems);
         pagesWithMappedItems.add(record.pageId);
         acceptedItemCount += 1;
@@ -1013,7 +1051,229 @@ export async function runWholePagePipeline({
 }
 
 function shouldChunkOcrTextTranslation(options: TranslationOptions, ocrHints: unknown[]): boolean {
-  return String(options.translationMode ?? "") === "ocr-text" && ocrHints.length > OCR_TEXT_TRANSLATION_CHUNK_SIZE;
+  return String(options.translationMode ?? "") === "ocr-text" && ocrHints.length > resolveOcrTextTranslationChunkSize(options);
+}
+
+function resolveOcrTextTranslationChunkSize(options: TranslationOptions): number {
+  const provider = String(options.modelProvider ?? "").trim();
+  if (provider && provider !== "openai-codex") {
+    return LOCAL_OCR_TEXT_TRANSLATION_CHUNK_SIZE;
+  }
+  return OCR_TEXT_TRANSLATION_CHUNK_SIZE;
+}
+
+type OcrTextResponseRecord = {
+  id: number;
+  type?: string;
+  textRole?: string;
+  direction?: string;
+  angle?: number;
+  fontSize?: number;
+  confidence?: number;
+  jp?: string;
+  ko: string;
+};
+
+function parseOcrTextResponseRecords(outputText: string): OcrTextResponseRecord[] {
+  const records: OcrTextResponseRecord[] = [];
+  let current: Partial<OcrTextResponseRecord> | null = null;
+  let currentTextKey: "jp" | "ko" | null = null;
+
+  const pushCurrent = () => {
+    if (!current) {
+      return;
+    }
+    const id = Number(current.id);
+    const ko = String(current.ko ?? "").trim();
+    if (Number.isInteger(id) && id > 0 && ko) {
+      records.push({
+        id,
+        type: current.type,
+        textRole: current.textRole,
+        direction: current.direction,
+        angle: current.angle,
+        fontSize: current.fontSize,
+        confidence: current.confidence,
+        jp: String(current.jp ?? "").trim(),
+        ko
+      });
+    }
+    current = null;
+    currentTextKey = null;
+  };
+
+  for (const rawLine of String(outputText ?? "").replace(/```(?:json)?/gi, "").replace(/```/g, "").split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) {
+      pushCurrent();
+      continue;
+    }
+
+    const match = line.match(/^([A-Za-z][A-Za-z0-9_]*):\s*(.*)$/);
+    if (!match) {
+      const delimitedRecord = parseDelimitedOcrTextResponseRecord(line);
+      if (delimitedRecord) {
+        pushCurrent();
+        records.push(delimitedRecord);
+        continue;
+      }
+      if (current && currentTextKey) {
+        current[currentTextKey] = `${String(current[currentTextKey] ?? "")}\n${line.trim()}`.trim();
+      }
+      continue;
+    }
+
+    const key = normalizeOcrTextRecordKey(match[1]);
+    const value = match[2].trim();
+    if (key === "id") {
+      pushCurrent();
+      current = { id: Number(value) };
+      continue;
+    }
+    if (!current) {
+      current = {};
+    }
+    if (key === "jp" || key === "ko") {
+      current[key] = value;
+      currentTextKey = key;
+      continue;
+    }
+    currentTextKey = null;
+    if (key === "type" || key === "textRole" || key === "direction") {
+      current[key] = value;
+      continue;
+    }
+    if (key === "angle" || key === "fontSize" || key === "confidence") {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        current[key] = numeric;
+      }
+    }
+  }
+  pushCurrent();
+  return records;
+}
+
+function parseDelimitedOcrTextResponseRecord(line: string): OcrTextResponseRecord | null {
+  const fields = line.split("\t").map((value) => value.trim()).filter(Boolean);
+  if (fields.length >= 8) {
+    const id = Number(fields[0]);
+    if (!Number.isInteger(id) || id <= 0) {
+      return null;
+    }
+    const hasFontSize = fields.length >= 9;
+    const confidenceIndex = hasFontSize ? 6 : 5;
+    const jpIndex = hasFontSize ? 7 : 6;
+    const koIndex = hasFontSize ? 8 : 7;
+    const confidence = Number(fields[confidenceIndex]);
+    const fontSize = hasFontSize ? Number(fields[5]) : undefined;
+    return {
+      id,
+      type: fields[1],
+      textRole: fields[2],
+      direction: fields[3],
+      angle: Number(fields[4]),
+      fontSize: Number.isFinite(fontSize) ? fontSize : undefined,
+      confidence: Number.isFinite(confidence) ? confidence : undefined,
+      jp: fields.slice(jpIndex, koIndex).join("\t").trim(),
+      ko: fields.slice(koIndex).join("\t").trim()
+    };
+  }
+
+  if (fields.length === 3) {
+    const id = Number(fields[0]);
+    if (!Number.isInteger(id) || id <= 0) {
+      return null;
+    }
+    const metadataAndSource = fields[1].split(/\s+/).filter(Boolean);
+    if (metadataAndSource.length < 6) {
+      return null;
+    }
+    const type = metadataAndSource[0];
+    const textRole = metadataAndSource[1];
+    const direction = metadataAndSource[2];
+    const angle = Number(metadataAndSource[3]);
+    const firstNumber = Number(metadataAndSource[4]);
+    const secondNumber = Number(metadataAndSource[5]);
+    const hasFontSize = Number.isFinite(secondNumber) && secondNumber >= 0 && secondNumber <= 1;
+    const fontSize = hasFontSize ? firstNumber : undefined;
+    const confidence = hasFontSize ? secondNumber : firstNumber;
+    const jpStart = hasFontSize ? 6 : 5;
+    return {
+      id,
+      type,
+      textRole,
+      direction,
+      angle: Number.isFinite(angle) ? angle : undefined,
+      fontSize: Number.isFinite(fontSize) ? fontSize : undefined,
+      confidence: Number.isFinite(confidence) ? confidence : undefined,
+      jp: metadataAndSource.slice(jpStart).join(" ").trim(),
+      ko: fields[2].trim()
+    };
+  }
+
+  return null;
+}
+
+function normalizeOcrTextRecordKey(key: string): string {
+  const normalized = key.trim().toLowerCase();
+  if (normalized === "textrole" || normalized === "text_role" || normalized === "role") {
+    return "textRole";
+  }
+  if (normalized === "fontsize" || normalized === "font_size" || normalized === "font") {
+    return "fontSize";
+  }
+  return normalized;
+}
+
+function buildOverlayItemFromOcrTextRecord(record: OcrTextResponseRecord, hint: unknown, page: MangaPage, id: number): OverlayItem {
+  return {
+    id,
+    type: String(record.type ?? "nonsolid").trim().toLowerCase() === "reject" ? "reject" : "nonsolid",
+    textRole: normalizeOverlayTextRole(record.textRole),
+    bbox: buildNormalizedBboxFromOcrHint(hint, page),
+    jp: String(record.jp ?? "").trim(),
+    ko: record.ko.trim(),
+    direction: normalizeOverlayDirection(record.direction),
+    angle: Number.isFinite(record.angle) ? Number(record.angle) : 0,
+    fontSize: Number.isFinite(record.fontSize) ? Number(record.fontSize) : undefined,
+    confidence: Number.isFinite(record.confidence) ? Number(record.confidence) : 0.9
+  };
+}
+
+function buildNormalizedBboxFromOcrHint(hint: unknown, page: MangaPage) {
+  const record = hint && typeof hint === "object" ? hint as Record<string, unknown> : {};
+  const x1 = Number(record.x1);
+  const y1 = Number(record.y1);
+  const x2 = Number(record.x2);
+  const y2 = Number(record.y2);
+  const pageWidth = Math.max(1, page.width);
+  const pageHeight = Math.max(1, page.height);
+  if (![x1, y1, x2, y2].every(Number.isFinite)) {
+    return { x: 0, y: 0, w: 1, h: 1 };
+  }
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  const right = Math.max(x1, x2);
+  const bottom = Math.max(y1, y2);
+  return {
+    x: Math.max(0, Math.round((left / pageWidth) * 1000)),
+    y: Math.max(0, Math.round((top / pageHeight) * 1000)),
+    w: Math.max(1, Math.round(((right - left) / pageWidth) * 1000)),
+    h: Math.max(1, Math.round(((bottom - top) / pageHeight) * 1000))
+  };
+}
+
+function normalizeOverlayTextRole(value: unknown): OverlayItem["textRole"] {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (text === "sound" || text === "nontext" || text === "ordinary") {
+    return text;
+  }
+  return "ordinary";
+}
+
+function normalizeOverlayDirection(value: unknown): OverlayItem["direction"] {
+  return String(value ?? "").trim().toLowerCase() === "vertical" ? "vertical" : "horizontal";
 }
 
 function buildBatchedPromptHint(hint: unknown, page: MangaPage, globalId: number, pageNumber: number): unknown {
@@ -1048,12 +1308,12 @@ function buildBatchedPromptHint(hint: unknown, page: MangaPage, globalId: number
   };
 }
 
-function readHintId(hint: unknown): number | null {
+function readHintId(hint: unknown, fallback: number | null = null): number | null {
   if (!hint || typeof hint !== "object") {
-    return null;
+    return fallback;
   }
   const id = Number((hint as Record<string, unknown>).id);
-  return Number.isInteger(id) && id > 0 ? id : null;
+  return Number.isInteger(id) && id > 0 ? id : fallback;
 }
 
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {

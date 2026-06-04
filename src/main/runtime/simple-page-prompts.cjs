@@ -43,8 +43,8 @@ const GEMMA_26B_OCR_ANCHOR_LINES = [
 ];
 
 const GEMMA_26B_OCR_TEXT_ANCHOR_LINES = [
-  "OCR text hints may be wrong, incomplete, or split strangely, but keep each record anchored to the listed candidate id and rectangle.",
-  "Prefer the provided ocrText and bbox together; fix obvious OCR splits or garbling only when the text clearly belongs to one readable item.",
+  "OCR text hints may be wrong, incomplete, or split strangely, but keep each record anchored to the listed candidate id.",
+  "Prefer the provided ocrText; fix obvious OCR splits or garbling only when the text clearly belongs to one readable item.",
   "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
 ];
 
@@ -70,6 +70,18 @@ const OVERLAY_OUTPUT_SCHEMA = [
   "fontSize: <integer>",
   "confidence: <0.00-1.00>",
   "jp: <visible source text>",
+  "ko: <concise Korean translation>"
+].join("\n");
+
+const OCR_TEXT_OUTPUT_SCHEMA = [
+  "id: <integer>",
+  "type: nonsolid",
+  "textRole: <ordinary|sound>",
+  "direction: <horizontal|vertical>",
+  "angle: <integer>",
+  "fontSize: <integer>",
+  "confidence: <0.00-1.00>",
+  "jp: <source text from ocrText>",
   "ko: <concise Korean translation>"
 ].join("\n");
 
@@ -198,7 +210,7 @@ function buildSystemPrompt(options = {}) {
     "Every ko field must be Korean Hangul. Never answer ko in English, Chinese, Japanese, romaji, or pinyin.",
     "Return only the machine-readable record format requested by the user prompt.",
     isOcrTextOnlyTranslationMode(options)
-      ? "Geometry accuracy comes before Korean text fit: preserve each candidate bbox from the OCR list unless a minimal correction is clearly required."
+      ? "This text-only request does not ask you to output geometry; preserve candidate ids and translate their ocrText only."
       : "Geometry accuracy comes before Korean text fit: preserve the original source glyph position and apparent size.",
     "Never merge separate speech bubbles, including touching or stacked balloon lobes.",
     "Render ordinary speech/caption/label Korean horizontally by default; source vertical direction is not a reason to make Korean vertical."
@@ -244,8 +256,8 @@ function buildOcrTextTaskSection(options = {}) {
       ? "You are given OCR candidate records from multiple manga pages. No image is included in this request."
       : "You are given OCR candidate records from one manga page. No image is included in this request.",
     multiPageTextBatch
-      ? "Use the OCR text and bbox candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
-      : "Use the OCR text and bbox candidates as the only source of evidence.",
+      ? "Use the OCR text candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
+      : "Use the OCR text candidates as the only source of evidence.",
     "Translate every listed candidate that contains real Japanese or English text into concise Korean.",
     "Do not add records beyond the listed candidate ids, and do not invent text that is not supported by a candidate's ocrText or label.",
     "Only output real Japanese or English text. Skip decorative marks, unreadable scraps, and non-text OCR noise."
@@ -257,9 +269,9 @@ function buildOcrTextOutputSection(options = {}) {
   const lines = [
     "Output",
     "Return plain text records only. Do not output JSON, markdown, bullets, commentary, or code fences.",
-    "Use exactly these keys, one per line: id, type, textRole, x1, y1, x2, y2, direction, angle, fontSize, confidence, jp, ko.",
+    "Use exactly these keys, one per line: id, type, textRole, direction, angle, fontSize, confidence, jp, ko.",
     "Derive jp primarily from ocrText when present; fix obvious OCR garbling only when the corrected reading is still clearly the same item.",
-    "Copy each candidate's x1, y1, x2, y2 unless a minimal correction is clearly required.",
+    "Do not output x1, y1, x2, y2, bbox, width, height, or any geometry fields. The app will reuse the OCR candidate geometry internally.",
     "textRole is ordinary for speech bubbles, captions, narration, labels, signs, and notes.",
     includeSoundEffects
       ? "textRole is sound only for standalone printed sound/reaction lettering supported by the candidate text."
@@ -273,12 +285,12 @@ function buildOcrTextOutputSection(options = {}) {
     "Preserve sentence-ending intent in ko. If the source is a question, the Korean ko should normally end with ?. If the source is an exclamation or emphatic shout, keep ! when it preserves the tone.",
     "For UI labels such as Chapter 104/104, Page 2/22, Login, Menu, or Filter, translate labels compactly if useful but keep numbers and separators unchanged.",
     "Write ko as natural Korean for horizontal reading. Do not mirror source line breaks; use commas or short Korean phrases unless a real list or dialogue pause needs a line break.",
-    "Use the candidate rectangle size to choose natural line breaks for ko. Prefer 1-3 short lines for dialogue and captions.",
+    "Prefer concise Korean. Do not force line breaks from source OCR splits; use natural Korean punctuation or short phrases.",
     "If the entire jp or ko would be only [?], skip that record instead of outputting an unreadable placeholder.",
     "Skip records whose jp is only punctuation, decorative marks, page numbers, a lone Latin letter, or a clipped one-character fragment.",
     "Put one blank line between records.",
     "Record template:",
-    OVERLAY_OUTPUT_SCHEMA
+    OCR_TEXT_OUTPUT_SCHEMA
   ];
 
   if (shouldUse26BDuplicatePromptProfile(options)) {
@@ -290,12 +302,13 @@ function buildOcrTextOutputSection(options = {}) {
 
 function buildOcrTextCandidateGeometrySection() {
   return [
-    "Candidate geometry",
-    "Coordinates use the same frame as the OCR candidate list below, with top-left origin.",
-    "Copy each candidate's x1, y1, x2, y2 unless a minimal correction is clearly required.",
+    "Candidate metadata",
+    "Geometry is intentionally omitted from this text-only request to reduce tokens.",
+    "Keep the same id for each accepted candidate. The app will attach the original OCR bbox after translation.",
+    "Do not estimate, recommend, correct, or output candidate coordinates.",
     "direction is the original source writing direction: horizontal or vertical. Use horizontal when unclear.",
-    "angle is the visible slant in degrees from -30 to 30. Use 0 when unclear.",
-    "fontSize is an approximate overlay size in page pixels inferred from the candidate rectangle height.",
+    "angle can be 0 unless the source text itself is obviously slanted from OCR text context.",
+    "fontSize can be a rough readability hint; use 16 when unsure.",
     "For ordinary speech/caption/label text, Korean rendering should be horizontal by default even when direction is vertical."
   ];
 }
@@ -462,8 +475,8 @@ function buildTaskSection(options = {}, imageVariants = []) {
           : "You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.",
     textOnlyMode
       ? multiPageTextBatch
-        ? "Use the OCR text and bbox candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
-        : "Use the OCR text and bbox candidates as the only source of evidence."
+        ? "Use the OCR text candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
+        : "Use the OCR text candidates as the only source of evidence."
       : hasAssistImages
         ? "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page."
         : regionCropMode
@@ -555,7 +568,9 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
   const originalHeight = readPositiveInteger(options.imageHeight);
   const formattedHints = hints
     .slice(0, hintLimit)
-    .map((hint, index) => formatOcrBboxHintForPrompt(hint, index + 1, frame, originalWidth, originalHeight))
+    .map((hint, index) => textOnlyMode
+      ? formatOcrTextHintForPrompt(hint, index + 1)
+      : formatOcrBboxHintForPrompt(hint, index + 1, frame, originalWidth, originalHeight))
     .filter(Boolean);
   const candidateIds = hints
     .slice(0, formattedHints.length)
@@ -569,8 +584,10 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
   const use26bDuplicateProfile = shouldUse26BDuplicatePromptProfile(options);
 
   return [
-    "OCR bbox candidates",
-    "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
+    textOnlyMode ? "OCR text candidates" : "OCR bbox candidates",
+    textOnlyMode
+      ? "An external OCR pass has already produced candidate text. Geometry is intentionally omitted from this request."
+      : "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
     ...(use26bDuplicateProfile
       ? textOnlyMode
         ? GEMMA_26B_OCR_TEXT_ANCHOR_LINES
@@ -584,7 +601,9 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
             "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
             "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
           ]),
-    "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
+    textOnlyMode
+      ? "Treat each candidate as a locked text slot. For every candidate that contains Japanese or English text, output one record with that same id and no geometry fields."
+      : "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
     ...(use26bDuplicateProfile ? [GEMMA_26B_OCR_DUPLICATE_LINES[0]] : []),
     ...(multiPageTextBatch
       ? [
@@ -602,7 +621,9 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     textOnlyMode
       ? "For each candidate, include every readable Japanese or English line supported by ocrText. A candidate record is incomplete if jp or ko omits a clearly present line from the same candidate."
       : "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
-    "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
+    textOnlyMode
+      ? "Write concise ko. Do not output forced line breaks just because OCR split the source text."
+      : "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
     "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the source line breaks.",
     includeSoundEffects
       ? "For every accepted candidate, output type nonsolid and set textRole to ordinary or sound."
@@ -612,7 +633,7 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
       ? "For candidate SFX, confidence must be 1.00 only when the complete effect text is clearly read; otherwise use confidence below 1.00."
       : "If a candidate is standalone SFX, background sound lettering, reaction lettering, or decorative effect text, skip it instead of translating it.",
     textOnlyMode
-      ? "Change a candidate bbox only when ocrText and the listed rectangle clearly conflict; then change the minimum amount needed."
+      ? "Do not output candidate bbox changes. The app will reuse the OCR bbox internally."
       : "You may change a candidate bbox only when Image 1 clearly proves the candidate clips visible glyph strokes or includes non-text art; then change the minimum amount needed.",
     "Do not merge two candidates into one record, even when the sentence continues across them. Candidate rectangles are separate output records.",
     "If two candidates are stacked or touching speech bubbles, output two separate dialogue records with their original ids.",
@@ -634,7 +655,9 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
                 "Do not add missing records for SFX, background sound lettering, reaction lettering, decorative effect text, or ambient sound marks."
               ])
         ]),
-    "The candidate coordinates below are already converted into the same coordinate frame required for your output.",
+    textOnlyMode
+      ? "The candidate list below intentionally contains no coordinates."
+      : "The candidate coordinates below are already converted into the same coordinate frame required for your output.",
     "",
     ...formattedHints
   ];
@@ -656,6 +679,19 @@ function formatOcrBboxHintForPrompt(hint, fallbackId, frame, originalWidth, orig
   const ocrText = sanitizeOcrTextForPrompt(readOcrCandidateText(hint));
   const textHint = ocrText ? ` ocrText:${JSON.stringify(ocrText)}` : "";
   return `candidate ${id}: label:${label} x1:${converted.x1} y1:${converted.y1} x2:${converted.x2} y2:${converted.y2}${score}${textHint}`;
+}
+
+function formatOcrTextHintForPrompt(hint, fallbackId) {
+  const id = readPositiveInteger(hint?.id) || fallbackId;
+  const label = sanitizeHintLabel(hint?.label);
+  const sourceId = readPositiveInteger(hint?.sourceId);
+  const score = Number.isFinite(hint?.score) ? ` score:${Math.round(hint.score * 100) / 100}` : "";
+  const ocrText = sanitizeOcrTextForPrompt(readOcrCandidateText(hint));
+  if (!ocrText) {
+    return "";
+  }
+  const sourceIdText = sourceId ? ` sourceId:${sourceId}` : "";
+  return `candidate ${id}: label:${label}${sourceIdText}${score} ocrText:${JSON.stringify(ocrText)}`;
 }
 
 function convertOriginalPixelBoxToPromptFrame(box, frame, originalWidth, originalHeight) {

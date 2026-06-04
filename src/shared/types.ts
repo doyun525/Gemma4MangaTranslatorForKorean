@@ -10,6 +10,7 @@ export type GemmaVramMode = "full" | "economy";
 export type CodexReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 export type OcrDevice = "cpu" | "gpu";
 export type OcrEngine = "paddleocr-vl" | "paddleocr-v5";
+export type OcrVlServerMode = "direct" | "external" | "auto-fastdeploy";
 export type TranslationMode = "image" | "ocr-text" | "ocr-text-with-image-retry";
 
 export type GemmaCustomModelPreset = {
@@ -44,6 +45,8 @@ export type OcrSettings = {
   engine: OcrEngine;
   batchSize: number;
   gpuCudaTag?: string;
+  vlServerMode?: OcrVlServerMode;
+  vlMaxLongSide?: number;
 };
 
 export type TranslationSettings = {

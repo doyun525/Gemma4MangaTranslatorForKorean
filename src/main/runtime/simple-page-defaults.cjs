@@ -7,7 +7,7 @@ const DEFAULT_CODEX_REASONING_EFFORT = "low";
 const DEFAULT_API_KEY = "local-llama-server";
 const DEFAULT_OCR_CPU_PIP_PACKAGES = ["paddlepaddle==3.3.1", "paddleocr[doc-parser]==3.5.0"];
 const DEFAULT_OCR_GPU_PADDLE_PACKAGE = "paddlepaddle-gpu==3.3.1";
-const DEFAULT_OCR_GPU_EXTRA_PACKAGES = ["paddleocr[doc-parser]==3.5.0"];
+const DEFAULT_OCR_GPU_EXTRA_PACKAGES = ["paddleocr[doc-parser]==3.5.0", "nvidia-cudnn-cu12>=9.9,<9.10"];
 const DEFAULT_OCR_GPU_CUDA_TAG = "cu126";
 const PADDLEOCR_VL_WINDOWS_SAFETENSORS_WHEEL =
   "https://xly-devops.cdn.bcebos.com/safetensors-nightly/safetensors-0.6.2.dev0-cp38-abi3-win_amd64.whl";

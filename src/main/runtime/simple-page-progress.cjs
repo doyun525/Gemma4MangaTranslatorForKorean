@@ -53,7 +53,8 @@ function parseOcrBatchProgressLine(line) {
       phase,
       index: Math.max(1, Math.min(Math.floor(index), Math.floor(total))),
       total: Math.floor(total),
-      count: Number.isFinite(Number(payload?.count)) ? Math.max(0, Math.floor(Number(payload.count))) : 0
+      count: Number.isFinite(Number(payload?.count)) ? Math.max(0, Math.floor(Number(payload.count))) : 0,
+      output: typeof payload?.output === "string" ? payload.output : ""
     };
   } catch {
     return null;

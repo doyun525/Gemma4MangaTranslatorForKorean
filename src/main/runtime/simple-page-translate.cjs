@@ -220,6 +220,9 @@ function nowMs() {
 const OCR_WORKER_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 let ocrWorkerState = null;
 let ocrWorkerExitCleanupRegistered = false;
+let ocrVlServerState = null;
+let ocrVlServerExitCleanupRegistered = false;
+let ocrVlAutoServerUnsupported = false;
 let ocrRuntimeCache = null;
 let ocrRuntimeCachePromise = null;
 
@@ -2744,6 +2747,10 @@ async function warmupOcrRuntime(options = {}) {
     return { warmed: false, provider, reason: "provider-not-paddle" };
   }
   const runtime = await ensurePaddleOcrRuntime(options);
+  const handleOcrOutput = createOcrCommandProgressHandler(options, {
+    progressText: "Paddle OCR 워커 준비 중"
+  });
+  await ensureOcrVlServerForOptions(options, provider, runtime, handleOcrOutput);
   if (!shouldUsePersistentOcrWorker(options, provider)) {
     return {
       warmed: true,
@@ -2758,9 +2765,6 @@ async function warmupOcrRuntime(options = {}) {
       diagnostics: runtime?.diagnostics || []
     };
   }
-  const handleOcrOutput = createOcrCommandProgressHandler(options, {
-    progressText: "Paddle OCR 워커 준비 중"
-  });
   const worker = await getPersistentOcrWorker(options, provider, runtime, handleOcrOutput);
   return {
     warmed: true,
@@ -2797,11 +2801,295 @@ function shouldUsePersistentOcrWorker(options = {}, provider = resolveOcrBboxPro
   return true;
 }
 
+function resolveOcrVlServerMode(options = {}) {
+  const value = String(
+    options.ocrVlServerMode ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_MODE", options) ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_VL_SERVER_MODE", options) ??
+      "direct"
+  ).trim().toLowerCase();
+  if (["auto-fastdeploy", "fastdeploy-auto", "auto"].includes(value)) {
+    return "auto-fastdeploy";
+  }
+  if (["external", "external-server"].includes(value)) {
+    return "external";
+  }
+  return "direct";
+}
+
+function resolveOcrVlServerHost(options = {}) {
+  return String(
+    options.ocrVlServerHost ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_HOST", options) ??
+      "127.0.0.1"
+  ).trim() || "127.0.0.1";
+}
+
+function resolveOcrVlServerPort(options = {}) {
+  return readPositiveInteger(
+    options.ocrVlServerPort ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_PORT", options)
+  ) || 8118;
+}
+
+function resolveOcrVlServerUrl(options = {}) {
+  const explicit = String(
+    options.ocrVlServerUrl ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_SERVER_URL", options) ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_URL", options) ??
+      ""
+  ).trim();
+  if (explicit) {
+    return explicit.replace(/\/+$/, "");
+  }
+  return `http://${resolveOcrVlServerHost(options)}:${resolveOcrVlServerPort(options)}/v1`;
+}
+
+function resolveOcrVlBackend(options = {}) {
+  return String(
+    options.ocrVlBackend ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_BACKEND", options) ??
+      "fastdeploy-server"
+  ).trim() || "fastdeploy-server";
+}
+
+function resolveOcrVlServerBackend(options = {}) {
+  return String(
+    options.ocrVlServerBackend ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_BACKEND", options) ??
+      "fastdeploy"
+  ).trim() || "fastdeploy";
+}
+
+function resolveOcrVlModelName(options = {}) {
+  return String(
+    options.ocrVlModelName ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_MODEL_NAME", options) ??
+      runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_MODEL_NAME", options) ??
+      "PaddleOCR-VL-1.5-0.9B"
+  ).trim() || "PaddleOCR-VL-1.5-0.9B";
+}
+
+function resolveOcrVlMaxLongSide(options = {}) {
+  return (
+    readPositiveInteger(
+      options.ocrVlMaxLongSide ??
+        runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_MAX_LONG_SIDE", options) ??
+        runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_VL_MAX_LONG_SIDE", options)
+    ) || 0
+  );
+}
+
+function shouldUseOcrVlServer(options = {}, provider = resolveOcrBboxProvider(options)) {
+  const mode = resolveOcrVlServerMode(options);
+  if (provider !== "paddleocr-vl" || mode === "direct") {
+    return false;
+  }
+  if (mode === "auto-fastdeploy" && ocrVlAutoServerUnsupported) {
+    return false;
+  }
+  return true;
+}
+
+function isOcrVlAutoServerUnsupportedError(error) {
+  const text = [
+    error?.message,
+    error?.stderrPreview,
+    error?.stderr,
+    error?.stdoutPreview,
+    error?.stdout
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return /genai_server/i.test(text) && /(invalid choice|No module named|unknown command|unrecognized arguments)/i.test(text);
+}
+
+async function ensureOcrVlServerForOptions(options = {}, provider = resolveOcrBboxProvider(options), runtime = null, onOutput = null) {
+  if (!shouldUseOcrVlServer(options, provider)) {
+    return null;
+  }
+  const mode = resolveOcrVlServerMode(options);
+  const serverUrl = resolveOcrVlServerUrl(options);
+  if (mode === "external") {
+    return { mode, serverUrl, startedByScript: false };
+  }
+  return ensureAutoOcrVlServer(options, runtime, onOutput);
+}
+
+async function ensureAutoOcrVlServer(options = {}, runtime = null, onOutput = null) {
+  const serverUrl = resolveOcrVlServerUrl(options);
+  const key = JSON.stringify({
+    mode: resolveOcrVlServerMode(options),
+    backend: resolveOcrVlServerBackend(options),
+    modelName: resolveOcrVlModelName(options),
+    serverUrl,
+    pythonPath: resolveOcrRuntimePythonPath(runtime, options)
+  });
+  if (ocrVlServerState?.key === key && !ocrVlServerState.closed) {
+    try {
+      await ocrVlServerState.readyPromise;
+    } catch (error) {
+      if (isOcrVlAutoServerUnsupportedError(error)) {
+        ocrVlAutoServerUnsupported = true;
+        const state = ocrVlServerState;
+        if (state) {
+          state.closed = true;
+          ocrVlServerState = null;
+          terminateChildProcessTree(state.child);
+        }
+        emitRuntimeProgress(options, "ocr_preparing", "PaddleOCR-VL 직접 실행으로 전환", "현재 PaddleOCR CLI가 genai_server를 지원하지 않습니다.", {
+          progressMode: "indeterminate",
+          installLogLine: "FastDeploy 서버 시작이 불가능해 기존 직접 OCR 방식으로 계속 진행합니다."
+        });
+        return null;
+      }
+      throw error;
+    }
+    return ocrVlServerState;
+  }
+
+  await stopOcrVlServer();
+  const pythonPath = resolveOcrRuntimePythonPath(runtime, options);
+  const args = [
+    "-m",
+    "paddleocr",
+    "genai_server",
+    "--model_name",
+    resolveOcrVlModelName(options),
+    "--host",
+    resolveOcrVlServerHost(options),
+    "--port",
+    String(resolveOcrVlServerPort(options)),
+    "--backend",
+    resolveOcrVlServerBackend(options)
+  ];
+  emitRuntimeProgress(options, "ocr_preparing", "PaddleOCR-VL FastDeploy 서버 시작 중", `${resolveOcrVlModelName(options)} / ${resolveOcrVlServerBackend(options)}`, {
+    progressMode: "indeterminate",
+    installLogLine: "PaddleOCR-VL genai_server를 시작합니다."
+  });
+  const child = spawn(pythonPath, args, {
+    shell: false,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: buildOcrRuntimeEnv({ ...options, ocrVlServerMode: "direct" }, runtime)
+  });
+  const state = {
+    key,
+    child,
+    serverUrl,
+    command: `${quoteCommandArg(pythonPath)} ${args.map(quoteCommandArg).join(" ")}`,
+    stdout: "",
+    stderr: "",
+    closed: false,
+    readyPromise: null
+  };
+  ocrVlServerState = state;
+  registerOcrVlServerExitCleanup();
+
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => {
+    state.stdout = shrinkBuffer(state.stdout, chunk, 30000);
+    onOutput?.(String(chunk));
+    process.stdout.write(`[paddleocr-vl-server:stdout] ${chunk}`);
+  });
+  child.stderr?.on("data", (chunk) => {
+    state.stderr = shrinkBuffer(state.stderr, chunk, 30000);
+    onOutput?.(String(chunk));
+    process.stderr.write(`[paddleocr-vl-server:stderr] ${chunk}`);
+  });
+  child.once("exit", () => {
+    state.closed = true;
+    if (ocrVlServerState === state) {
+      ocrVlServerState = null;
+    }
+  });
+
+  state.readyPromise = waitForOcrVlServerReady(state, options);
+  try {
+    await state.readyPromise;
+  } catch (error) {
+    if (isOcrVlAutoServerUnsupportedError(error)) {
+      ocrVlAutoServerUnsupported = true;
+      state.closed = true;
+      if (ocrVlServerState === state) {
+        ocrVlServerState = null;
+      }
+      terminateChildProcessTree(child);
+      emitRuntimeProgress(options, "ocr_preparing", "PaddleOCR-VL 직접 실행으로 전환", "현재 PaddleOCR CLI가 genai_server를 지원하지 않습니다.", {
+        progressMode: "indeterminate",
+        installLogLine: "FastDeploy 서버 시작이 불가능해 기존 직접 OCR 방식으로 계속 진행합니다."
+      });
+      return null;
+    }
+    throw error;
+  }
+  emitRuntimeProgress(options, "ocr_preparing", "PaddleOCR-VL FastDeploy 서버 준비 완료", serverUrl, {
+    progressMode: "determinate",
+    progressPercent: 1,
+    installLogLine: "PaddleOCR-VL genai_server 준비가 완료되었습니다."
+  });
+  return state;
+}
+
+async function waitForOcrVlServerReady(state, options = {}) {
+  const timeoutMs = readPositiveInteger(runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_TIMEOUT_MS", options)) || 1800000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (options.abortSignal?.aborted) {
+      throw createAbortError();
+    }
+    if (state.child.exitCode !== null || state.child.signalCode !== null || state.closed) {
+      throw createDetailedError("PaddleOCR-VL FastDeploy 서버가 준비되기 전에 종료되었습니다.", {
+        command: state.command,
+        serverUrl: state.serverUrl,
+        stdoutPreview: truncateText(state.stdout, 4000),
+        stderrPreview: truncateText(state.stderr, 4000)
+      });
+    }
+    if (await isReachable(state.serverUrl)) {
+      return;
+    }
+    await delay(1500);
+  }
+  throw createDetailedError("PaddleOCR-VL FastDeploy 서버 준비가 시간 초과되었습니다.", {
+    command: state.command,
+    serverUrl: state.serverUrl,
+    stdoutPreview: truncateText(state.stdout, 4000),
+    stderrPreview: truncateText(state.stderr, 4000)
+  });
+}
+
+async function stopOcrVlServer() {
+  const state = ocrVlServerState;
+  if (!state) {
+    return;
+  }
+  ocrVlServerState = null;
+  state.closed = true;
+  terminateChildProcessTree(state.child);
+}
+
+function registerOcrVlServerExitCleanup() {
+  if (ocrVlServerExitCleanupRegistered) {
+    return;
+  }
+  ocrVlServerExitCleanupRegistered = true;
+  process.once("exit", () => {
+    if (ocrVlServerState?.child && !ocrVlServerState.child.killed) {
+      ocrVlServerState.child.kill();
+    }
+  });
+}
+
 function buildOcrWorkerKey(options = {}, provider = resolveOcrBboxProvider(options), runtime = null) {
   return JSON.stringify({
     provider,
     device: resolveOcrDevice(options),
     batchSize: resolveOcrBatchSize(options),
+    ocrVlServerMode: resolveOcrVlServerMode(options),
+    ocrVlServerUrl: shouldUseOcrVlServer(options, provider) ? resolveOcrVlServerUrl(options) : null,
+    ocrVlBackend: shouldUseOcrVlServer(options, provider) ? resolveOcrVlBackend(options) : null,
     pythonPath: resolveOcrRuntimePythonPath(runtime, options),
     runtimeDir: runtime?.runtimeDir || null,
     runtimeVariant: runtime?.runtimeVariant || null,
@@ -2818,6 +3106,7 @@ async function getPersistentOcrWorker(options = {}, provider = resolveOcrBboxPro
   }
 
   await stopOcrWorker();
+  await ensureOcrVlServerForOptions(options, provider, runtime, onOutput);
   const pythonPath = resolveOcrRuntimePythonPath(runtime, options);
   const scriptPath = path.join(__dirname, "paddleocr-vl-bboxes.py");
   const args = [
@@ -3014,7 +3303,7 @@ function rejectOcrWorkerState(state, error) {
   state.pending.clear();
 }
 
-async function runPersistentOcrWorkerBatch(options = {}, provider, runtime, items, progressPath, onOutput = null) {
+async function runPersistentOcrWorkerBatch(options = {}, provider, runtime, items, progressPath, onOutput = null, timeoutMs = null) {
   const worker = await getPersistentOcrWorker(options, provider, runtime, onOutput);
   const request = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -3023,7 +3312,7 @@ async function runPersistentOcrWorkerBatch(options = {}, provider, runtime, item
     batchSize: resolveOcrBatchSize(options)
   };
   const run = worker.chain.catch(() => undefined).then(() => executeOcrWorkerRequest(worker, request, {
-    timeoutMs: resolveOcrBboxTimeoutMs(items.length),
+    timeoutMs: timeoutMs ?? resolveOcrBboxTimeoutMs(items.length),
     signal: options.abortSignal,
     onOutput
   }));
@@ -3124,6 +3413,7 @@ async function stopOcrWorker(expectedState = null) {
   if (!state || state.closed) {
     return;
   }
+  const wasActiveWorker = ocrWorkerState === state;
   state.closed = true;
   if (state.idleTimer) {
     clearTimeout(state.idleTimer);
@@ -3141,6 +3431,9 @@ async function stopOcrWorker(expectedState = null) {
     // Fall through to process termination.
   }
   terminateChildProcessTree(state.child);
+  if (!expectedState || wasActiveWorker) {
+    await stopOcrVlServer();
+  }
 }
 
 function registerOcrWorkerExitCleanup() {
@@ -3401,15 +3694,19 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
         return;
       }
       const phase = progress.phase || "done";
-      const eventKey = `${phase}:${progress.index}:${progress.total}`;
+      const outputPath = typeof progress.output === "string" ? progress.output : "";
+      const globalItemIndex = findOcrBatchItemIndexByOutput(items, outputPath);
+      const optionIndex = globalItemIndex >= 0 ? globalItemIndex : progress.index - 1;
+      const eventKey = `${phase}:${outputPath || progress.index}:${progress.total}`;
       if (seenProgressEvents.has(eventKey)) {
         return;
       }
       seenProgressEvents.add(eventKey);
-      const pageOptions = normalizedOptions[progress.index - 1] || firstOptions;
+      const pageOptions = normalizedOptions[optionIndex] || firstOptions;
       const completedBefore = readPositiveInteger(firstOptions.ocrBatchCompletedBefore) || 0;
       const batchTotal = readPositiveInteger(firstOptions.ocrBatchTotal) || progress.total;
-      const pageIndex = readPositiveInteger(pageOptions.ocrPageIndex) || completedBefore + progress.index;
+      const completedIndex = globalItemIndex >= 0 ? globalItemIndex + 1 : progress.index;
+      const pageIndex = readPositiveInteger(pageOptions.ocrPageIndex) || completedBefore + completedIndex;
       const pageTotal = readPositiveInteger(pageOptions.ocrPageTotal) || batchTotal;
       const tileIndex = readPositiveInteger(pageOptions.ocrTileIndex);
       const tileTotal = readPositiveInteger(pageOptions.ocrTileTotal);
@@ -3417,8 +3714,8 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
       const unitTotal = tileTotal || pageTotal;
       const unitLabel = tileTotal ? "타일" : "페이지";
       const completedCount = phase === "start"
-        ? Math.max(0, (tileIndex || completedBefore + progress.index) - 1)
-        : (tileIndex || completedBefore + progress.index);
+        ? Math.max(0, (tileIndex || completedBefore + completedIndex) - 1)
+        : (tileIndex || completedBefore + completedIndex);
       emitRuntimeProgress(
         batchOptions,
         "ocr_running",
@@ -3437,9 +3734,18 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
   let stderr = "";
   let workerResult = null;
   try {
+    await ensureOcrVlServerForOptions(batchOptions, provider, runtime, handleProgressLine);
     progressPoller.start();
     if (usePersistentWorker) {
-      workerResult = await runPersistentOcrWorkerBatch(batchOptions, provider, runtime, items, progressPath, handleProgressLine);
+      workerResult = await runPersistentOcrWorkerBatchesWithFallback({
+        batchOptions,
+        normalizedOptions,
+        provider,
+        runtime,
+        items,
+        progressPath,
+        handleProgressLine
+      });
       stdout = workerResult.stdout || "";
       stderr = workerResult.stderr || "";
     } else {
@@ -3452,6 +3758,9 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
     }
   } finally {
     progressPoller.stop();
+    if (!usePersistentWorker) {
+      await stopOcrVlServer();
+    }
   }
 
   return normalizedOptions.map((options, index) => {
@@ -3487,6 +3796,179 @@ async function collectOcrBboxHintsBatch(pageOptionsList = []) {
         runtimeDiagnostics: runtime?.diagnostics || []
       }]);
   });
+}
+
+async function runPersistentOcrWorkerBatchesWithFallback({
+  batchOptions,
+  normalizedOptions,
+  provider,
+  runtime,
+  items,
+  progressPath,
+  handleProgressLine
+}) {
+  const requestedBatchSize = Math.max(1, Math.floor(Number(resolveOcrBatchSize(batchOptions)) || 1));
+  const chunks = [];
+  for (let start = 0; start < items.length; start += requestedBatchSize) {
+    chunks.push({
+      start,
+      items: items.slice(start, start + requestedBatchSize),
+      options: normalizedOptions.slice(start, start + requestedBatchSize)
+    });
+  }
+
+  let stdout = "";
+  let stderr = "";
+  let lastWorkerPid = null;
+  let lastWorkerKey = null;
+  for (const chunk of chunks) {
+    const chunkOptions = {
+      ...batchOptions,
+      ocrBatchSize: chunk.items.length
+    };
+    try {
+      const chunkResult = await runPersistentOcrWorkerBatch(
+        chunkOptions,
+        provider,
+        runtime,
+        chunk.items,
+        progressPath,
+        handleProgressLine,
+        resolvePersistentOcrChunkTimeoutMs(chunk.items.length)
+      );
+      stdout = shrinkBuffer(stdout, `${chunkResult.stdout || ""}\n`, 30000);
+      stderr = shrinkBuffer(stderr, `${chunkResult.stderr || ""}\n`, 30000);
+      lastWorkerPid = chunkResult.workerPid || lastWorkerPid;
+      lastWorkerKey = chunkResult.workerKey || lastWorkerKey;
+    } catch (error) {
+      stderr = shrinkBuffer(stderr, `\n[paddleocr chunk failed] ${error?.message || error}\n${truncateText(error?.stderrPreview || "", 4000)}`, 30000);
+      const retryResult = await retryMissingOcrBatchItemsAfterWorkerExit({
+        error,
+        batchOptions,
+        normalizedOptions: chunk.options,
+        items: chunk.items,
+        provider,
+        progressPath,
+        handleProgressLine,
+        startIndex: chunk.start,
+        totalItems: items.length
+      });
+      stdout = shrinkBuffer(stdout, `${retryResult.stdout || ""}\n${truncateText(error?.stdoutPreview || "", 4000)}`, 30000);
+      stderr = shrinkBuffer(stderr, `${retryResult.stderr || ""}\n`, 30000);
+      await stopOcrWorker();
+    }
+  }
+  return {
+    stdout,
+    stderr,
+    workerPid: lastWorkerPid,
+    workerKey: lastWorkerKey
+  };
+}
+
+function findOcrBatchItemIndexByOutput(items, outputPath) {
+  const expected = normalizeOcrProgressPath(outputPath);
+  if (!expected) {
+    return -1;
+  }
+  return items.findIndex((item) => normalizeOcrProgressPath(item.output) === expected);
+}
+
+function normalizeOcrProgressPath(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+  return path.normalize(text).toLowerCase();
+}
+
+function resolvePersistentOcrChunkTimeoutMs(itemCount = 1) {
+  const explicit =
+    readPositiveInteger(runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_WORKER_BATCH_TIMEOUT_MS")) ||
+    readPositiveInteger(runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_TILE_TIMEOUT_MS"));
+  if (explicit) {
+    return explicit;
+  }
+  const count = Math.max(1, readPositiveInteger(itemCount) || 1);
+  return count * DEFAULT_OCR_BBOX_PAGE_TIMEOUT_MS;
+}
+
+async function retryMissingOcrBatchItemsAfterWorkerExit({
+  error,
+  batchOptions,
+  normalizedOptions,
+  items,
+  provider,
+  progressPath,
+  handleProgressLine,
+  startIndex = 0,
+  totalItems = items.length
+}) {
+  const missing = [];
+  for (const [index, item] of items.entries()) {
+    if (!existsSync(item.output)) {
+      missing.push({ index, item, options: normalizedOptions[index] || batchOptions });
+    }
+  }
+  if (missing.length === 0) {
+    return {
+      stdout: "",
+      stderr: truncateText(error?.message || "", 4000)
+    };
+  }
+
+  const fallbackProvider = provider === "paddleocr-vl" ? "paddleocr-v5" : provider;
+  emitRuntimeProgress(
+    batchOptions,
+    "ocr_running",
+    "Paddle OCR 워커 재시도 중",
+    `워커 종료 후 ${missing.length}개 타일을 ${fallbackProvider} 단일 실행으로 재시도합니다.`,
+    {
+      progressCurrent: Math.max(0, startIndex + items.length - missing.length),
+      progressTotal: totalItems
+    }
+  );
+
+  let stdout = "";
+  let stderr = truncateText(error?.message || "", 4000);
+  for (const entry of missing) {
+    const retryOptions = {
+      ...entry.options,
+      outputDir: path.dirname(entry.item.output),
+      imagePath: entry.item.image,
+      ocrBboxProvider: fallbackProvider,
+      ocrEngine: fallbackProvider,
+      ocrBatchSize: 1,
+      disableOcrWorker: true
+    };
+    try {
+      const commandResult = await runOcrBboxCommand(retryOptions, fallbackProvider);
+      stdout = shrinkBuffer(stdout, `${commandResult.stdout || ""}\n`, 30000);
+      stderr = shrinkBuffer(stderr, `${commandResult.stderr || ""}\n`, 30000);
+      if (progressPath) {
+        handleProgressLine?.(JSON.stringify({
+          phase: "done",
+          index: startIndex + entry.index + 1,
+          total: totalItems,
+          output: entry.item.output,
+          count: Array.isArray(commandResult.payload?.items) ? commandResult.payload.items.length : 0
+        }));
+      }
+    } catch (retryError) {
+      stderr = shrinkBuffer(stderr, `\n[paddleocr retry failed] ${retryError?.message || retryError}`, 30000);
+      await writeFile(entry.item.output, `${JSON.stringify({ items: [], error: retryError?.message || String(retryError) }, null, 2)}\n`, "utf8");
+      if (progressPath) {
+        handleProgressLine?.(JSON.stringify({
+          phase: "done",
+          index: startIndex + entry.index + 1,
+          total: totalItems,
+          output: entry.item.output,
+          count: 0
+        }));
+      }
+    }
+  }
+  return { stdout, stderr };
 }
 
 async function ensurePaddleOcrRuntime(options = {}) {
@@ -3535,8 +4017,19 @@ async function ensurePaddleOcrRuntimeUncached(options, state) {
   let importCheck = existsSync(venvPython)
     ? await checkPaddleOcrImport(venvPython, options, { runtimeDir, includePackageDir: false })
     : { ok: false, message: "venv python is missing" };
-  if (existsSync(venvPython) && importCheck.ok) {
+  const installMarkerCurrent = hasOcrInstallMarker(packageDir, runtimeVariant, options);
+  if (existsSync(venvPython) && importCheck.ok && installMarkerCurrent) {
     return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: venvPython, prepared: true, usesTargetPackageDir: false, diagnostics }, cacheKey);
+  }
+  if (existsSync(venvPython) && importCheck.ok && !installMarkerCurrent) {
+    diagnostics.push({
+      step: "installed-runtime-signature-stale",
+      runtimeDir,
+      runtimeVariant,
+      packageDir,
+      pythonPath: venvPython,
+      packageSignature: resolveOcrInstallSignature(options)
+    });
   }
 
   const bootstrapPython = resolveBootstrapPython(options);
@@ -3547,7 +4040,7 @@ async function ensurePaddleOcrRuntimeUncached(options, state) {
   importCheck = !existsSync(venvPython)
     ? await checkPaddleOcrImport(bootstrapPython, options, { runtimeDir, packageDir, includePackageDir: true })
     : importCheck;
-  if (!existsSync(venvPython) && importCheck.ok) {
+  if (!existsSync(venvPython) && importCheck.ok && installMarkerCurrent) {
     return finalizePaddleOcrRuntime(options, { runtimeDir, runtimeVariant, packageDir, pythonPath: bootstrapPython, prepared: true, usesTargetPackageDir: true, diagnostics: [{ step: "embedded-python-ready", packageDir }] }, cacheKey);
   }
 
@@ -3676,7 +4169,8 @@ function buildOcrRuntimeCacheKey(options = {}, runtime) {
     runtimeVariant: runtime.runtimeVariant,
     venvPython: path.resolve(runtime.venvPython),
     packageDir: path.resolve(runtime.packageDir),
-    gpuCudaTag: resolveOcrGpuCudaTag(options)
+    gpuCudaTag: resolveOcrGpuCudaTag(options),
+    packageSignature: resolveOcrInstallSignature(options)
   });
 }
 
@@ -4353,6 +4847,30 @@ function buildOcrRuntimeEnv(options = {}, runtime = null) {
     MANGA_TRANSLATOR_OCR_BATCH_SIZE: String(resolveOcrBatchSize(options)),
     MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG: resolveOcrGpuCudaTag(options),
     MANGA_TRANSLATOR_PADDLEOCR_DEVICE: ocrDevice,
+    MANGA_TRANSLATOR_PADDLEOCR_VL_SERVER_MODE: resolveOcrVlServerMode(options),
+    MANGA_TRANSLATOR_PADDLEOCR_VL_MAX_LONG_SIDE: String(resolveOcrVlMaxLongSide(options)),
+    ...(shouldUseOcrVlServer(options)
+      ? {
+          MANGA_TRANSLATOR_PADDLEOCR_VL_REC_BACKEND: resolveOcrVlBackend(options),
+          MANGA_TRANSLATOR_PADDLEOCR_VL_REC_SERVER_URL: resolveOcrVlServerUrl(options),
+          MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_MODEL_NAME: resolveOcrVlModelName(options)
+        }
+      : {}),
+    ...(runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_BACKEND", options)
+      ? { MANGA_TRANSLATOR_PADDLEOCR_VL_REC_BACKEND: runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_BACKEND", options) }
+      : {}),
+    ...(runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_SERVER_URL", options)
+      ? { MANGA_TRANSLATOR_PADDLEOCR_VL_REC_SERVER_URL: runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_SERVER_URL", options) }
+      : {}),
+    ...(runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_MODEL_NAME", options)
+      ? { MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_MODEL_NAME: runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_MODEL_NAME", options) }
+      : {}),
+    ...(runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_KEY", options)
+      ? { MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_KEY: runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_API_KEY", options) }
+      : {}),
+    ...(runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_MAX_CONCURRENCY", options)
+      ? { MANGA_TRANSLATOR_PADDLEOCR_VL_REC_MAX_CONCURRENCY: runtimeOverrideEnv("MANGA_TRANSLATOR_PADDLEOCR_VL_REC_MAX_CONCURRENCY", options) }
+      : {}),
     PYTHONPATH: pythonPath,
     PYTHONNOUSERSITE: "1",
     PYTHONUSERBASE: path.join(runtimeDir, "python-user-base"),
@@ -4414,7 +4932,21 @@ function collectNvidiaPythonRuntimeBinDirs(sitePackagesDir) {
   } catch {
     return dirs;
   }
-  return dirs;
+  return dirs.sort((left, right) => nvidiaRuntimePathPriority(left) - nvidiaRuntimePathPriority(right));
+}
+
+function nvidiaRuntimePathPriority(dir) {
+  const normalized = String(dir ?? "").replace(/\\/g, "/").toLowerCase();
+  if (normalized.includes("/nvidia/cudnn/bin")) {
+    return 0;
+  }
+  if (normalized.includes("/nvidia/cublas/bin")) {
+    return 1;
+  }
+  if (normalized.includes("/nvidia/cuda_runtime/bin")) {
+    return 2;
+  }
+  return 10;
 }
 
 function buildLlamaServerEnv(serverPath, options = {}) {

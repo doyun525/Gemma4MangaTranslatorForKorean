@@ -171,7 +171,7 @@ export function applyOcrCandidateGeometryLocks(
 
   return items.map((item) => {
     const lockedHint = hintMap.get(item.id);
-    if (!lockedHint || !isNearOcrHint(item.bbox, lockedHint.bbox, page)) {
+    if (!lockedHint) {
       return item;
     }
     return {

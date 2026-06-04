@@ -98,6 +98,12 @@ function mergeSettingsForSave(settings: AppSettings, existing: AppSettings | nul
   if (!hasOwn(rawOcr, "gpuCudaTag") && existing.ocr.gpuCudaTag) {
     merged.ocr.gpuCudaTag = existing.ocr.gpuCudaTag;
   }
+  if (!hasOwn(rawOcr, "vlServerMode") && existing.ocr.vlServerMode) {
+    merged.ocr.vlServerMode = existing.ocr.vlServerMode;
+  }
+  if (!hasOwn(rawOcr, "vlMaxLongSide") && typeof existing.ocr.vlMaxLongSide === "number") {
+    merged.ocr.vlMaxLongSide = existing.ocr.vlMaxLongSide;
+  }
   if (!hasOwn(rawStorage, "modelCacheDir") && existing.storage?.modelCacheDir) {
     merged.storage = {
       ...merged.storage,
