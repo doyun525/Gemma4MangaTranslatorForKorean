@@ -13,6 +13,44 @@ function isOpenAICodexProvider(options = {}) {
   return String(options.modelProvider ?? "").trim() === "openai-codex";
 }
 
+function shouldUse26BDuplicatePromptProfile(options = {}) {
+  if (isOpenAICodexProvider(options)) {
+    return false;
+  }
+  const modelText = [
+    options.modelRepo,
+    options.modelFile,
+    options.localModelPath
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /(^|[^0-9])26b([^0-9]|$)|26b-a4b/.test(modelText);
+}
+
+const GEMMA_26B_DUPLICATE_OUTPUT_LINES = [
+  "One physical Japanese text area may appear only once in the output. Never output multiple records whose boxes sit on the same glyph cluster, same speech bubble text, same caption text, or same SFX group.",
+  "If two possible records would occupy the same place or mostly cover the same visible glyphs, keep one record only. Put all readable source lines for that same area into that one jp field and one Korean translation.",
+  "Never stack several records at the same x/y position to represent separate lines, columns, words, or fragments inside one visual text area.",
+  "Never output a later correction record that repeats, contains, or is contained by the jp text of an earlier record from the same visual area. Correct the original record instead of adding another one."
+];
+
+const GEMMA_26B_DUPLICATE_SEGMENTATION_LINES = [
+  "Inside one speech bubble, caption box, note, sign, label, or one continuous SFX glyph group, do not create overlapping records for separate columns, lines, words, or fragments. Same physical place means one record."
+];
+
+const GEMMA_26B_OCR_ANCHOR_LINES = [
+  "OCR text hints may be wrong, incomplete, or split strangely, but treat the OCR candidate rectangles as your primary geometry anchors unless Image 1 clearly proves otherwise.",
+  "Compared with pure visual guessing, trust the OCR candidate placement and grouping more strongly: about 70% OCR geometry anchor, 30% visual correction from Image 1.",
+  "Use the OCR text hint and candidate rectangle together to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
+];
+
+const GEMMA_26B_OCR_DUPLICATE_LINES = [
+  "Each candidate id is single-use. A candidate rectangle can produce at most one output record, even when the text has several vertical columns or several visible lines.",
+  "Do not create another record whose bbox sits on the same place as an accepted candidate. If the text is inside or mostly inside a candidate rectangle, it belongs to that candidate id.",
+  "Before adding any new record, compare it against every candidate bbox. If the new bbox would cover the same glyph cluster or the same visual text area as a candidate, keep the candidate record only.",
+  "If one OCR candidate covers several Japanese lines or columns inside the same visual container, keep them as one record for that candidate; do not split them into multiple overlapping records.",
+  "New ids are for genuinely missed text only, not for correcting, enlarging, summarizing, or re-reading an existing candidate. If a candidate needs a better jp/ko, fix that candidate record with the same id.",
+  "A new id is invalid if its jp repeats, partially repeats, or summarizes text already assigned to a candidate or earlier record in the same speech bubble/caption/SFX area."
+];
+
 const OVERLAY_OUTPUT_SCHEMA = [
   "id: <integer>",
   "type: nonsolid",
@@ -169,6 +207,14 @@ function buildSystemPrompt(options = {}) {
     );
   }
 
+  if (shouldUse26BDuplicatePromptProfile(options)) {
+    lines.splice(
+      4,
+      0,
+      "Never output duplicate or overlapping records for the same physical Japanese text area. One glyph cluster/container must become one record, not stacked blocks."
+    );
+  }
+
   if (options.regionCropMode) {
     lines.push(
       "Selected-region mode: group by visual text container, not by line or column. One speech bubble or one caption plate is one item even when the source text is split across multiple vertical columns or lines."
@@ -182,6 +228,7 @@ function buildOverlayPrompt(options = {}, imageVariants = []) {
   const sections = OVERLAY_PROMPT_SECTIONS.map(([title, ...lines]) => [title, ...lines]);
   applySoundEffectPreference(sections, options);
   sections[0] = buildTaskSection(options, imageVariants);
+  applyModelSpecificPromptProfile(sections, options);
   const regionCropSection = buildRegionCropSection(options);
   if (regionCropSection.length > 1) {
     sections.splice(1, 0, regionCropSection);
@@ -199,6 +246,33 @@ function buildOverlayPrompt(options = {}, imageVariants = []) {
   return sections
     .map(([title, ...lines]) => [`# ${title}`, ...lines].join("\n"))
     .join("\n\n");
+}
+
+function applyModelSpecificPromptProfile(sections, options = {}) {
+  if (!shouldUse26BDuplicatePromptProfile(options)) {
+    return;
+  }
+
+  insertSectionLinesBefore(sections, "Output", "Do not copy placeholder text. Estimate every value from the actual glyphs in Image 1.", GEMMA_26B_DUPLICATE_OUTPUT_LINES);
+  insertSectionLinesAfter(sections, "Segmentation", "Inside one speech bubble, group all Japanese glyph lines from that same bubble into one item.", GEMMA_26B_DUPLICATE_SEGMENTATION_LINES);
+}
+
+function insertSectionLinesBefore(sections, title, anchorLine, lines) {
+  const section = sections.find((candidate) => candidate[0] === title);
+  if (!section) {
+    return;
+  }
+  const index = section.indexOf(anchorLine);
+  section.splice(index === -1 ? section.length : index, 0, ...lines);
+}
+
+function insertSectionLinesAfter(sections, title, anchorLine, lines) {
+  const section = sections.find((candidate) => candidate[0] === title);
+  if (!section) {
+    return;
+  }
+  const index = section.indexOf(anchorLine);
+  section.splice(index === -1 ? section.length : index + 1, 0, ...lines);
 }
 
 function getOverlayPrompt(options = {}, imageVariants = []) {
@@ -367,12 +441,19 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     return [];
   }
 
+  const use26bDuplicateProfile = shouldUse26BDuplicatePromptProfile(options);
+
   return [
     "OCR bbox candidates",
     "An external OCR geometry detector has already proposed bbox candidates. Some candidates include low-trust OCR text hints for slot matching only.",
-    "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
-    "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together.",
+    ...(use26bDuplicateProfile
+      ? GEMMA_26B_OCR_ANCHOR_LINES
+      : [
+          "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
+          "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
+        ]),
     "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
+    ...(use26bDuplicateProfile ? [GEMMA_26B_OCR_DUPLICATE_LINES[0]] : []),
     ...(multiPageTextBatch
       ? [
           "This request contains candidates from multiple pages. Candidate labels are prefixed like page_1, page_2, etc.",
@@ -383,6 +464,7 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
     "Keep Arabic numerals and compact UI numbering exactly as digits and separators in ko. Examples: 2/22 stays 2/22, 104/104 stays 104/104, Chapter 104/104 Page 2/22 may become 챕터 104/104 페이지 2/22.",
     `Required candidate ids: ${candidateIds.join(", ")}.`,
     "Read and translate only the text inside that candidate rectangle plus a tiny visual margin; do not move the rectangle to a different nearby text group.",
+    ...(use26bDuplicateProfile ? GEMMA_26B_OCR_DUPLICATE_LINES.slice(1) : []),
     "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
     "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
     "If a candidate is a handwritten note or diagram label, preserve all readable words, but translate ko compactly for horizontal Korean reading rather than copying the source line breaks.",

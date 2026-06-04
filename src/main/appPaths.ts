@@ -20,6 +20,7 @@ export type AppPaths = {
   llamaServerPath: string;
   hfHomeDir?: string;
   hfHubCacheDir?: string;
+  llamaCacheDir?: string;
 };
 
 function isRunningPackaged(): boolean {
@@ -38,18 +39,21 @@ export function getAppPaths(): AppPaths {
   const runtimeDir = isPackaged ? join(resourcesDir, "app-runtime") : join(repoRoot, "out", "app-runtime");
   const llamaServerBinary = process.platform === "win32" ? "llama-server.exe" : "llama-server";
   const toolsDir = resolveToolsDir({ isPackaged, resourcesDir, repoRoot, llamaServerBinary });
-  const explicitOcrRuntimeDir = process.env.MANGA_TRANSLATOR_OCR_RUNTIME_DIR?.trim();
+  const allowExternalRuntime = allowExternalRuntimeOverrides(isPackaged);
+  const explicitOcrRuntimeDir = allowExternalRuntime ? process.env.MANGA_TRANSLATOR_OCR_RUNTIME_DIR?.trim() : undefined;
   const ocrRuntimeDir = explicitOcrRuntimeDir || (
     process.platform === "win32"
       ? join(sharedWindowsDataRoot || dataRoot, "ocr-runtime")
       : join(dataRoot, "ocr-runtime")
   );
-  const llamaRuntimeDir = join(toolsDir, "beellama-v0.2.0-cuda12.4");
+  const llamaServerPath = resolveBundledLlamaServerPath(toolsDir);
+  const llamaRuntimeDir = dirname(llamaServerPath);
   const explicitHfHome = process.env.MANGA_TRANSLATOR_HF_HOME?.trim();
   const explicitHubCache = process.env.HF_HUB_CACHE?.trim() || process.env.HUGGINGFACE_HUB_CACHE?.trim();
   const defaultHfHomeDir = isPackaged ? join(dataRoot, "hf-cache") : sharedWindowsDataRoot ? join(sharedWindowsDataRoot, "hf-cache") : undefined;
   const hfHomeDir = explicitHfHome || defaultHfHomeDir;
   const hfHubCacheDir = explicitHubCache || (hfHomeDir ? join(hfHomeDir, "hub") : undefined);
+  const llamaCacheDir = isPackaged ? join(dataRoot, "llama.cpp") : undefined;
 
   return {
     isPackaged,
@@ -66,10 +70,68 @@ export function getAppPaths(): AppPaths {
     toolsDir,
     ocrRuntimeDir,
     llamaRuntimeDir,
-    llamaServerPath: join(llamaRuntimeDir, llamaServerBinary),
+    llamaServerPath,
     hfHomeDir,
-    hfHubCacheDir
+    hfHubCacheDir,
+    llamaCacheDir
   };
+}
+
+function allowExternalRuntimeOverrides(isPackaged: boolean): boolean {
+  if (!isPackaged) {
+    return true;
+  }
+  return isTruthyEnv(process.env.MGT_ALLOW_EXTERNAL_RUNTIME ?? process.env.MANGA_TRANSLATOR_ALLOW_EXTERNAL_RUNTIME);
+}
+
+function isTruthyEnv(value: unknown): boolean {
+  return ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function llamaServerBinaryName(): string {
+  return process.platform === "win32" ? "llama-server.exe" : "llama-server";
+}
+
+function bundledLlamaServerCandidates(toolsDir: string): string[] {
+  const serverBinary = llamaServerBinaryName();
+  const knownRuntimeDirs = [
+    "beellama-v0.2.0-cuda13.1",
+    "beellama-v0.2.0-cuda12.4",
+    "llama-b9490-cuda13.3",
+    "llama-b8833-cuda12.4",
+    "llama-b8808-cuda12"
+  ];
+  const candidates = [
+    ...knownRuntimeDirs.map((runtimeDir) => join(toolsDir, runtimeDir, serverBinary)),
+    join(toolsDir, serverBinary)
+  ];
+
+  try {
+    for (const entry of readdirSync(toolsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        candidates.push(join(toolsDir, entry.name, serverBinary));
+      }
+    }
+  } catch {
+    // The tools directory may not exist in early dev/build states.
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function resolveBundledLlamaServerPath(toolsDir: string): string {
+  const candidates = bundledLlamaServerCandidates(toolsDir);
+  const existing = candidates.filter((candidate) => existsSync(candidate));
+  return existing.find((candidate) => hasBundledCudaBackend(candidate)) ?? existing[0] ?? candidates[0];
+}
+
+function hasBundledCudaBackend(serverPath: string): boolean {
+  const runtimeDir = dirname(serverPath);
+  return [
+    "ggml-cuda.dll",
+    "ggml-cuda-cu12.dll",
+    "ggml-cuda-cu13.dll"
+  ].some((fileName) => existsSync(join(runtimeDir, fileName)));
 }
 
 export function ensureWritableAppDirectories(): AppPaths {
@@ -83,6 +145,9 @@ export function ensureWritableAppDirectories(): AppPaths {
   }
   if (paths.hfHubCacheDir) {
     mkdirSync(paths.hfHubCacheDir, { recursive: true });
+  }
+  if (paths.llamaCacheDir) {
+    mkdirSync(paths.llamaCacheDir, { recursive: true });
   }
   mkdirSync(paths.ocrRuntimeDir, { recursive: true });
   return paths;

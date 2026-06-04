@@ -1,6 +1,7 @@
 import { app, BrowserWindow, screen } from "electron";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { AppPaths } from "./appPaths";
 import { logError, writeLog } from "./logger";
 
@@ -19,9 +20,12 @@ const DEFAULT_WINDOW_BOUNDS = {
   minHeight: 760
 };
 
-export function createMainWindow(appPaths: AppPaths): BrowserWindow {
-  const restoredState = readWindowState(appPaths);
+export function createMainWindow(appPaths?: AppPaths): BrowserWindow {
+  const restoredState = appPaths ? readWindowState(appPaths) : null;
   const initialBounds = resolveInitialWindowBounds(restoredState);
+  const devRendererUrl = resolveAllowedDevRendererUrl(process.env.ELECTRON_RENDERER_URL);
+  const productionRendererPath = join(__dirname, "../renderer/index.html");
+  const allowedRendererUrl = devRendererUrl ?? pathToFileURL(productionRendererPath).toString();
   const window = new BrowserWindow({
     ...initialBounds,
     minWidth: DEFAULT_WINDOW_BOUNDS.minWidth,
@@ -39,7 +43,9 @@ export function createMainWindow(appPaths: AppPaths): BrowserWindow {
   if (restoredState?.isMaximized) {
     window.maximize();
   }
-  registerWindowStatePersistence(window, appPaths);
+  if (appPaths) {
+    registerWindowStatePersistence(window, appPaths);
+  }
 
   window.webContents.on("console-message", (details) => {
     const level =
@@ -55,13 +61,25 @@ export function createMainWindow(appPaths: AppPaths): BrowserWindow {
     logError("Renderer failed to load", { errorCode, errorDescription, validatedURL });
   });
 
+  window.webContents.setWindowOpenHandler((details) => {
+    writeLog("warn", "Blocked renderer window open", { url: details.url });
+    return { action: "deny" };
+  });
+
+  window.webContents.on("will-navigate", (event, url) => {
+    if (isAllowedMainWindowNavigation(url, allowedRendererUrl)) {
+      return;
+    }
+    event.preventDefault();
+    writeLog("warn", "Blocked renderer navigation", { url });
+  });
+
   window.setMenuBarVisibility(false);
 
-  const devRendererUrl = resolveAllowedDevRendererUrl(process.env.ELECTRON_RENDERER_URL);
   if (devRendererUrl) {
     void window.loadURL(devRendererUrl);
   } else {
-    void window.loadFile(join(__dirname, "../renderer/index.html"));
+    void window.loadFile(productionRendererPath);
   }
 
   return window;
@@ -166,4 +184,27 @@ function resolveAllowedDevRendererUrl(value: string | undefined): string | null 
   } catch {
     return null;
   }
+}
+
+export function isAllowedMainWindowNavigation(targetUrl: string, allowedRendererUrl: string): boolean {
+  try {
+    const target = new URL(targetUrl);
+    const allowed = new URL(allowedRendererUrl);
+    if (allowed.protocol === "http:") {
+      return target.protocol === "http:" && target.origin === allowed.origin;
+    }
+    if (allowed.protocol !== "file:" || target.protocol !== "file:") {
+      return false;
+    }
+    const rendererRoot = resolve(dirname(fileURLToPath(allowed)));
+    const targetPath = resolve(fileURLToPath(target));
+    return isPathInside(rendererRoot, targetPath);
+  } catch {
+    return false;
+  }
+}
+
+function isPathInside(rootPath: string, targetPath: string): boolean {
+  const child = relative(rootPath, targetPath);
+  return child === "" || (!!child && !child.startsWith("..") && !isAbsolute(child));
 }

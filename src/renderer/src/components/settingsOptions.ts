@@ -15,20 +15,38 @@ export const MIN_TEXT_OUTLINE_WIDTH_PX = 0;
 export const MAX_TEXT_OUTLINE_WIDTH_PX = 8;
 export const DEFAULT_GEMMA_MODEL_REPO =
   "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-i1-GGUF";
+export const DEFAULT_GEMMA_MODEL_FILE =
+  "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.i1-IQ3_S.gguf";
 export const DEFAULT_GEMMA_MMPROJ_REPO =
   "mradermacher/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking-GGUF";
 export const DEFAULT_GEMMA_MMPROJ_FILE =
   "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.mmproj-f16.gguf";
+export const ECONOMY_GEMMA_MODEL_REPO = "mradermacher/gemma-4-26B-A4B-it-ultra-uncensored-heretic-i1-GGUF";
+export const ECONOMY_GEMMA_MODEL_FILE = "gemma-4-26B-A4B-it-ultra-uncensored-heretic.i1-IQ3_S.gguf";
+export const ECONOMY_GEMMA_MMPROJ_REPO = "mradermacher/gemma-4-26B-A4B-it-ultra-uncensored-heretic-GGUF";
+export const ECONOMY_GEMMA_MMPROJ_FILE = "gemma-4-26B-A4B-it-ultra-uncensored-heretic.mmproj-Q8_0.gguf";
 
 export const MODEL_PRESETS = {
-  iq3s: {
-    label: "IQ3_S",
+  economy26b: {
+    label: "26B 절약",
+    description: "16GB급 VRAM용입니다. 이미지 토큰 1024는 유지하고 26B 모델로 더 안전하게 실행합니다.",
+    vramMode: "economy" as GemmaVramMode,
+    modelRepo: ECONOMY_GEMMA_MODEL_REPO,
+    modelFile: ECONOMY_GEMMA_MODEL_FILE,
+    mmprojRepo: ECONOMY_GEMMA_MMPROJ_REPO,
+    mmprojFile: ECONOMY_GEMMA_MMPROJ_FILE
+  },
+  full31b: {
+    label: "31B 풀로드",
+    description: "넉넉한 VRAM용입니다. 31B 모델과 DFlash를 사용해 품질 우선으로 실행합니다.",
+    vramMode: "full" as GemmaVramMode,
     modelRepo: DEFAULT_GEMMA_MODEL_REPO,
-    modelFile: "gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking.i1-IQ3_S.gguf",
+    modelFile: DEFAULT_GEMMA_MODEL_FILE,
     mmprojRepo: DEFAULT_GEMMA_MMPROJ_REPO,
     mmprojFile: DEFAULT_GEMMA_MMPROJ_FILE
   }
 } as const;
+export const DEFAULT_MODEL_PRESET_ID: keyof typeof MODEL_PRESETS = "full31b";
 
 export type ModelPresetId = keyof typeof MODEL_PRESETS | "custom";
 
@@ -189,8 +207,12 @@ export function resolveModelPreset(modelRepo: string, modelFile: string): ModelP
   const trimmedModelRepo = modelRepo.trim();
   const trimmedModelFile = modelFile.trim();
 
-  if (matchesPreset(MODEL_PRESETS.iq3s, trimmedModelRepo, trimmedModelFile)) {
-    return "iq3s";
+  for (const [presetId, preset] of Object.entries(MODEL_PRESETS) as Array<
+    [keyof typeof MODEL_PRESETS, (typeof MODEL_PRESETS)[keyof typeof MODEL_PRESETS]]
+  >) {
+    if (matchesPreset(preset, trimmedModelRepo, trimmedModelFile)) {
+      return presetId;
+    }
   }
 
   return "custom";

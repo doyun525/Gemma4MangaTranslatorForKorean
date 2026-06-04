@@ -538,6 +538,7 @@ export type InpaintingExportRequest =
 export type InpaintingExportResult = {
   outputDir: string;
   pageCount: number;
+  openError?: string;
 };
 
 export type PageImageExportOptions = {

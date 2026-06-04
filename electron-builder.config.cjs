@@ -5,10 +5,6 @@ const extraResources = [
   {
     from: "out/app-runtime",
     to: "app-runtime"
-  },
-  {
-    from: "tools/beellama-v0.2.0-cuda12.4",
-    to: "tools/beellama-v0.2.0-cuda12.4"
   }
 ];
 

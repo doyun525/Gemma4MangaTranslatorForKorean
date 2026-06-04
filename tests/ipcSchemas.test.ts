@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AppSettingsSchema,
   ChapterSnapshotSchema,
   OpenWebBrowseRequestSchema,
   parseIpcPayload,
@@ -9,6 +10,7 @@ import {
   SavePageBlocksRequestSchema,
   SelectWebRegionRequestSchema,
   StartAnalysisRequestSchema,
+  StartInpaintingRequestSchema,
   WorkShareImportRequestSchema
 } from "../src/shared/ipcSchemas";
 
@@ -213,6 +215,86 @@ describe("IPC schemas", () => {
     expect(parsed.blocks?.[0]?.autoFitText).toBe(true);
     expect(() =>
       parseIpcPayload(RenderWebOverlayRequestSchema, { sessionId: workId, page: { ...page, unknown: true } }, "웹 번역 오버레이")
+    ).toThrow(/요청 형식/);
+  });
+
+  it("bounds drawn inpainting masks to runtime stroke limits", () => {
+    const point = { x: 1, y: 1 };
+    const validStroke = { radiusPx: 12, points: Array.from({ length: 1200 }, () => point) };
+
+    const parsed = parseIpcPayload(
+      StartInpaintingRequestSchema,
+      {
+        chapterId,
+        mode: "page-pattern-drawn",
+        pageId,
+        strokes: Array.from({ length: 200 }, () => validStroke)
+      },
+      "인페인팅 작업"
+    );
+    expect(parsed.mode).toBe("page-pattern-drawn");
+    expect(parsed.mode === "page-pattern-drawn" ? parsed.strokes : []).toHaveLength(200);
+
+    expect(() =>
+      parseIpcPayload(
+        StartInpaintingRequestSchema,
+        {
+          chapterId,
+          mode: "page-pattern-drawn",
+          pageId,
+          strokes: Array.from({ length: 201 }, () => validStroke)
+        },
+        "인페인팅 작업"
+      )
+    ).toThrow(/요청 형식/);
+
+    expect(() =>
+      parseIpcPayload(
+        StartInpaintingRequestSchema,
+        {
+          chapterId,
+          mode: "page-pattern-drawn",
+          pageId,
+          strokes: [{ radiusPx: 12, points: Array.from({ length: 20001 }, () => point) }]
+        },
+        "인페인팅 작업"
+      )
+    ).toThrow(/요청 형식/);
+  });
+
+  it("uses the same max token and OAuth port bounds as app settings normalization", () => {
+    const payload = {
+      modelProvider: "openai-codex",
+      gemma: {
+        modelSource: "huggingface",
+        modelRepo: "owner/repo",
+        modelFile: "model.gguf",
+        vramMode: "economy"
+      },
+      codex: {
+        model: "gpt-5.5",
+        reasoningEffort: "medium",
+        oauthPort: 10531
+      },
+      ocr: {
+        device: "cpu",
+        engine: "paddleocr-vl",
+        batchSize: 1
+      },
+      translation: {
+        mode: "image",
+        includeSoundEffects: true,
+        ocrBboxExpandXRatio: 0,
+        ocrBboxExpandYRatio: 0,
+        textOutlineWidthPx: 0
+      },
+      maxTokens: 12000
+    };
+
+    expect(parseIpcPayload(AppSettingsSchema, payload, "설정 저장").maxTokens).toBe(12000);
+    expect(() => parseIpcPayload(AppSettingsSchema, { ...payload, maxTokens: 12001 }, "설정 저장")).toThrow(/요청 형식/);
+    expect(() =>
+      parseIpcPayload(AppSettingsSchema, { ...payload, codex: { ...payload.codex, oauthPort: 0 } }, "설정 저장")
     ).toThrow(/요청 형식/);
   });
 });

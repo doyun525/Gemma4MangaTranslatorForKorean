@@ -9,8 +9,10 @@ import { registerPageExportIpc } from "./pageExportIpc";
 import { registerSettingsIpc } from "./settingsIpc";
 import { registerTranslationJobIpc } from "./translationJobIpc";
 import { registerWebBrowseIpc } from "./webBrowseIpc";
+import { installTrustedIpcGuard } from "./trustedIpc";
 
 export function registerIpc(context: IpcContext): void {
+  installTrustedIpcGuard(context);
   registerLogsIpc();
   registerSettingsIpc(context);
   registerLibraryIpc(context);

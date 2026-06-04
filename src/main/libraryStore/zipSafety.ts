@@ -14,6 +14,14 @@ export type AdmZipLike = {
   getEntries: () => ZipEntryLike[];
   addFile: (entryName: string, content: Buffer | string) => void;
   writeZip: (targetPath: string) => void;
+  extractEntryTo: (
+    entry: ZipEntryLike | string,
+    targetPath: string,
+    maintainEntryPath?: boolean,
+    overwrite?: boolean,
+    keepOriginalPermission?: boolean,
+    outFileName?: string
+  ) => boolean;
 };
 
 export const MAX_ZIP_ENTRY_COUNT = 10000;
