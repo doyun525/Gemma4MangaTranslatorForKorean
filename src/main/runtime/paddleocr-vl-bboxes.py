@@ -35,8 +35,58 @@ IGNORED_LABELS = {
     "header",
 }
 
+_DLL_DIRECTORY_HANDLES = []
+
+
+def configure_windows_nvidia_dll_dirs() -> None:
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    candidates = []
+    for root in collect_python_package_roots():
+        nvidia_dir = root / "nvidia"
+        if not nvidia_dir.exists():
+            continue
+        for child in nvidia_dir.iterdir():
+            bin_dir = child / "bin"
+            if bin_dir.is_dir():
+                candidates.append(bin_dir)
+    for directory in candidates:
+        text = str(directory)
+        if text not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{text}{os.pathsep}{os.environ.get('PATH', '')}"
+        try:
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(text))
+        except OSError:
+            pass
+
+
+def collect_python_package_roots() -> list[Path]:
+    roots = []
+    for value in [*sys.path, os.environ.get("PYTHONPATH", "")]:
+        for part in str(value or "").split(os.pathsep):
+            if part:
+                roots.append(Path(part))
+    roots.extend([
+        Path(sys.prefix) / "Lib" / "site-packages",
+        Path(sys.base_prefix) / "Lib" / "site-packages",
+    ])
+    unique = []
+    seen = set()
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(resolved)
+    return unique
+
 
 def main() -> int:
+    configure_windows_nvidia_dll_dirs()
     parser = argparse.ArgumentParser(description="Run PaddleOCR-VL and write geometry hint JSON.")
     parser.add_argument("--image", default=None, help="Input image path.")
     parser.add_argument("--output", default=None, help="Output JSON path.")

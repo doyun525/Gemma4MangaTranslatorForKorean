@@ -235,6 +235,14 @@ export class WebBrowserManager {
     }
   }
 
+  hasActiveSessions(): boolean {
+    return this.sessions.size > 0;
+  }
+
+  getActiveSessionCount(): number {
+    return this.sessions.size;
+  }
+
   setBounds(sessionId: string, bounds: WebBrowseBounds): WebBrowseState {
     const item = this.requireSession(sessionId);
     item.lastBounds = bounds;
@@ -1342,6 +1350,8 @@ function blockToWebOverlayBlock(
     italic: Boolean(block.italic),
     vertical: block.renderDirection === "vertical",
     autoFitText: block.autoFitText,
+    smartWrap: block.smartKoLineBreaks !== false && block.renderDirection === "horizontal",
+    preparedLayout: false,
   };
 }
 
@@ -1472,7 +1482,7 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
     return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
   };
   const buildFont = (block, fontSize) => {
-    const weight = block.bold ? "800" : "600";
+    const weight = block.bold ? "800" : "400";
     const style = block.italic ? "italic " : "";
     return style + weight + " " + Math.max(8, Math.round(fontSize)) + "px " + (block.fontFamily || "sans-serif");
   };
@@ -1681,8 +1691,9 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
     box.style.textAlign = block.textAlign || "center";
     box.style.whiteSpace = "pre-wrap";
     box.style.overflow = "visible";
-    box.style.overflowWrap = "anywhere";
-    box.style.wordBreak = "break-word";
+    const smartWrap = Boolean(layoutBlock.smartWrap || layoutBlock.preparedLayout);
+    box.style.overflowWrap = smartWrap ? "normal" : "anywhere";
+    box.style.wordBreak = smartWrap ? "normal" : "break-word";
     box.style.color = block.textColor || "#111";
     box.style.background = toRgba(block.backgroundColor || "#fff", block.opacity);
     const cornerRadius = Math.round(Math.max(
@@ -1698,10 +1709,12 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
     box.style.textShadow = "none";
     const innerWidth = Math.max(1, Math.round(layoutBlock.w) - 2);
     const innerHeight = Math.max(1, Math.round(layoutBlock.h) - 2);
-    const resolvedFontSize = resolveFontSize(layoutBlock, innerWidth, innerHeight);
+    const resolvedFontSize = layoutBlock.preparedLayout
+      ? Math.max(1, Math.round(Number(layoutBlock.fontSizePx) || 16))
+      : resolveFontSize(layoutBlock, innerWidth, innerHeight);
     box.style.fontSize = resolvedFontSize + "px";
     box.style.lineHeight = String(block.lineHeight || 1.2);
-    box.style.fontWeight = block.bold ? "700" : "500";
+    box.style.fontWeight = block.bold ? "800" : "400";
     box.style.fontStyle = block.italic ? "italic" : "normal";
     box.style.writingMode = block.vertical ? "vertical-rl" : "horizontal-tb";
     box.style.pointerEvents = payload.interactionEnabled ? "auto" : "none";
@@ -1729,8 +1742,8 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
       layer.style.maxHeight = "100%";
       layer.style.overflow = "visible";
       layer.style.whiteSpace = "pre-wrap";
-      layer.style.overflowWrap = "anywhere";
-      layer.style.wordBreak = "break-word";
+      layer.style.overflowWrap = smartWrap ? "normal" : "anywhere";
+      layer.style.wordBreak = smartWrap ? "normal" : "break-word";
       layer.style.pointerEvents = "none";
       layer.style.textShadow = "none";
       layer.style.boxShadow = "none";

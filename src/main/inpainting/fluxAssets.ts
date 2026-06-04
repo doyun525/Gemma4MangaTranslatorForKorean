@@ -326,7 +326,7 @@ export async function ensureFluxCudnnRuntime(options: {
   await extractCudnnDlls(archivePath, binDir);
   options.onProgress?.({
     progressText: "cuDNN 런타임 준비 완료",
-    detail: "cudnn64_12.dll",
+    detail: "cudnn64_9.dll",
     progressMode: "log-only",
     installLogLine: `cuDNN DLL 압축 해제 완료: ${binDir}`
   });
@@ -481,7 +481,11 @@ function findCudnnBin(rootDir: string): string | null {
 
 function hasCudnnDll(dir: string): boolean {
   try {
-    return existsSync(dir) && (existsSync(join(dir, "cudnn64_12.dll")) || existsSync(join(dir, "cudnn.dll")));
+    return existsSync(dir) && (
+      existsSync(join(dir, "cudnn64_9.dll")) ||
+      existsSync(join(dir, "cudnn64_12.dll")) ||
+      existsSync(join(dir, "cudnn.dll"))
+    );
   } catch {
     return false;
   }

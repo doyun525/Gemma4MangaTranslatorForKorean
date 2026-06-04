@@ -10,12 +10,23 @@ import { buildBaseTranslationOptions } from "../appSettings";
 import { startOpenAIOAuthEndpoint, stopOpenAIOAuthEndpoint, type OpenAIOAuthEndpoint } from "../openaiOauthEndpoint";
 import { getAppSettings, resetAppSettings, saveAppSettings } from "../settingsStore";
 import { isOpenAIOAuthEndpoint, type SimplePageRuntime } from "../simplePageRuntime";
+import { logInfo } from "../logger";
 import type { IpcContext } from "./context";
 
 export function registerSettingsIpc(context: IpcContext): void {
   ipcMain.handle("settings:get", async () => getAppSettings());
-  ipcMain.handle("settings:save", async (_event, settings: unknown) => saveAppSettings(parseIpcPayload(AppSettingsSchema, settings, "설정 저장")));
-  ipcMain.handle("settings:reset", async () => resetAppSettings());
+  ipcMain.handle("settings:save", async (_event, settings: unknown) => {
+    const before = await getAppSettings();
+    const saved = await saveAppSettings(parseIpcPayload(AppSettingsSchema, settings, "설정 저장"));
+    await refreshWarmupAfterSettingsChange(context, before, saved, "settings-save");
+    return saved;
+  });
+  ipcMain.handle("settings:reset", async () => {
+    const before = await getAppSettings();
+    const saved = await resetAppSettings();
+    await refreshWarmupAfterSettingsChange(context, before, saved, "settings-reset");
+    return saved;
+  });
   ipcMain.handle("settings:pick-local-model", async (): Promise<LocalModelPickResult | null> => {
     const options = {
       title: "로컬 GGUF 모델 선택",
@@ -152,6 +163,62 @@ export function registerSettingsIpc(context: IpcContext): void {
       } else {
         await runtime.stopServer(server);
       }
+    }
+  });
+}
+
+async function refreshWarmupAfterSettingsChange(
+  context: IpcContext,
+  before: AppSettings,
+  after: AppSettings,
+  reason: string
+): Promise<void> {
+  const beforeSignature = buildWarmupSettingsSignature(before);
+  const afterSignature = buildWarmupSettingsSignature(after);
+  if (beforeSignature === afterSignature) {
+    return;
+  }
+
+  logInfo("Settings changed warmup runtime inputs", {
+    reason,
+    webSessionCount: context.webBrowser.getActiveSessionCount()
+  });
+
+  if (context.webBrowser.hasActiveSessions()) {
+    await context.translationWarmup.restartDelayed(reason);
+    return;
+  }
+
+  await context.translationWarmup.stop();
+}
+
+function buildWarmupSettingsSignature(settings: AppSettings): string {
+  return JSON.stringify({
+    modelProvider: settings.modelProvider,
+    maxTokens: settings.maxTokens,
+    gemma: {
+      modelSource: settings.gemma.modelSource,
+      modelRepo: settings.gemma.modelRepo,
+      modelFile: settings.gemma.modelFile,
+      mmprojRepo: settings.gemma.mmprojRepo,
+      mmprojFile: settings.gemma.mmprojFile,
+      localModelPath: settings.gemma.localModelPath,
+      localMmprojPath: settings.gemma.localMmprojPath,
+      vramMode: settings.gemma.vramMode
+    },
+    codex: {
+      model: settings.codex.model,
+      reasoningEffort: settings.codex.reasoningEffort,
+      oauthPort: settings.codex.oauthPort
+    },
+    ocr: {
+      engine: settings.ocr.engine,
+      device: settings.ocr.device,
+      gpuCudaTag: settings.ocr.gpuCudaTag,
+      batchSize: settings.ocr.batchSize
+    },
+    storage: {
+      modelCacheDir: settings.storage?.modelCacheDir || ""
     }
   });
 }

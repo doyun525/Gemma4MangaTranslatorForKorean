@@ -30,7 +30,7 @@ const {
   MM_PROJ_CANDIDATE_NAMES,
   OCR_INSTALL_MARKER_FILE,
   PADDLE_OCR_MODEL_DOWNLOADS,
-  RTX_50_WINDOWS_PADDLE_GPU_WHEEL_CP312
+  PADDLEOCR_VL_WINDOWS_SAFETENSORS_WHEEL
 } = require("./simple-page-defaults.cjs");
 const {
   buildSystemPrompt,
@@ -119,6 +119,7 @@ const BEELLAMA_LLAMA_RUNTIME_CUDA13 = {
   ],
   requiredFiles: [
     "llama-server.exe",
+    "llama-server-impl.dll",
     ["ggml-cuda.dll", "ggml-cuda-cu13.dll"],
     ["cublas64_13.dll", "cublas64_12.dll"],
     ["cublasLt64_13.dll", "cublasLt64_12.dll"],
@@ -205,6 +206,7 @@ const LLAMA_RUNTIME_FILES = new Set([
   "ggml.dll",
   "libomp140.x86_64.dll",
   "llama-common.dll",
+  "llama-server-impl.dll",
   "llama-server.exe",
   "llama.dll",
   "mtmd.dll",
@@ -1111,7 +1113,7 @@ async function ensureDefaultLlamaRuntimeDownloaded(options = {}) {
   await rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
   await mkdir(runtimeDir, { recursive: true });
   for (const archivePath of archivePaths) {
-    await extractSelectedZipEntries(archivePath, runtimeDir, (fileName) => LLAMA_RUNTIME_FILES.has(fileName));
+    await extractSelectedZipEntries(archivePath, runtimeDir, shouldExtractLlamaRuntimeFile);
   }
 
   const missingFiles = missingRequiredLlamaRuntimeFiles(runtimeDir, runtime);
@@ -1161,6 +1163,10 @@ function getLlamaRuntimeArchives(runtime) {
     return runtime.archives;
   }
   return runtime?.archive && runtime?.url ? [{ archive: runtime.archive, url: runtime.url }] : [];
+}
+
+function shouldExtractLlamaRuntimeFile(fileName) {
+  return LLAMA_RUNTIME_FILES.has(fileName) || /\.dll$/i.test(String(fileName ?? ""));
 }
 
 async function extractSelectedZipEntries(archivePath, outputDir, shouldExtract) {
@@ -3797,6 +3803,9 @@ function resolveOcrInstallBatchProgressRanges(installBatches, startPercent, endP
 
   const weights = batches.map((packages, index) => {
     const packageText = Array.isArray(packages) ? packages.join(" ").toLowerCase() : "";
+    if (packageText.includes("safetensors")) {
+      return batches.length > 1 ? 0.04 : 1;
+    }
     if (packageText.includes("paddlepaddle")) {
       return batches.length > 1 ? 0.36 : 1;
     }
@@ -3894,32 +3903,29 @@ function isLikelyPackagedToolsDir(toolsDir) {
 function resolveOcrPipInstallBatches(options = {}) {
   const explicit = splitShellLikeEnv(runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_PIP_PACKAGES", options));
   if (explicit.length > 0) {
-    return [explicit];
+    return withPaddleOcrVlSafetensorsBatch([explicit]);
   }
 
   if (!isOcrGpuRequested(options)) {
     const cpuPackages = splitShellLikeEnv(runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_CPU_PIP_PACKAGES", options));
-    return [cpuPackages.length > 0 ? cpuPackages : DEFAULT_OCR_CPU_PIP_PACKAGES];
+    return withPaddleOcrVlSafetensorsBatch([cpuPackages.length > 0 ? cpuPackages : DEFAULT_OCR_CPU_PIP_PACKAGES]);
   }
 
   const gpuPackages = splitShellLikeEnv(runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_GPU_PIP_PACKAGES", options));
   if (gpuPackages.length > 0) {
-    return [gpuPackages];
+    return withPaddleOcrVlSafetensorsBatch([gpuPackages]);
   }
 
-  return [
+  return withPaddleOcrVlSafetensorsBatch([
     resolveOcrGpuPaddleInstallBatch(options),
     DEFAULT_OCR_GPU_EXTRA_PACKAGES
-  ];
+  ]);
 }
 
 function resolveOcrGpuPaddleInstallBatch(options = {}) {
   const explicitWheel = String(runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_GPU_PADDLE_WHEEL", options) ?? "").trim();
   if (explicitWheel) {
     return [explicitWheel];
-  }
-  if (shouldUseRtx50WindowsPaddleWheel(options)) {
-    return [RTX_50_WINDOWS_PADDLE_GPU_WHEEL_CP312];
   }
   return [
     runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_GPU_PADDLE_PACKAGE", options) || DEFAULT_OCR_GPU_PADDLE_PACKAGE,
@@ -3928,12 +3934,37 @@ function resolveOcrGpuPaddleInstallBatch(options = {}) {
   ];
 }
 
-function shouldUseRtx50WindowsPaddleWheel(options = {}) {
-  const explicit = runtimeOverrideEnv("MANGA_TRANSLATOR_OCR_USE_RTX50_WINDOWS_WHEEL", options);
-  if (explicit !== undefined) {
-    return isTruthy(explicit);
+function withPaddleOcrVlSafetensorsBatch(installBatches) {
+  const batches = Array.isArray(installBatches) ? installBatches.map((batch) => Array.isArray(batch) ? [...batch] : []) : [];
+  if (process.platform !== "win32") {
+    return batches;
   }
-  return process.platform === "win32" && resolveOcrGpuCudaTag(options) === "cu129";
+
+  const safetensorsPackages = [];
+  const normalizedBatches = batches
+    .map((batch) => {
+      const normalPackages = [];
+      for (const item of batch) {
+        const text = String(item ?? "").trim();
+        if (!text) {
+          continue;
+        }
+        if (/safetensors/i.test(text)) {
+          safetensorsPackages.push(text);
+          continue;
+        }
+        normalPackages.push(text);
+      }
+      return normalPackages;
+    })
+    .filter((batch) => batch.length > 0);
+
+  const safetensorsBatch = [
+    "--no-deps",
+    "--force-reinstall",
+    ...(safetensorsPackages.length > 0 ? safetensorsPackages : [PADDLEOCR_VL_WINDOWS_SAFETENSORS_WHEEL])
+  ];
+  return [...normalizedBatches, safetensorsBatch];
 }
 
 function splitShellLikeEnv(value) {
@@ -4072,6 +4103,9 @@ function buildPaddleOcrImportFailureMessage(importMessage, options = {}) {
   if (isPaddleSm120UnsupportedText(importMessage)) {
     return buildPaddleOcrSm120FailureMessage(importMessage, options);
   }
+  if (isPaddleBfloat16SafetensorsText(importMessage)) {
+    return buildPaddleOcrBfloat16SafetensorsFailureMessage(importMessage, options);
+  }
   if (isPaddleOcrVerificationTimeoutText(importMessage)) {
     const suffix = isOcrGpuRequested(options)
       ? ` GPU 검증이 제한 시간 안에 끝나지 않았습니다. RTX 50번대는 cu129 런타임을 사용하며 첫 실행 검증이 오래 걸릴 수 있지만, 반복되면 NVIDIA 드라이버/CUDA 12.9용 Paddle 런타임 호환성을 확인해야 합니다.`
@@ -4090,6 +4124,9 @@ function buildPaddleOcrGpuFailureMessage(error, options = {}) {
   if (isPaddleSm120UnsupportedText(text)) {
     return buildPaddleOcrSm120FailureMessage(text, options);
   }
+  if (isPaddleBfloat16SafetensorsText(text)) {
+    return buildPaddleOcrBfloat16SafetensorsFailureMessage(text, options);
+  }
   return `Paddle OCR GPU 실행에 실패했습니다. GPU 설정을 쓰려면 CUDA가 보이는 GPU Paddle 런타임이 필요합니다. CPU로 바꾸면 계속 진행할 수 있습니다. detail=${truncateText(text, 1200)}`;
 }
 
@@ -4097,8 +4134,16 @@ function buildPaddleOcrSm120FailureMessage(detail, options = {}) {
   return `RTX 50번대/SM120에서 현재 Paddle OCR GPU 런타임이 맞지 않습니다. RTX 50번대는 CUDA 12.9용 Paddle OCR 런타임(cu129)을 사용해야 합니다. 설정값은 현재 ${resolveOcrGpuCudaTag(options)}입니다. 기존 gpu-cu126 런타임이 남아 있으면 OCR 런타임을 삭제하고 다시 시도하세요. detail=${truncateText(detail, 1200)}`;
 }
 
+function buildPaddleOcrBfloat16SafetensorsFailureMessage(detail, options = {}) {
+  return `PaddleOCR-VL 모델 가중치(bfloat16)를 현재 OCR 런타임이 읽지 못했습니다. Windows에서는 PaddleOCR-VL용 special safetensors 휠과 공식 ${resolveOcrGpuCudaTag(options)} Paddle 런타임이 같이 필요합니다. OCR 런타임 패키지가 다시 설치되도록 앱을 업데이트한 뒤 재시도하세요. detail=${truncateText(detail, 1200)}`;
+}
+
 function isPaddleSm120UnsupportedText(value) {
   return /not compiled for\s+SM\s*120|sm[_\s-]*120|compute capability:\s*12(?:\.0)?|mismatched gpu architecture/i.test(String(value ?? ""));
+}
+
+function isPaddleBfloat16SafetensorsText(value) {
+  return /data type ['"]?bfloat16['"]? not understood|_load_part_state_dict_from_safetensors/i.test(String(value ?? ""));
 }
 
 function isPaddleOcrVerificationTimeoutText(value) {
@@ -4327,17 +4372,49 @@ function buildOcrRuntimeEnv(options = {}, runtime = null) {
 
 function buildOcrRuntimePathDirs(options = {}, runtime = null, runtimeDir = resolveOcrRuntimeDir(options)) {
   const variant = resolveOcrRuntimeVariant(options);
+  const venvDir = path.join(runtimeDir, `.venv-${variant}`);
   const venvBinDir = process.platform === "win32"
-    ? path.join(runtimeDir, `.venv-${variant}`, "Scripts")
-    : path.join(runtimeDir, `.venv-${variant}`, "bin");
+    ? path.join(venvDir, "Scripts")
+    : path.join(venvDir, "bin");
+  const venvSitePackagesDir = process.platform === "win32"
+    ? path.join(venvDir, "Lib", "site-packages")
+    : null;
+  const packageDir = runtime?.packageDir || resolveOcrPythonPackageDir(runtimeDir, options);
   const toolsDir = resolveToolsDir(options);
   return [
     runtime?.pythonPath ? path.dirname(runtime.pythonPath) : null,
     venvBinDir,
+    ...collectNvidiaPythonRuntimeBinDirs(venvSitePackagesDir),
+    ...collectNvidiaPythonRuntimeBinDirs(packageDir),
     path.join(toolsDir || "", "python"),
     path.join(toolsDir || "", "python", "python-embed"),
     runtimeDir
   ];
+}
+
+function collectNvidiaPythonRuntimeBinDirs(sitePackagesDir) {
+  if (!sitePackagesDir) {
+    return [];
+  }
+  const nvidiaDir = path.join(sitePackagesDir, "nvidia");
+  if (!existsSync(nvidiaDir)) {
+    return [];
+  }
+  const dirs = [];
+  try {
+    for (const entry of readdirSync(nvidiaDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const binDir = path.join(nvidiaDir, entry.name, "bin");
+      if (existsSync(binDir)) {
+        dirs.push(binDir);
+      }
+    }
+  } catch {
+    return dirs;
+  }
+  return dirs;
 }
 
 function buildLlamaServerEnv(serverPath, options = {}) {

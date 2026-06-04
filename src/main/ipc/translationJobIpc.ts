@@ -11,6 +11,8 @@ import {
   updatePageAfterAnalysis
 } from "../library";
 import { logError, logInfo } from "../logger";
+import { getAppSettings } from "../settingsStore";
+import { queryBestGpuMemorySnapshot, shouldReleaseGpuResidentModel } from "../gpuVram";
 import { createRegionCropPage, mapRegionBlocksToPageBlocks } from "../regionCrop";
 import { runWholePagePipeline } from "../wholePagePipeline";
 import type { IpcContext } from "./context";
@@ -46,6 +48,11 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       pageIds = resolved.pages.map((page) => page.id);
       await markChapterPagesRunning(request.chapterId, pageIds);
       runPaths = await getRunPaths(request.chapterId, id);
+      if (resolved.chapter.sourceKind !== "web") {
+        await context.translationWarmup.stop();
+      } else {
+        await releaseWarmupEndpointForGpuOcrIfNeeded(context, id, emit, resolved.pages.length);
+      }
       await waitForEndpointWarmupIfNeeded(context, id, emit, resolved.pages.length);
       const result = await runWholePagePipeline({
         jobId: id,
@@ -169,6 +176,11 @@ export function registerTranslationJobIpc(context: IpcContext): void {
 
     try {
       chapter = await openChapter(request.chapterId);
+      if (chapter.sourceKind !== "web") {
+        await context.translationWarmup.stop();
+      } else {
+        await releaseWarmupEndpointForGpuOcrIfNeeded(context, id, emit, 1);
+      }
       const page = chapter.pages.find((candidate) => candidate.id === request.pageId);
       if (!page) {
         return { status: "failed", chapter, error: "선택한 페이지를 찾지 못했습니다." };
@@ -326,6 +338,75 @@ async function waitForEndpointWarmupIfNeeded(
     });
   }
   await context.translationWarmup.waitForEndpointReady();
+}
+
+async function releaseWarmupEndpointForGpuOcrIfNeeded(
+  context: IpcContext,
+  jobId: string,
+  emit: (event: JobEvent) => void,
+  pageTotal: number
+): Promise<void> {
+  const settings = await getAppSettings();
+  if (settings.modelProvider !== "gemma" || settings.ocr.device !== "gpu") {
+    return;
+  }
+  const minFreeMb = resolveGpuKeepBothMinFreeMb();
+  const snapshot = await queryBestGpuMemorySnapshot();
+  logInfo("GPU VRAM check before web OCR", {
+    jobId,
+    minFreeMb,
+    snapshot,
+    warmup: context.translationWarmup.getSnapshot()
+  });
+  if (!shouldReleaseGpuResidentModel(snapshot, minFreeMb)) {
+    return;
+  }
+
+  emit({
+    id: jobId,
+    kind: "gemma-analysis",
+    status: "starting",
+    progressText: "GPU 메모리 확보 중",
+    phase: "ocr_preparing",
+    progressCurrent: 0,
+    progressTotal: pageTotal,
+    pageTotal,
+    detail: `OCR 실행을 위해 LLM 사전 로딩을 일시 종료합니다. VRAM 여유 ${snapshot?.freeMb ?? 0}MB / 기준 ${minFreeMb}MB`
+  });
+  await context.translationWarmup.stopEndpoint("web-ocr-vram-guard");
+
+  const deadline = Date.now() + resolveGpuReleaseWaitMs();
+  let latest = await queryBestGpuMemorySnapshot();
+  while (shouldReleaseGpuResidentModel(latest, minFreeMb) && Date.now() < deadline) {
+    await sleep(1000);
+    latest = await queryBestGpuMemorySnapshot();
+  }
+
+  logInfo("GPU VRAM check after warmup endpoint stop", {
+    jobId,
+    minFreeMb,
+    snapshot: latest,
+    warmup: context.translationWarmup.getSnapshot()
+  });
+  if (shouldReleaseGpuResidentModel(latest, minFreeMb)) {
+    throw new Error(
+      `OCR 실행을 위한 GPU 메모리가 아직 부족합니다. VRAM 여유 ${latest?.freeMb ?? 0}MB / 기준 ${minFreeMb}MB. LLM 로딩이 완전히 종료된 뒤 다시 시도하세요.`
+    );
+  }
+}
+
+function resolveGpuKeepBothMinFreeMb(): number {
+  const parsed = Number(process.env.MANGA_TRANSLATOR_GPU_KEEP_BOTH_MIN_FREE_MB);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1024;
+}
+
+function resolveGpuReleaseWaitMs(): number {
+  const parsed = Number(process.env.MANGA_TRANSLATOR_GPU_RELEASE_WAIT_MS);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 45000;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function saveMappedRegionBlocks(chapterId: string, pageId: string, mappedBlocks: MangaPage["blocks"]) {

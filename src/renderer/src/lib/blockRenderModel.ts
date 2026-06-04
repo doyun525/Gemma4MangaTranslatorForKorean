@@ -1,7 +1,7 @@
 import type { TranslationBlock, WebOverlayRenderBlock } from "../../../shared/types";
 import { resolveBlockVisualStyle } from "../../../shared/blockVisuals";
 import { resolveBlockFontFamily } from "./fonts";
-import { resolveBlockDisplayText } from "./koreanLineBreaks";
+import { isSmartKoLineBreaksEnabled, resolveBlockDisplayText } from "./koreanLineBreaks";
 import { hexToRgba, resolveBlockTextLayout, type BlockTextLayout, type ViewportSize } from "./overlayLayout";
 
 export type { ViewportSize };
@@ -71,7 +71,9 @@ export function toWebOverlayRenderBlock(
     bold: Boolean(block.bold),
     italic: Boolean(block.italic),
     vertical: block.renderDirection === "vertical",
-    autoFitText: block.autoFitText
+    autoFitText: block.autoFitText,
+    smartWrap: isSmartKoLineBreaksEnabled(block),
+    preparedLayout: true
   };
 }
 

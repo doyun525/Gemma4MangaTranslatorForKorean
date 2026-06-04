@@ -7,6 +7,7 @@ export type TranslationRuntimePort = {
   startEndpointSession: (options: TranslationOptions) => Promise<ModelEndpointSession>;
   collectOcrHints: (options: TranslationOptions) => Promise<OcrBboxResult>;
   collectOcrHintsBatch: (options: TranslationOptions[]) => Promise<OcrBboxResult[]>;
+  stopOcrWorker?: () => Promise<void>;
   requestTranslation: (endpoint: ModelEndpointHandle, options: TranslationOptions) => Promise<TranslationResult>;
   requestCropRetryTranslation?: (
     endpoint: ModelEndpointHandle,
@@ -41,6 +42,7 @@ export function loadTranslationRuntimePort(): TranslationRuntimePort {
       }
       return results;
     },
+    stopOcrWorker: runtime.simplePage.stopOcrWorker,
     requestTranslation: (endpoint, options) => runtime.simplePage.requestTranslation(endpoint, options),
     saveArtifacts: (options, result) => runtime.simplePage.saveArtifacts(options, result),
     parseJsonLenient: (rawText) => runtime.overlayTools.parseJsonLenient(rawText),

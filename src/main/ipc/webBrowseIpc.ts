@@ -19,20 +19,23 @@ export function registerWebBrowseIpc(context: IpcContext): void {
   ipcMain.handle("web:open", async (_event, raw: unknown): Promise<OpenWebBrowseResult> => {
     const request = parseIpcPayload(OpenWebBrowseRequestSchema, raw, "웹 페이지 열기");
     const result = await context.webBrowser.open(request);
-    context.translationWarmup.start("web-open");
+    context.translationWarmup.startDelayed("web-open");
     return result;
   });
 
   ipcMain.handle("web:reopen-chapter", async (_event, raw: unknown): Promise<OpenWebBrowseResult> => {
     const request = parseIpcPayload(ReopenWebChapterRequestSchema, raw, "웹 화 다시 열기");
     const result = await context.webBrowser.reopenChapter(request);
-    context.translationWarmup.start("web-reopen");
+    context.translationWarmup.startDelayed("web-reopen");
     return result;
   });
 
   ipcMain.handle("web:close", async (_event, raw: unknown): Promise<{ closed: boolean }> => {
     const request = parseIpcPayload(WebSessionIdRequestSchema, raw, "웹 페이지 닫기");
     context.webBrowser.close(request.sessionId);
+    if (!context.webBrowser.hasActiveSessions()) {
+      await context.translationWarmup.stop();
+    }
     return { closed: true };
   });
 

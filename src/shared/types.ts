@@ -202,6 +202,8 @@ export type WebOverlayRenderBlock = {
   italic: boolean;
   vertical: boolean;
   autoFitText?: boolean;
+  smartWrap?: boolean;
+  preparedLayout?: boolean;
 };
 
 export type CustomFont = {

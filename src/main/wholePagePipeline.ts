@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TranslationOptions } from "./appSettings";
 import { logError, logInfo, logWarn } from "./logger";
+import { queryBestGpuMemorySnapshot, shouldReleaseGpuResidentModel } from "./gpuVram";
 import type { MangaPage } from "../shared/types";
 import { getAppPaths } from "./appPaths";
 import { getAppSettings } from "./settingsStore";
@@ -233,6 +234,8 @@ export async function runWholePagePipeline({
           ? `${formatGemmaVramMode(baseOptions.gemmaVramMode)}, ${baseOptions.modelFile}`
           : "로컬 모델 자산이 없거나 부족해 다운로드/갱신이 필요할 수 있습니다."
   });
+
+  await releaseOcrWorkerForLocalLlmIfNeeded();
 
   const endpointSession = await runtime.startEndpointSession(baseOptions);
   const server = endpointSession.handle;
@@ -814,6 +817,37 @@ export async function runWholePagePipeline({
     ocrMs = Date.now() - ocrStartedAt;
     await translationChain;
   };
+
+  async function releaseOcrWorkerForLocalLlmIfNeeded(): Promise<void> {
+    if (codexSelected || baseOptions.modelProvider !== "gemma" || baseOptions.ocrDevice !== "gpu") {
+      return;
+    }
+    const minFreeMb = readNumberEnv("MANGA_TRANSLATOR_GPU_KEEP_BOTH_MIN_FREE_MB", 1024);
+    const snapshot = await queryBestGpuMemorySnapshot();
+    logInfo("GPU VRAM check before local LLM", {
+      jobId,
+      minFreeMb,
+      snapshot,
+      ocrDevice: baseOptions.ocrDevice,
+      modelProvider: baseOptions.modelProvider
+    });
+    if (!shouldReleaseGpuResidentModel(snapshot, minFreeMb)) {
+      return;
+    }
+
+    emit({
+      id: jobId,
+      kind: "gemma-analysis",
+      status: "starting",
+      progressText: "GPU 메모리 확보 중",
+      phase: "booting",
+      progressCurrent: 0,
+      progressTotal,
+      pageTotal: pages.length,
+      detail: `LLM 실행을 위해 OCR 워커를 일시 종료합니다. VRAM 여유 ${snapshot?.freeMb ?? 0}MB / 기준 ${minFreeMb}MB`
+    });
+    await runtime.stopOcrWorker?.();
+  }
 
   try {
     try {

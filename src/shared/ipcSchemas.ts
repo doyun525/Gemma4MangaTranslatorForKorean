@@ -421,7 +421,9 @@ export const RenderWebOverlayRequestSchema = z
             bold: z.boolean(),
             italic: z.boolean(),
             vertical: z.boolean(),
-            autoFitText: z.boolean().optional()
+            autoFitText: z.boolean().optional(),
+            smartWrap: z.boolean().optional(),
+            preparedLayout: z.boolean().optional()
           })
           .strict()
       )
