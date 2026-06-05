@@ -117,6 +117,7 @@ function shutdown(exitCode = 0) {
   await prepareBeellamaRuntime();
   log("compiling Electron main process");
   runSync(process.execPath, [nodeBin("typescript", "bin", "tsc"), "-p", "tsconfig.electron.json"]);
+  runSync(process.execPath, [nodeBin("vite", "bin", "vite.js"), "build", "--config", "vite.blockTextLayout.config.ts"]);
   spawnChild("vite", process.execPath, [
     nodeBin("vite", "bin", "vite.js"),
     "--config",

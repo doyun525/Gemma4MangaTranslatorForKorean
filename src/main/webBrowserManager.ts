@@ -26,6 +26,7 @@ import {
   MIN_BLOCK_CORNER_RADIUS_PX
 } from "../shared/blockVisuals";
 import { appendWebCapturePage, createWebChapter, openChapter, saveChapterSnapshot } from "./library";
+import { getBlockTextLayoutRuntimeScript } from "./blockTextLayoutRuntime";
 import { logInfo } from "./logger";
 
 type WebBrowseSession = {
@@ -523,7 +524,12 @@ export class WebBrowserManager {
       viewportHeight: payload.viewportHeight
     });
     const payloadJson = JSON.stringify(payload);
+    const layoutRuntimeScript = getBlockTextLayoutRuntimeScript();
     const renderResult = await item.view.webContents.executeJavaScript(`(() => {
+      if (!window.__mgtBlockTextLayoutReady) {
+        ${layoutRuntimeScript}
+        window.__mgtBlockTextLayoutReady = true;
+      }
       const payload = ${payloadJson};
       if (payload.captureMode !== "full-page") {
         window.scrollTo(Number(payload.scrollX) || 0, Number(payload.scrollY) || 0);
@@ -1496,78 +1502,9 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
     const b = Number.parseInt(raw.slice(4, 6), 16);
     return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
   };
-  const buildFont = (block, fontSize) => {
-    const weight = block.bold ? "800" : "400";
-    const style = block.italic ? "italic " : "";
-    return style + weight + " " + Math.max(8, Math.round(fontSize)) + "px " + (block.fontFamily || "sans-serif");
-  };
-  const AUTOFIT_ROOM_RATIO = 0.9;
-  const wrapTextToWidth = (context, text, maxWidth) => {
-    const lines = [];
-    const paragraphs = String(text || "").replace(/\r/g, "").split("\n");
-    for (const paragraph of paragraphs) {
-      const normalized = paragraph.replace(/\s+/g, " ").trim();
-      if (!normalized) {
-        lines.push("");
-        continue;
-      }
-      let current = "";
-      for (const char of Array.from(normalized)) {
-        const candidate = current + char;
-        if (!current || context.measureText(candidate).width <= maxWidth) {
-          current = candidate;
-          continue;
-        }
-        lines.push(current.trimEnd());
-        current = /\s/u.test(char) ? "" : char;
-      }
-      if (current) lines.push(current.trimEnd());
-    }
-    return lines.length ? lines : [String(text || "")];
-  };
-  const doesTextFit = (block, fontSize, innerWidth, innerHeight) => {
-    const text = String(block.text || "");
-    const lineHeightPx = Math.max(1, fontSize * (Number(block.lineHeight) || 1.2));
-    if (block.vertical) {
-      const compact = text.replace(/\r/g, "").replace(/\s+/g, "");
-      if (!compact) return true;
-      const charsPerColumn = Math.max(1, Math.floor(innerHeight / Math.max(fontSize, lineHeightPx)));
-      const columnCount = Math.max(1, Math.ceil(Array.from(compact).length / charsPerColumn));
-      return columnCount <= 2 && columnCount * fontSize * 1.15 <= innerWidth;
-    }
-    const canvas = window.__mgtOverlayMeasureCanvas || (window.__mgtOverlayMeasureCanvas = document.createElement("canvas"));
-    const context = canvas.getContext("2d");
-    if (!context) return true;
-    context.font = buildFont(block, fontSize);
-    const lines = wrapTextToWidth(context, text, innerWidth);
-    const totalHeight = lines.length * lineHeightPx;
-    const maxLineWidth = lines.reduce((widest, line) => Math.max(widest, context.measureText(line).width), 0);
-    return totalHeight <= innerHeight && maxLineWidth <= innerWidth;
-  };
-  const resolveFontSize = (block, innerWidth, innerHeight) => {
-    const preferred = Math.max(8, Math.round(Number(block.fontSizePx) || 16));
-    if (!block.autoFitText || !String(block.text || "").trim()) {
-      return preferred;
-    }
-    const min = 12;
-    const heightBound = Math.floor(innerHeight / Math.max(1, Number(block.lineHeight) || 1.2));
-    const widthBound = block.vertical ? Math.floor(innerWidth / 1.15) : 256;
-    const highBound = Math.max(min, Math.min(256, Math.max(preferred, heightBound, widthBound)));
-    let low = min;
-    let high = highBound;
-    let best = min;
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      if (doesTextFit(block, mid, innerWidth, innerHeight)) {
-        best = mid;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-    const fitted = Math.min(best, highBound);
-    return fitted <= min ? min : Math.max(min, Math.floor(fitted * AUTOFIT_ROOM_RATIO));
-  };
+  const BLOCK_LAYOUT = MgtBlockTextLayout;
+  const buildFont = (block, fontSize) => BLOCK_LAYOUT.buildFont(block, fontSize);
+  const resolveFontSize = (block, innerWidth, innerHeight) => BLOCK_LAYOUT.resolveFontSize(block, innerWidth, innerHeight);
   const resolveOutlineWidth = (block, fontSize) => {
     const scale = Math.max(0, Number.isFinite(Number(block.outlineWidthScale)) ? Number(block.outlineWidthScale) : 1);
     const configured = Number(block.outlineWidthPx);
@@ -1722,11 +1659,10 @@ const WEB_TRANSLATION_OVERLAY_SCRIPT = String.raw`(function renderMgtTranslation
     box.style.fontFamily = block.fontFamily || "sans-serif";
     box.style.boxShadow = "none";
     box.style.textShadow = "none";
-    const innerWidth = Math.max(1, Math.round(layoutBlock.w) - 2);
-    const innerHeight = Math.max(1, Math.round(layoutBlock.h) - 2);
+    const inner = BLOCK_LAYOUT.resolveFitInnerSize(Math.max(1, Math.round(layoutBlock.w)), Math.max(1, Math.round(layoutBlock.h)));
     const resolvedFontSize = layoutBlock.preparedLayout
       ? Math.max(1, Math.round(Number(layoutBlock.fontSizePx) || 16))
-      : resolveFontSize(layoutBlock, innerWidth, innerHeight);
+      : resolveFontSize(layoutBlock, inner.innerWidth, inner.innerHeight);
     box.style.fontSize = resolvedFontSize + "px";
     box.style.lineHeight = String(block.lineHeight || 1.2);
     box.style.fontWeight = block.bold ? "800" : "400";

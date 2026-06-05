@@ -22,6 +22,7 @@ function run(command, args) {
 run(process.execPath, [nodeBin("typescript", "bin", "tsc"), "--noEmit"]);
 run(process.execPath, [nodeBin("typescript", "bin", "tsc"), "-p", "tsconfig.electron.json"]);
 run(process.execPath, [nodeBin("vite", "bin", "vite.js"), "build", "--config", "vite.renderer.config.ts"]);
+run(process.execPath, [nodeBin("vite", "bin", "vite.js"), "build", "--config", "vite.blockTextLayout.config.ts"]);
 prepareRuntimeAssets({ root, outputDir: join(root, "out", "app-runtime") });
 
 function nodeBin(packageName, ...parts) {

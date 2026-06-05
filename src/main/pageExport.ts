@@ -9,6 +9,7 @@ import { bboxToPixels, clamp, resolveBlockRenderBbox } from "../shared/geometry"
 import { resolveBlockCornerRadiusPx } from "../shared/blockVisuals";
 import type { CustomFont, MangaPage, TranslationBlock } from "../shared/types";
 import { getAppPaths } from "./appPaths";
+import { getBlockTextLayoutRuntimeScript } from "./blockTextLayoutRuntime";
 import { listCustomFonts, resolveCustomFontFilePath } from "./customFonts";
 import type { ImageDecodeFallback } from "./regionCrop";
 
@@ -271,106 +272,29 @@ body {
   <canvas id="exportCanvas" width="${width}" height="${tileHeight}" style="display:block;width:${width}px;height:${tileHeight}px"></canvas>
 </div>
 <script>
+${getBlockTextLayoutRuntimeScript()}
+const BLOCK_LAYOUT = MgtBlockTextLayout;
 const EXPORT_BLOCKS = ${safeScriptJson(blocks)};
 const EXPORT_IMAGE_DATA_URL = ${safeScriptJson(imageDataUrl)};
 const EXPORT_FULL_WIDTH = ${width};
 const EXPORT_FULL_HEIGHT = ${height};
 const EXPORT_TILE_Y = ${tileY};
-const MIN_FONT_SIZE = 10;
-const MAX_AUTOFIT_FONT_SIZE = 256;
-const AUTOFIT_ROOM_RATIO = 0.9;
-const canvas = document.createElement("canvas");
-const context = canvas.getContext("2d");
-
-function clamp(value, min, max) {
-  if (!Number.isFinite(value)) return min;
-  return Math.min(max, Math.max(min, value));
-}
+const MIN_FONT_SIZE = BLOCK_LAYOUT.config.minFontSizePx;
 
 function escapeText(value) {
   return String(value).replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
 }
 
-function buildFont(size, family, weight, italic) {
-  return (italic ? "italic " : "") + (weight || 600) + " " + size + "px " + family;
-}
-
-function blockFontWeight(block) {
-  return block.bold ? 800 : 400;
-}
-
-function wrapTextToWidth(text, maxWidth, fontSize, fontFamily, weight, italic) {
-  context.font = buildFont(fontSize, fontFamily, weight, italic);
-  const paragraphs = String(text).replace(/\\r/g, "").split("\\n");
-  const lines = [];
-  for (const paragraph of paragraphs) {
-    const normalized = paragraph.replace(/\\s+/g, " ").trim();
-    if (!normalized) {
-      lines.push("");
-      continue;
-    }
-    let current = "";
-    for (const char of Array.from(normalized)) {
-      const candidate = current + char;
-      if (!current || context.measureText(candidate).width <= maxWidth) {
-        current = candidate;
-        continue;
-      }
-      lines.push(current.trimEnd());
-      current = /\\s/u.test(char) ? "" : char;
-    }
-    if (current) {
-      lines.push(current.trimEnd());
-    }
-  }
-  return lines.length ? lines : [String(text)];
-}
-
 function measureHorizontal(block, fontSize, innerWidth) {
-  const weight = blockFontWeight(block);
-  const lines = wrapTextToWidth(block.text, innerWidth, fontSize, block.fontFamily, weight, block.italic);
-  context.font = buildFont(fontSize, block.fontFamily, weight, block.italic);
-  return {
-    lines,
-    totalHeight: lines.length * fontSize * block.lineHeight,
-    maxLineWidth: lines.reduce((widest, line) => Math.max(widest, context.measureText(line).width), 0)
-  };
-}
-
-function fits(block, fontSize, innerWidth, innerHeight) {
-  if (block.renderDirection === "vertical") {
-    const compact = block.text.replace(/\\r/g, "").replace(/\\s+/g, "");
-    if (!compact) return true;
-    const charsPerColumn = Math.max(1, Math.floor(innerHeight / Math.max(fontSize, fontSize * block.lineHeight)));
-    const columnCount = Math.max(1, Math.ceil(Array.from(compact).length / charsPerColumn));
-    return columnCount <= 2 && columnCount * fontSize * 1.15 <= innerWidth;
-  }
-  const measured = measureHorizontal(block, fontSize, innerWidth);
-  return measured.totalHeight <= innerHeight && measured.maxLineWidth <= innerWidth;
+  return BLOCK_LAYOUT.measureHorizontal(block, fontSize, innerWidth);
 }
 
 function resolveFontSize(block, innerWidth, innerHeight) {
-  const preferred = Math.max(MIN_FONT_SIZE, Math.floor(block.fontSizePx));
-  if (!block.autoFitText || !block.text.trim()) {
-    return preferred;
-  }
-  const heightBound = Math.floor(innerHeight / Math.max(1, block.lineHeight || 1));
-  const widthBound = block.renderDirection === "vertical" ? Math.floor(innerWidth / 1.15) : MAX_AUTOFIT_FONT_SIZE;
-  const capped = clamp(Math.max(MIN_FONT_SIZE, heightBound, widthBound), MIN_FONT_SIZE, MAX_AUTOFIT_FONT_SIZE);
-  let low = MIN_FONT_SIZE;
-  let high = Math.floor(capped);
-  let best = MIN_FONT_SIZE;
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    if (fits(block, mid, innerWidth, innerHeight)) {
-      best = mid;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  const fitted = Math.min(best, capped);
-  return fitted <= MIN_FONT_SIZE ? MIN_FONT_SIZE : Math.max(MIN_FONT_SIZE, Math.floor(fitted * AUTOFIT_ROOM_RATIO));
+  return BLOCK_LAYOUT.resolveFontSize(block, innerWidth, innerHeight);
+}
+
+function resolveBlockInnerSize(rect) {
+  return BLOCK_LAYOUT.resolveFitInnerSize(rect.width, rect.height);
 }
 
 function resolveOutlineShadow(fontSize, color, scale) {
@@ -400,14 +324,14 @@ function drawOutlinedText(ctx, text, x, y, block, fontSize) {
 }
 
 function drawHorizontalText(ctx, block, rect, fontSize) {
-  const innerWidth = Math.max(1, rect.width - 2);
-  const measured = measureHorizontal(block, fontSize, innerWidth);
+  const inner = resolveBlockInnerSize(rect);
+  const measured = measureHorizontal(block, fontSize, inner.innerWidth);
   const lineHeightPx = fontSize * block.lineHeight;
   const totalHeight = measured.lines.length * lineHeightPx;
   const startY = rect.top + Math.max(0, (rect.height - totalHeight) / 2);
   const align = block.textAlign || "center";
   const x = align === "left" ? rect.left + 1 : align === "right" ? rect.left + rect.width - 1 : rect.left + rect.width / 2;
-  ctx.font = buildFont(fontSize, block.fontFamily, blockFontWeight(block), block.italic);
+  ctx.font = BLOCK_LAYOUT.buildFont(block, fontSize);
   ctx.textAlign = align;
   ctx.textBaseline = "top";
   for (const [index, line] of measured.lines.entries()) {
@@ -422,7 +346,8 @@ function drawVerticalText(ctx, block, rect, fontSize) {
   }
   const chars = Array.from(compact);
   const lineHeightPx = fontSize * block.lineHeight;
-  const charsPerColumn = Math.max(1, Math.floor(Math.max(1, rect.height - 2) / lineHeightPx));
+  const inner = resolveBlockInnerSize(rect);
+  const charsPerColumn = Math.max(1, Math.floor(inner.innerHeight / lineHeightPx));
   const columns = [];
   for (let index = 0; index < chars.length; index += charsPerColumn) {
     columns.push(chars.slice(index, index + charsPerColumn));
@@ -430,7 +355,7 @@ function drawVerticalText(ctx, block, rect, fontSize) {
   const columnGap = fontSize * 1.15;
   const totalWidth = Math.max(columnGap, columns.length * columnGap);
   const firstX = rect.left + rect.width / 2 + totalWidth / 2 - columnGap / 2;
-  ctx.font = buildFont(fontSize, block.fontFamily, blockFontWeight(block), block.italic);
+  ctx.font = BLOCK_LAYOUT.buildFont(block, fontSize);
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   for (const [columnIndex, column] of columns.entries()) {
@@ -445,9 +370,8 @@ function drawVerticalText(ctx, block, rect, fontSize) {
 
 function drawExportBlock(ctx, block) {
   const rect = block.rect;
-  const innerWidth = Math.max(1, rect.width - 2);
-  const innerHeight = Math.max(1, rect.height - 2);
-  const fontSize = resolveFontSize(block, innerWidth, innerHeight);
+  const inner = resolveBlockInnerSize(rect);
+  const fontSize = resolveFontSize(block, inner.innerWidth, inner.innerHeight);
   ctx.save();
   let drawRect = rect;
   if (block.rotationDeg) {
@@ -534,9 +458,8 @@ function renderBlocks() {
       root.style.transform = "rotate(" + block.rotationDeg + "deg)";
     }
 
-    const innerWidth = Math.max(1, block.rect.width - 2);
-    const innerHeight = Math.max(1, block.rect.height - 2);
-    const fontSize = resolveFontSize(block, innerWidth, innerHeight);
+    const inner = resolveBlockInnerSize(block.rect);
+    const fontSize = resolveFontSize(block, inner.innerWidth, inner.innerHeight);
     root.style.fontSize = fontSize + "px";
 
     const content = document.createElement("span");
@@ -545,12 +468,12 @@ function renderBlocks() {
       block.outlineWidthScale != null && block.outlineWidthScale <= 0 ? "none" : resolveOutlineShadow(fontSize, block.outlineColor, block.outlineWidthScale);
     if (block.renderDirection === "vertical") {
       content.textContent = block.text.replace(/\\r/g, "").replace(/\\s+/g, "");
-      content.style.height = Math.min(innerHeight, Math.max(1, Array.from(content.textContent).length * fontSize * block.lineHeight)) + "px";
+      content.style.height = Math.min(inner.innerHeight, Math.max(1, Array.from(content.textContent).length * fontSize * block.lineHeight)) + "px";
       content.style.maxHeight = "100%";
     } else {
-      const lines = measureHorizontal(block, fontSize, innerWidth).lines;
+      const lines = measureHorizontal(block, fontSize, inner.innerWidth).lines;
       content.innerHTML = lines.map(escapeText).join("<br>");
-      content.style.width = innerWidth + "px";
+      content.style.width = inner.innerWidth + "px";
       content.style.maxWidth = "100%";
     }
     root.appendChild(content);
