@@ -238,6 +238,16 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         detail: `${Math.round(cropRect.w)} x ${Math.round(cropRect.h)} px`
       });
 
+      const settings = await getAppSettings(context.appPaths);
+      const regionUsesOcrText = settings.translation.mode === "ocr-text" || settings.translation.mode === "ocr-text-with-image-retry";
+      if (regionUsesOcrText && chapter.sourceKind === "web") {
+        await releaseWarmupEndpointForGpuOcrIfNeeded(context, id, emit, 1, {
+          cachedCount: 0,
+          pendingCount: 1,
+          totalCount: 1,
+          allCached: false
+        });
+      }
       await waitForEndpointWarmupIfNeeded(context, id, emit, 1);
       const result = await runWholePagePipeline({
         jobId: id,
@@ -248,7 +258,7 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         pages: [cropPage],
         runPaths,
         signal: abortController.signal,
-        skipOcrPrepass: true,
+        skipOcrPrepass: !regionUsesOcrText,
         decodeImage: context.decodeImage
       });
 
