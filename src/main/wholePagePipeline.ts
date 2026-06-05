@@ -1225,6 +1225,13 @@ function parseOcrTextResponseRecords(outputText: string): OcrTextResponseRecord[
 
     const match = line.match(/^([A-Za-z][A-Za-z0-9_]*):\s*(.*)$/);
     if (!match) {
+      const colonHeader = parseColonSeparatedOcrTextResponseHeader(line);
+      if (colonHeader) {
+        pushCurrent();
+        current = colonHeader;
+        currentTextKey = "ko";
+        continue;
+      }
       const delimitedRecord = parseDelimitedOcrTextResponseRecord(line);
       if (delimitedRecord) {
         pushCurrent();
@@ -1336,6 +1343,11 @@ function readFiniteNumber(value: unknown): number | undefined {
 }
 
 function parseDelimitedOcrTextResponseRecord(line: string): OcrTextResponseRecord | null {
+  const colonRecord = parseColonSeparatedOcrTextResponseRecord(line);
+  if (colonRecord) {
+    return colonRecord;
+  }
+
   const fields = line.split("\t").map((value) => value.trim()).filter(Boolean);
   if (fields.length >= 8) {
     const id = Number(fields[0]);
@@ -1394,6 +1406,83 @@ function parseDelimitedOcrTextResponseRecord(line: string): OcrTextResponseRecor
   }
 
   return null;
+}
+
+function parseColonSeparatedOcrTextResponseRecord(line: string): OcrTextResponseRecord | null {
+  const header = parseColonSeparatedOcrTextResponseHeader(line);
+  if (!header) {
+    return null;
+  }
+  const ko = String(header.ko ?? "").trim();
+  if (!ko) {
+    return null;
+  }
+  return {
+    id: Number(header.id),
+    type: header.type,
+    textRole: header.textRole,
+    direction: header.direction,
+    angle: header.angle,
+    fontSize: header.fontSize,
+    confidence: header.confidence,
+    jp: String(header.jp ?? "").trim(),
+    ko
+  };
+}
+
+function parseColonSeparatedOcrTextResponseHeader(line: string): Partial<OcrTextResponseRecord> | null {
+  const fields = line.split(":").map((value) => value.trim()).filter(Boolean);
+  if (fields.length < 7) {
+    return null;
+  }
+
+  const id = Number(fields[0]);
+  if (!Number.isInteger(id) || id <= 0) {
+    return null;
+  }
+
+  const firstMeta = String(fields[1] ?? "").trim();
+  const secondMeta = String(fields[2] ?? "").trim();
+  const thirdMetaNumber = Number(fields[3]);
+  const fourthMetaNumber = Number(fields[4]);
+  const fifthMetaNumber = Number(fields[5]);
+  if (!firstMeta || !secondMeta || !Number.isFinite(thirdMetaNumber) || !Number.isFinite(fourthMetaNumber) || !Number.isFinite(fifthMetaNumber)) {
+    return null;
+  }
+
+  const tail = fields.slice(6).join(":").trim();
+  const { jp, ko } = splitSourceAndKoreanTail(tail);
+
+  const firstMetaLower = firstMeta.toLowerCase();
+  const looksLikeTextRole = firstMetaLower === "ordinary" || firstMetaLower === "sound";
+  return {
+    id,
+    type: looksLikeTextRole ? "nonsolid" : firstMeta,
+    textRole: looksLikeTextRole ? firstMeta : undefined,
+    direction: secondMeta,
+    angle: thirdMetaNumber,
+    fontSize: fourthMetaNumber,
+    confidence: fifthMetaNumber,
+    jp,
+    ko
+  };
+}
+
+function splitSourceAndKoreanTail(text: string): { jp: string; ko: string } {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) {
+    return { jp: "", ko: "" };
+  }
+
+  const koreanMatch = /[가-힣]/u.exec(trimmed);
+  if (!koreanMatch || koreanMatch.index === undefined) {
+    return { jp: trimmed, ko: "" };
+  }
+
+  return {
+    jp: trimmed.slice(0, koreanMatch.index).trim(),
+    ko: trimmed.slice(koreanMatch.index).trim()
+  };
 }
 
 function normalizeOcrTextRecordKey(key: string): string {
