@@ -5528,16 +5528,17 @@ async function startServer(options) {
 
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
+  const emitServerProgressLog = createServerProgressLogEmitter(options);
   child.stdout?.on("data", (chunk) => {
     recentStdout = shrinkBuffer(recentStdout, chunk);
     serverLogStream?.write(`[stdout] ${chunk}`);
-    emitServerInstallLog(options, chunk);
+    emitServerProgressLog(chunk);
     process.stdout.write(`[llama:${options.label}:stdout] ${chunk}`);
   });
   child.stderr?.on("data", (chunk) => {
     recentStderr = shrinkBuffer(recentStderr, chunk);
     serverLogStream?.write(`[stderr] ${chunk}`);
-    emitServerInstallLog(options, chunk);
+    emitServerProgressLog(chunk);
     process.stderr.write(`[llama:${options.label}:stderr] ${chunk}`);
   });
   child.once("exit", () => serverLogStream?.end());
@@ -5722,11 +5723,48 @@ function createServerLogStream(options, serverPath, launchArgs) {
   }
 }
 
-function emitServerInstallLog(options = {}, chunk) {
+function createServerProgressLogEmitter(options = {}) {
+  const mode = resolveLlamaServerProgressLogMode(options);
+  const seenLines = new Set();
+  return (chunk) => {
+    emitServerInstallLog(options, chunk, { mode, seenLines });
+  };
+}
+
+function resolveLlamaServerProgressLogMode(options = {}) {
+  const raw = String(
+    runtimeOverrideEnv("MANGA_TRANSLATOR_LLAMA_SERVER_PROGRESS_LOG", options) ??
+    runtimeOverrideEnv("MGT_LLAMA_SERVER_PROGRESS_LOG", options) ??
+    "dedupe"
+  ).trim().toLowerCase();
+  if (["all", "raw", "verbose"].includes(raw)) {
+    return "all";
+  }
+  if (["off", "none", "disabled", "false", "0"].includes(raw)) {
+    return "off";
+  }
+  return "dedupe";
+}
+
+function normalizeServerProgressLogLine(line) {
+  return String(line ?? "").replace(/\s+/g, " ").trim();
+}
+
+function emitServerInstallLog(options = {}, chunk, state = {}) {
+  if (state.mode === "off") {
+    return;
+  }
   for (const part of String(chunk ?? "").split(/[\r\n]+/)) {
     const line = sanitizeInstallLogLine(part);
     if (!line) {
       continue;
+    }
+    if (state.mode !== "all" && state.seenLines instanceof Set) {
+      const key = normalizeServerProgressLogLine(line);
+      if (state.seenLines.has(key)) {
+        continue;
+      }
+      state.seenLines.add(key);
     }
     emitRuntimeProgress(options, "booting", "Gemma 서버 로그", `${resolveConfiguredModelFile(options)} 실행 중`, {
       progressMode: "log-only",
