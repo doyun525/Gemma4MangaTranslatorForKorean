@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import type { AppPaths } from "./appPaths";
 import { getAppSettings } from "./settingsStore";
 import { buildBaseOptions } from "./pipeline/options";
@@ -64,7 +65,7 @@ export class TranslationWarmupManager {
     }
 
     this.status = "warming";
-    this.startedAt = new Date().toISOString();
+    this.startedAt = formatStoredTimestamp();
     this.readyAt = undefined;
     this.error = undefined;
     this.endpointReady = false;
@@ -87,7 +88,7 @@ export class TranslationWarmupManager {
         return;
       }
       this.status = "ready";
-      this.readyAt = new Date().toISOString();
+      this.readyAt = formatStoredTimestamp();
       logInfo("Translation warmup ready", { reason, endpointReady: this.endpointReady, ocrReady: this.ocrReady });
     });
 

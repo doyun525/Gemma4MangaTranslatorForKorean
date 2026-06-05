@@ -489,7 +489,45 @@ export const AppSettingsSchema = z
           )
           .max(40)
           .optional(),
-        vramMode: z.enum(["full", "economy"])
+        modelPreset: z.enum(["economy26b", "full31b", "custom"]).optional(),
+        vramMode: z.enum(["full", "economy"]),
+        runtimeOverrides: z
+          .object({
+            full: z
+              .object({
+                ctx: z.number().int().positive().optional(),
+                batch: z.number().int().positive().optional(),
+                ubatch: z.number().int().positive().optional(),
+                fitTargetMb: z.number().int().positive().optional(),
+                gpuLayers: z.union([z.number().int().nonnegative(), z.enum(["fit", "all"])]).optional(),
+                useDraft: z.boolean().optional(),
+                draftModelRepo: z.string().min(1).max(300).optional(),
+                draftModelFile: z.string().min(1).max(300).optional(),
+                kvOffload: z.boolean().optional(),
+                mmprojOffload: z.boolean().optional(),
+                llamaRuntime: z.enum(["auto", "mainline", "beellama"]).optional()
+              })
+              .strict()
+              .optional(),
+            economy: z
+              .object({
+                ctx: z.number().int().positive().optional(),
+                batch: z.number().int().positive().optional(),
+                ubatch: z.number().int().positive().optional(),
+                fitTargetMb: z.number().int().positive().optional(),
+                gpuLayers: z.union([z.number().int().nonnegative(), z.enum(["fit", "all"])]).optional(),
+                useDraft: z.boolean().optional(),
+                draftModelRepo: z.string().min(1).max(300).optional(),
+                draftModelFile: z.string().min(1).max(300).optional(),
+                kvOffload: z.boolean().optional(),
+                mmprojOffload: z.boolean().optional(),
+                llamaRuntime: z.enum(["auto", "mainline", "beellama"]).optional()
+              })
+              .strict()
+              .optional()
+          })
+          .strict()
+          .optional()
       })
       .strict(),
     codex: z

@@ -7,11 +7,32 @@ export type JobKind = "gemma-analysis" | "inpainting";
 export type ModelProvider = "gemma" | "openai-codex";
 export type ModelSource = "huggingface" | "local";
 export type GemmaVramMode = "full" | "economy";
+export type GemmaLlamaRuntimeChoice = "auto" | "mainline" | "beellama";
+export type GemmaGpuLayersSetting = number | "fit" | "all";
+
+/** settings.json `gemma.runtimeOverrides` — VRAM 모드별 llama-server 실행 파라미터 덮어쓰기 */
+export type GemmaRuntimePresetOverride = {
+  ctx?: number;
+  batch?: number;
+  ubatch?: number;
+  fitTargetMb?: number;
+  gpuLayers?: GemmaGpuLayersSetting;
+  useDraft?: boolean;
+  draftModelRepo?: string;
+  draftModelFile?: string;
+  kvOffload?: boolean;
+  mmprojOffload?: boolean;
+  llamaRuntime?: GemmaLlamaRuntimeChoice;
+};
+
+export type GemmaRuntimeOverrides = Partial<Record<GemmaVramMode, GemmaRuntimePresetOverride>>;
 export type CodexReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 export type OcrDevice = "cpu" | "gpu";
 export type OcrEngine = "paddleocr-vl" | "paddleocr-v5";
 export type OcrVlServerMode = "direct" | "external" | "auto-fastdeploy";
 export type TranslationMode = "image" | "ocr-text" | "ocr-text-with-image-retry";
+
+export type GemmaModelPresetId = "economy26b" | "full31b" | "custom";
 
 export type GemmaCustomModelPreset = {
   id: string;
@@ -31,7 +52,11 @@ export type GemmaSettings = {
   localModelPath?: string;
   localMmprojPath?: string;
   customModelPresets?: GemmaCustomModelPreset[];
+  /** UI에서 선택한 모델 프리셋. 커스텀 탭 선택은 모델 경로와 무관하게 유지됩니다 */
+  modelPreset?: GemmaModelPresetId;
   vramMode: GemmaVramMode;
+  /** VRAM 모드별 llama-server 실행 옵션. 앱이 settings.json에 기본값을 기록하며 사용자가 편집 가능 */
+  runtimeOverrides?: GemmaRuntimeOverrides;
 };
 
 export type CodexSettings = {

@@ -8,6 +8,7 @@ import { isOcrResultNoTextDetected } from "./noText";
 import type { TranslationRuntimePort } from "./translationRuntimePort";
 import type { OcrBboxResult } from "./types";
 import { logInfo } from "../logger";
+import { formatStoredTimestamp } from "../../shared/storedTimestamp";
 
 const OCR_HINT_CACHE_SCHEMA_VERSION = 4;
 
@@ -874,7 +875,7 @@ async function writeCachedOcrHints(cachePath: string, page: MangaPage, result: O
       diagnostics: result.diagnostics,
       noTextDetected: Boolean(result.noTextDetected),
       textEvidenceCount: Number.isFinite(result.textEvidenceCount) ? result.textEvidenceCount : undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: formatStoredTimestamp()
     }, null, 2)}\n`,
     "utf8"
   );

@@ -2,6 +2,7 @@ import { nativeImage } from "electron";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { clamp } from "../shared/geometry";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import type { InpaintingMaskStroke, InpaintingPoint, MangaPage, TranslationBlock } from "../shared/types";
 import {
   ensureFluxCudnnRuntime,
@@ -168,7 +169,7 @@ export async function inpaintPatternPage(
     page: {
       ...page,
       inpaintedImagePath: outputPath,
-      updatedAt: new Date().toISOString()
+      updatedAt: formatStoredTimestamp()
     }
   };
 }
@@ -236,7 +237,7 @@ export async function inpaintDrawnPatternPage(
     page: {
       ...page,
       inpaintedImagePath: outputPath,
-      updatedAt: new Date().toISOString()
+      updatedAt: formatStoredTimestamp()
     }
   };
 }
@@ -335,7 +336,7 @@ export async function applyInpaintingRetouch(
   return {
     ...page,
     inpaintedImagePath: outputPath,
-    updatedAt: new Date().toISOString()
+    updatedAt: formatStoredTimestamp()
   };
 }
 

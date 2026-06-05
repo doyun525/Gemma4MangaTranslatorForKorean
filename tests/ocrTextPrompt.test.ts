@@ -61,4 +61,24 @@ describe("ocr-text overlay prompts", () => {
     expect(prompt).toContain("# Segmentation");
     expect(prompt).toContain("Image 1 is the coordinate-authority full page");
   });
+
+  it("uses multilingual source-language guidance for 26B models", () => {
+    const prompt = getOverlayPrompt(
+      {
+        modelRepo: "HauhauCS/Gemma4-26B-A4B-Uncensored",
+        modelFile: "gemma-4-26b-a4b-q4_k_m.gguf",
+        translationMode: "image",
+        includeSoundEffects: false,
+        imageWidth: 1200,
+        imageHeight: 1800,
+        ocrBboxHints: buildHints(2)
+      },
+      variants
+    );
+
+    expect(prompt).toContain("Chinese");
+    expect(prompt).toContain("source-language text area");
+    expect(prompt).not.toContain("physical Japanese text area");
+    expect(prompt).not.toContain("Japanese or English text group");
+  });
 });

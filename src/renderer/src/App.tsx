@@ -24,6 +24,7 @@ import {
   resolveBlockRenderBbox,
   resolveEditableBlockBbox
 } from "../../shared/geometry";
+import { formatStoredTimestamp } from "../../shared/storedTimestamp";
 import { isUsableRegionBbox } from "../../shared/region";
 import { AppModals, type RenameTarget } from "./components/AppModals";
 import { AppSidebar } from "./components/AppSidebar";
@@ -190,8 +191,8 @@ async function clearWebTranslationOverlay(sessionId: string): Promise<WebBrowseS
     height: 1,
     blocks: [],
     analysisStatus: "idle",
-    createdAt: new Date(0).toISOString(),
-    updatedAt: new Date(0).toISOString(),
+    createdAt: formatStoredTimestamp(new Date(0)),
+    updatedAt: formatStoredTimestamp(new Date(0)),
     webMeta: {
       url: "https://example.invalid/",
       segmentIndex: 0,
@@ -199,7 +200,7 @@ async function clearWebTranslationOverlay(sessionId: string): Promise<WebBrowseS
       scrollY: 0,
       viewport: { width: 1, height: 1, deviceScaleFactor: 1 },
       captureMode: "viewport",
-      capturedAt: new Date(0).toISOString()
+      capturedAt: formatStoredTimestamp(new Date(0))
     }
   };
   const api = window.mangaApi as unknown as {
@@ -1782,7 +1783,7 @@ export default function App(): React.JSX.Element {
           ? page
           : {
               ...page,
-              updatedAt: new Date().toISOString(),
+              updatedAt: formatStoredTimestamp(),
               blocks: page.blocks.map((block) => {
                 if (block.id !== selectedBlock.id) {
                   return block;
@@ -1826,7 +1827,7 @@ export default function App(): React.JSX.Element {
           ? page
           : {
               ...page,
-              updatedAt: new Date().toISOString(),
+              updatedAt: formatStoredTimestamp(),
               blocks: page.blocks.map((block) =>
                 block.id === blockId ? { ...block, inpaintExcluded: !block.inpaintExcluded } : block
               )
@@ -1845,7 +1846,7 @@ export default function App(): React.JSX.Element {
       return;
     }
     const targetSet = new Set(targetPageIds);
-    const stamp = new Date().toISOString();
+    const stamp = formatStoredTimestamp();
     setCurrentChapter((current) => {
       if (!current) {
         return current;
@@ -1874,7 +1875,7 @@ export default function App(): React.JSX.Element {
         page.id === selectedPage.id
           ? {
               ...page,
-              updatedAt: new Date().toISOString(),
+              updatedAt: formatStoredTimestamp(),
               blocks: page.blocks.filter((block) => block.id !== selectedBlock.id)
             }
           : page
@@ -1898,7 +1899,7 @@ export default function App(): React.JSX.Element {
         page.id === selectedPage.id
           ? {
               ...page,
-              updatedAt: new Date().toISOString(),
+              updatedAt: formatStoredTimestamp(),
               blocks: [...page.blocks, copy]
             }
           : page
@@ -1931,7 +1932,7 @@ export default function App(): React.JSX.Element {
             ? page
             : {
                 ...page,
-                updatedAt: new Date().toISOString(),
+                updatedAt: formatStoredTimestamp(),
                 blocks: page.blocks.map((block) => {
                   const sample = sampleById.get(block.id);
                   if (!sample?.flat || !sample.backgroundColor) {
@@ -2086,7 +2087,7 @@ export default function App(): React.JSX.Element {
             ? {
                 ...page,
                 inpaintedImagePath,
-                updatedAt: new Date().toISOString()
+                updatedAt: formatStoredTimestamp()
               }
             : page
         )
@@ -2345,7 +2346,7 @@ export default function App(): React.JSX.Element {
           ? candidate
           : {
               ...candidate,
-              updatedAt: new Date().toISOString(),
+              updatedAt: formatStoredTimestamp(),
               blocks: candidate.blocks.map((block) =>
                 block.id === drag.blockId
                   ? applyDraggedBlockBbox(block, next, drag.bboxKey)
@@ -2415,7 +2416,7 @@ export default function App(): React.JSX.Element {
             }
             return {
               ...page,
-              updatedAt: new Date().toISOString(),
+              updatedAt: formatStoredTimestamp(),
               blocks: page.blocks.map((block) => (block.id === resizedBlock.id ? { ...block, ...persistPatch } : block))
             };
           })

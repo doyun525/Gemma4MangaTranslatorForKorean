@@ -29,11 +29,6 @@ export function useSettingsDialog(pushStatus: (line: string) => void): UseSettin
   }, [refreshSettings]);
 
   const openSettings = React.useCallback(async () => {
-    if (settings) {
-      setSettingsOpen(true);
-      return;
-    }
-
     setSettingsBusy(true);
     try {
       await refreshSettings();
@@ -44,7 +39,7 @@ export function useSettingsDialog(pushStatus: (line: string) => void): UseSettin
     } finally {
       setSettingsBusy(false);
     }
-  }, [pushStatus, refreshSettings, settings]);
+  }, [pushStatus, refreshSettings]);
 
   const closeSettings = React.useCallback(() => {
     setSettingsOpen((open) => (settingsBusy ? open : false));

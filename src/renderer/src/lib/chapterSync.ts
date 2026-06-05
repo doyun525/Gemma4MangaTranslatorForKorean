@@ -1,4 +1,5 @@
 import type { ChapterSnapshot, RunMode } from "../../../shared/types";
+import { formatStoredTimestamp } from "../../../shared/storedTimestamp";
 
 type ChapterSelection = {
   selectedPageId: string | null;
@@ -87,7 +88,7 @@ export function markChapterPagesRunning(chapter: ChapterSnapshot, runMode: RunMo
     return chapter;
   }
 
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   return {
     ...chapter,
     status: "running",

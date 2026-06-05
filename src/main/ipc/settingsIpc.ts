@@ -204,7 +204,9 @@ function buildWarmupSettingsSignature(settings: AppSettings): string {
       mmprojFile: settings.gemma.mmprojFile,
       localModelPath: settings.gemma.localModelPath,
       localMmprojPath: settings.gemma.localMmprojPath,
-      vramMode: settings.gemma.vramMode
+      vramMode: settings.gemma.vramMode,
+      modelPreset: settings.gemma.modelPreset ?? null,
+      runtimeOverrides: settings.gemma.runtimeOverrides ?? null
     },
     codex: {
       model: settings.codex.model,

@@ -11,6 +11,7 @@ import {
   StartInpaintingRequestSchema,
   parseIpcPayload
 } from "../../shared/ipcSchemas";
+import { formatStoredTimestamp, formatStoredTimestampForPath } from "../../shared/storedTimestamp";
 import type {
   InpaintingColorSampleResult,
   InpaintingExportResult,
@@ -267,7 +268,7 @@ export function registerInpaintingIpc(context: IpcContext): void {
     const reverted = pages.map((page) => ({
       ...page,
       inpaintedImagePath: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: formatStoredTimestamp()
     }));
     const saved = await updatePagesAfterInpainting(request.chapterId, reverted);
     return {
@@ -321,7 +322,7 @@ export function registerInpaintingIpc(context: IpcContext): void {
 
       const firstPageDir = dirname(pages[0].imagePath);
       const chapterDir = dirname(firstPageDir);
-      const outputDir = join(chapterDir, "processed", new Date().toISOString().replace(/[:.]/g, "-"));
+      const outputDir = join(chapterDir, "processed", formatStoredTimestampForPath());
       await mkdir(outputDir, { recursive: true });
 
       for (const [index, page] of pages.entries()) {

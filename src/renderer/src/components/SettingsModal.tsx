@@ -11,6 +11,7 @@ import type {
   OcrEngine,
   TranslationMode
 } from "../../../shared/types";
+import { resolveGemmaRuntimeOverrides } from "../../../shared/gemmaRuntimeSettings";
 import {
   CODEX_REASONING_OPTIONS,
   DEFAULT_MODEL_PRESET_ID,
@@ -36,6 +37,7 @@ import {
   OCR_ENGINE_OPTIONS,
   TRANSLATION_MODE_OPTIONS,
   resolveModelPreset,
+  resolveStoredModelPreset,
   type ModelPresetId
 } from "./settingsOptions";
 import { Button, Modal } from "./ui";
@@ -79,7 +81,11 @@ export function SettingsModal({
   const [modelProvider, setModelProvider] = React.useState<ModelProvider>(initialSettings.modelProvider);
   const [modelSource, setModelSource] = React.useState<ModelSource>(initialSettings.gemma.modelSource);
   const [selectedPreset, setSelectedPreset] = React.useState<ModelPresetId>(() =>
-    resolveModelPreset(initialSettings.gemma.modelRepo, initialSettings.gemma.modelFile)
+    resolveStoredModelPreset(
+      initialSettings.gemma.modelPreset,
+      initialSettings.gemma.modelRepo,
+      initialSettings.gemma.modelFile
+    )
   );
   const [customModelRepo, setCustomModelRepo] = React.useState(initialSettings.gemma.modelRepo);
   const [customModelFile, setCustomModelFile] = React.useState(initialSettings.gemma.modelFile);
@@ -132,7 +138,13 @@ export function SettingsModal({
   React.useEffect(() => {
     setModelProvider(initialSettings.modelProvider);
     setModelSource(initialSettings.gemma.modelSource);
-    setSelectedPreset(resolveModelPreset(initialSettings.gemma.modelRepo, initialSettings.gemma.modelFile));
+    setSelectedPreset(
+      resolveStoredModelPreset(
+        initialSettings.gemma.modelPreset,
+        initialSettings.gemma.modelRepo,
+        initialSettings.gemma.modelFile
+      )
+    );
     setCustomModelRepo(initialSettings.gemma.modelRepo);
     setCustomModelFile(initialSettings.gemma.modelFile);
     setCustomMmprojRepo(initialSettings.gemma.mmprojRepo ?? "");
@@ -230,6 +242,10 @@ export function SettingsModal({
     selectedPreset
   ]);
   const selectedVramMode = activePreset?.vramMode ?? customVramMode;
+  const runtimeOverridesForSave = React.useMemo(
+    () => resolveGemmaRuntimeOverrides(initialSettings.gemma.runtimeOverrides),
+    [initialSettings.gemma.runtimeOverrides]
+  );
   const trimmedLocalModelPath = localModelPath.trim();
   const trimmedLocalMmprojPath = localMmprojPath.trim();
   const trimmedCodexModel = codexModel.trim();
@@ -298,7 +314,9 @@ export function SettingsModal({
           ...(trimmedLocalModelPath ? { localModelPath: trimmedLocalModelPath } : {}),
           ...(trimmedLocalMmprojPath ? { localMmprojPath: trimmedLocalMmprojPath } : {}),
           customModelPresets: customModelPresetsForSave,
-          vramMode: selectedVramMode
+          modelPreset: selectedPreset,
+          vramMode: selectedVramMode,
+          runtimeOverrides: runtimeOverridesForSave
         },
         codex: {
           model: trimmedCodexModel,
@@ -323,7 +341,9 @@ export function SettingsModal({
         ...(trimmedLocalModelPath ? { localModelPath: trimmedLocalModelPath } : {}),
         ...(trimmedLocalMmprojPath ? { localMmprojPath: trimmedLocalMmprojPath } : {}),
         customModelPresets: customModelPresetsForSave,
-        vramMode: selectedVramMode
+        modelPreset: selectedPreset,
+        vramMode: selectedVramMode,
+        runtimeOverrides: runtimeOverridesForSave
       },
       codex: {
         model: trimmedCodexModel || initialSettings.codex.model,
@@ -346,6 +366,7 @@ export function SettingsModal({
     trimmedLocalModelPath,
     trimmedLocalMmprojPath,
     customModelPresetsForSave,
+    selectedPreset,
     trimmedCodexModel,
     parsedCodexOauthPort,
     parsedMaxTokens,
@@ -354,6 +375,7 @@ export function SettingsModal({
     parsedOcrBboxExpandYPercent,
     parsedTextOutlineWidthPx,
     selectedVramMode,
+    runtimeOverridesForSave,
     codexReasoningEffort,
     ocrDevice,
     ocrEngine,
@@ -794,12 +816,36 @@ export function SettingsModal({
                 </div>
                 <p className="muted-line modal-note">
                   {selectedPreset === "custom"
-                    ? "직접 지정한 모델을 사용합니다. 커스텀 모델은 현재 저장된 실행 설정을 유지합니다."
+                    ? "직접 지정한 모델을 사용합니다."
                     : MODEL_PRESETS[selectedPreset].description}
                 </p>
               </div>
               {selectedPreset === "custom" ? (
                 <>
+                  <div className="settings-field-stack">
+                    <span>VRAM 모드</span>
+                    <div className="settings-preset-group" role="tablist" aria-label="VRAM 모드">
+                      {GEMMA_VRAM_MODE_OPTIONS.map((option) => (
+                        <button
+                          key={option.id}
+                          type="button"
+                          className={`settings-preset-button ${customVramMode === option.id ? "active" : ""}`}
+                          onClick={() => {
+                            clearTestState();
+                            setCustomVramMode(option.id);
+                          }}
+                          disabled={controlsBusy}
+                          aria-pressed={customVramMode === option.id}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="muted-line modal-note">
+                      {GEMMA_VRAM_MODE_OPTIONS.find((option) => option.id === customVramMode)?.description} 실행 수치는
+                      settings.json의 gemma.runtimeOverrides에서 수정할 수 있습니다.
+                    </p>
+                  </div>
                   <label>
                     저장된 커스텀
                     <select

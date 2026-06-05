@@ -1,4 +1,13 @@
-import type { CodexReasoningEffort, GemmaVramMode, ModelProvider, ModelSource, OcrDevice, OcrEngine, TranslationMode } from "../../../shared/types";
+import type {
+  CodexReasoningEffort,
+  GemmaModelPresetId,
+  GemmaVramMode,
+  ModelProvider,
+  ModelSource,
+  OcrDevice,
+  OcrEngine,
+  TranslationMode
+} from "../../../shared/types";
 
 export const MIN_MAX_TOKENS = 300;
 export const MAX_MAX_TOKENS = 12000;
@@ -48,7 +57,7 @@ export const MODEL_PRESETS = {
 } as const;
 export const DEFAULT_MODEL_PRESET_ID: keyof typeof MODEL_PRESETS = "full31b";
 
-export type ModelPresetId = keyof typeof MODEL_PRESETS | "custom";
+export type ModelPresetId = GemmaModelPresetId;
 
 type ModelSourceOption = {
   id: ModelSource;
@@ -202,6 +211,17 @@ export const GEMMA_VRAM_MODE_OPTIONS: GemmaVramModeOption[] = [
     description: "이미지 토큰 1024는 유지하고 batch/ubatch와 KV GPU 사용을 줄입니다. 16GB급 VRAM에서 더 안전하지만 조금 느릴 수 있습니다."
   }
 ];
+
+export function resolveStoredModelPreset(
+  stored: GemmaModelPresetId | undefined,
+  modelRepo: string,
+  modelFile: string
+): ModelPresetId {
+  if (stored === "economy26b" || stored === "full31b" || stored === "custom") {
+    return stored;
+  }
+  return resolveModelPreset(modelRepo, modelFile);
+}
 
 export function resolveModelPreset(modelRepo: string, modelFile: string): ModelPresetId {
   const trimmedModelRepo = modelRepo.trim();

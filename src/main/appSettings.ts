@@ -3,6 +3,10 @@ import type {
   AppSettings,
   CodexReasoningEffort,
   GemmaCustomModelPreset,
+  GemmaModelPresetId,
+  GemmaSettings,
+  GemmaLlamaRuntimeChoice,
+  GemmaRuntimeOverrides,
   GemmaVramMode,
   JobPhase,
   ModelProvider,
@@ -36,8 +40,18 @@ export const DEFAULT_GEMMA_MODEL_FILE_IQ3_S = GEMMA_31B_MODEL_FILE_IQ3_S;
 export const DEFAULT_GEMMA_MODEL_FILE = DEFAULT_GEMMA_MODEL_FILE_IQ3_S;
 export const DEFAULT_GEMMA_MMPROJ_REPO = GEMMA_31B_MMPROJ_REPO;
 export const DEFAULT_GEMMA_MMPROJ_FILE = GEMMA_31B_MMPROJ_FILE;
-export const DEFAULT_GEMMA_DRAFT_MODEL_REPO = "Anbeeld/gemma-4-31B-it-DFlash-GGUF";
-export const DEFAULT_GEMMA_DRAFT_MODEL_FILE = "gemma4-31b-it-dflash-IQ4_XS.gguf";
+export {
+  GEMMA_DRAFT_MODEL_REPO as DEFAULT_GEMMA_DRAFT_MODEL_REPO,
+  GEMMA_DRAFT_MODEL_FILE as DEFAULT_GEMMA_DRAFT_MODEL_FILE,
+  createDefaultGemmaRuntimeOverrides,
+  resolveGemmaRuntimeOverrides
+} from "../shared/gemmaRuntimeSettings";
+import {
+  GEMMA_DRAFT_MODEL_FILE,
+  GEMMA_DRAFT_MODEL_REPO,
+  createDefaultGemmaRuntimeOverrides,
+  resolveGemmaRuntimeOverrides
+} from "../shared/gemmaRuntimeSettings";
 export const DEFAULT_GEMMA_VRAM_MODE: GemmaVramMode = "full";
 export const DEFAULT_MODEL_PROVIDER: ModelProvider = "gemma";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
@@ -68,12 +82,12 @@ export const RTX_50_OCR_GPU_CUDA_TAG = "cu129";
 
 const DEFAULT_IMAGE_TOKENS = 1024;
 
-type GemmaRuntimePreset = {
+export type GemmaRuntimePreset = {
   ctx: number;
   batch: number;
   ubatch: number;
   fitTargetMb: number;
-  gpuLayers?: number | "fit";
+  gpuLayers?: number | "fit" | "all";
   cacheTypeK?: string;
   cacheTypeV?: string;
   ctxCheckpoints?: number;
@@ -91,9 +105,10 @@ type GemmaRuntimePreset = {
   draftModelRepo?: string;
   draftModelFile?: string;
   useDraft?: boolean;
+  llamaRuntime?: GemmaLlamaRuntimeChoice;
 };
 
-const GEMMA_RUNTIME_PRESETS: Record<GemmaVramMode, GemmaRuntimePreset> = {
+export const DEFAULT_GEMMA_RUNTIME_PRESETS: Record<GemmaVramMode, GemmaRuntimePreset> = {
   full: {
     ctx: 8192,
     batch: 1024,
@@ -106,8 +121,8 @@ const GEMMA_RUNTIME_PRESETS: Record<GemmaVramMode, GemmaRuntimePreset> = {
     mmprojOffload: true,
     enableMetrics: true,
     enablePerf: true,
-    draftModelRepo: DEFAULT_GEMMA_DRAFT_MODEL_REPO,
-    draftModelFile: DEFAULT_GEMMA_DRAFT_MODEL_FILE,
+    draftModelRepo: GEMMA_DRAFT_MODEL_REPO,
+    draftModelFile: GEMMA_DRAFT_MODEL_FILE,
     useDraft: true
   },
   economy: {
@@ -126,6 +141,30 @@ const GEMMA_RUNTIME_PRESETS: Record<GemmaVramMode, GemmaRuntimePreset> = {
     useDraft: false
   }
 };
+
+const GEMMA_RUNTIME_PRESETS = DEFAULT_GEMMA_RUNTIME_PRESETS;
+
+export function resolveGemmaRuntimePreset(vramMode: GemmaVramMode, gemma?: Pick<GemmaSettings, "runtimeOverrides">): GemmaRuntimePreset {
+  const base = GEMMA_RUNTIME_PRESETS[vramMode];
+  const override = gemma?.runtimeOverrides?.[vramMode];
+  if (!override) {
+    return { ...base };
+  }
+  return {
+    ...base,
+    ...(override.ctx !== undefined ? { ctx: override.ctx } : {}),
+    ...(override.batch !== undefined ? { batch: override.batch } : {}),
+    ...(override.ubatch !== undefined ? { ubatch: override.ubatch } : {}),
+    ...(override.fitTargetMb !== undefined ? { fitTargetMb: override.fitTargetMb } : {}),
+    ...(override.gpuLayers !== undefined ? { gpuLayers: override.gpuLayers } : {}),
+    ...(override.useDraft !== undefined ? { useDraft: override.useDraft } : {}),
+    ...(override.draftModelRepo !== undefined ? { draftModelRepo: override.draftModelRepo } : {}),
+    ...(override.draftModelFile !== undefined ? { draftModelFile: override.draftModelFile } : {}),
+    ...(override.kvOffload !== undefined ? { kvOffload: override.kvOffload } : {}),
+    ...(override.mmprojOffload !== undefined ? { mmprojOffload: override.mmprojOffload } : {}),
+    ...(override.llamaRuntime !== undefined ? { llamaRuntime: override.llamaRuntime } : {})
+  };
+}
 
 export type TranslationOptions = {
   imagePath: string;
@@ -260,7 +299,9 @@ export function resolveDefaultAppSettings(
       modelFile: resolveNonEmptyString(env.LLAMA_ARG_HF_FILE, defaultGemmaPreset.modelFile),
       mmprojRepo: resolveOptionalString(env.MANGA_TRANSLATOR_MMPROJ_HF) ?? defaultGemmaPreset.mmprojRepo,
       mmprojFile: resolveOptionalString(env.LLAMA_ARG_MMPROJ_FILE) ?? defaultGemmaPreset.mmprojFile,
-      vramMode
+      vramMode,
+      modelPreset: inferGemmaModelPreset(defaultGemmaPreset.modelRepo, defaultGemmaPreset.modelFile),
+      runtimeOverrides: createDefaultGemmaRuntimeOverrides()
     },
     codex: {
       model: resolveNonEmptyString(env.MANGA_TRANSLATOR_CODEX_MODEL, DEFAULT_CODEX_MODEL),
@@ -398,7 +439,9 @@ export function normalizeAppSettings(raw: unknown, defaults = resolveDefaultAppS
       ...(localModelPath ? { localModelPath } : {}),
       ...(localMmprojPath ? { localMmprojPath } : {}),
       ...(customModelPresets.length > 0 ? { customModelPresets } : {}),
-      vramMode: resolvedVramMode
+      modelPreset: resolveGemmaModelPreset(asRecord(gemma)?.modelPreset, resolvedModel.modelRepo, resolvedModel.modelFile),
+      vramMode: resolvedVramMode,
+      runtimeOverrides: resolveGemmaRuntimeOverrides(asRecord(gemma)?.runtimeOverrides)
     },
     codex: {
       model: resolveNonEmptyString(asRecord(codex)?.model, defaults.codex.model),
@@ -469,13 +512,21 @@ export function buildBaseTranslationOptions({
 }): TranslationOptions {
   const runtimeEnv = filterPackagedRuntimeEnv(env, paths);
   const gemmaVramMode = resolveGemmaVramMode(runtimeEnv.MANGA_TRANSLATOR_GEMMA_VRAM_MODE, settings.gemma.vramMode);
-  const gemmaRuntimePreset = GEMMA_RUNTIME_PRESETS[gemmaVramMode];
+  const gemmaRuntimePreset = resolveGemmaRuntimePreset(gemmaVramMode, settings.gemma);
   const modelCacheDir = resolveOptionalString(settings.storage?.modelCacheDir);
   const envUseDraft = readOptionalBooleanEnv(runtimeEnv, "MANGA_TRANSLATOR_USE_DRAFT");
+  const runtimeGemma = resolveRuntimeGemmaSettings(settings.gemma, gemmaVramMode);
+  const runtimeOverride = resolveGemmaRuntimeOverrides(settings.gemma.runtimeOverrides)[gemmaVramMode];
+  const defaultRuntimeOverride = createDefaultGemmaRuntimeOverrides()[gemmaVramMode];
+  const hasCustomDraftSettings = hasCustomGemmaRuntimeDraftSettings(runtimeOverride, defaultRuntimeOverride);
   const useDraft =
     envUseDraft ??
-    Boolean(gemmaRuntimePreset.useDraft && isDefaultDflashDraftCompatible(settings.gemma.modelSource, settings.gemma.modelRepo, settings.gemma.modelFile));
-  const runtimeGemma = resolveRuntimeGemmaSettings(settings.gemma, gemmaVramMode);
+    Boolean(
+      gemmaRuntimePreset.useDraft &&
+        (hasCustomDraftSettings
+          ? runtimeOverride?.useDraft !== false
+          : isDefaultDflashDraftCompatible(runtimeGemma.modelSource, runtimeGemma.modelRepo, runtimeGemma.modelFile))
+    );
   const ocrGpuCudaTag = resolveOcrGpuCudaTag(
     runtimeEnv.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG ??
       runtimeEnv.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG ??
@@ -498,10 +549,11 @@ export function buildBaseTranslationOptions({
     ubatch: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_UBATCH", gemmaRuntimePreset.ubatch),
     gemmaVramMode,
     fitTargetMb: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_FIT_TARGET_MB", gemmaRuntimePreset.fitTargetMb),
-    gpuLayers:
+    gpuLayers: resolveTranslationGpuLayers(
       readOptionalGpuLayersEnv(runtimeEnv, "MANGA_TRANSLATOR_GEMMA_GPU_LAYERS") ??
-      readOptionalGpuLayersEnv(runtimeEnv, "MANGA_TRANSLATOR_GPU_LAYERS") ??
-      gemmaRuntimePreset.gpuLayers,
+        readOptionalGpuLayersEnv(runtimeEnv, "MANGA_TRANSLATOR_GPU_LAYERS") ??
+        gemmaRuntimePreset.gpuLayers
+    ),
     cacheTypeK:
       resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_GEMMA_CACHE_TYPE_K ?? runtimeEnv.MANGA_TRANSLATOR_CACHE_TYPE_K) ??
       gemmaRuntimePreset.cacheTypeK,
@@ -569,7 +621,7 @@ export function buildBaseTranslationOptions({
     serverPath:
       resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_LLAMA_SERVER_PATH) ??
       resolveOptionalString(runtimeEnv.LLAMA_SERVER_PATH) ??
-      resolveDefaultLlamaServerPathForGemma(paths, runtimeGemma, llamaRuntimeProfile),
+      resolveDefaultLlamaServerPathForGemma(paths, runtimeGemma, llamaRuntimeProfile, gemmaRuntimePreset.llamaRuntime),
     modelSource: runtimeGemma.modelSource,
     modelRepo: resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_MODEL_HF) ?? runtimeGemma.modelRepo,
     modelFile: resolveOptionalString(runtimeEnv.LLAMA_ARG_HF_FILE) ?? runtimeGemma.modelFile,
@@ -664,7 +716,7 @@ function readOptionalNumberEnv(env: NodeJS.ProcessEnv, name: string): number | u
   return Number.isFinite(value) ? value : undefined;
 }
 
-function readOptionalGpuLayersEnv(env: NodeJS.ProcessEnv, name: string): number | "fit" | undefined {
+function readOptionalGpuLayersEnv(env: NodeJS.ProcessEnv, name: string): number | "fit" | "all" | undefined {
   const raw = env[name];
   if (raw === undefined || raw === "") {
     return undefined;
@@ -674,7 +726,7 @@ function readOptionalGpuLayersEnv(env: NodeJS.ProcessEnv, name: string): number 
     return "fit";
   }
   if (normalized === "all") {
-    return undefined;
+    return "all";
   }
   const value = Number(normalized);
   return Number.isFinite(value) ? Math.round(value) : undefined;
@@ -726,6 +778,27 @@ function resolveModelSource(value: unknown, fallback: ModelSource): ModelSource 
 
 function resolveGemmaVramMode(value: unknown, fallback: GemmaVramMode): GemmaVramMode {
   return value === "economy" || value === "full" ? value : fallback;
+}
+
+function resolveGemmaModelPreset(
+  value: unknown,
+  modelRepo: string,
+  modelFile: string
+): GemmaModelPresetId {
+  if (value === "economy26b" || value === "full31b" || value === "custom") {
+    return value;
+  }
+  return inferGemmaModelPreset(modelRepo, modelFile);
+}
+
+function inferGemmaModelPreset(modelRepo: string, modelFile: string): GemmaModelPresetId {
+  if (modelRepo === GEMMA_26B_MODEL_REPO && modelFile === GEMMA_26B_MODEL_FILE_IQ3_S) {
+    return "economy26b";
+  }
+  if (modelRepo === GEMMA_31B_MODEL_REPO && modelFile === GEMMA_31B_MODEL_FILE_IQ3_S) {
+    return "full31b";
+  }
+  return "custom";
 }
 
 function resolveOcrDevice(value: unknown, fallback: OcrDevice): OcrDevice {
@@ -919,7 +992,7 @@ function resolveRuntimeGemmaSettings(
   gemma: AppSettings["gemma"],
   vramMode: GemmaVramMode
 ): AppSettings["gemma"] {
-  if (gemma.modelSource !== "huggingface") {
+  if (gemma.modelPreset === "custom" || gemma.modelSource !== "huggingface" || !shouldPinGemmaModelToVramPreset(gemma)) {
     return gemma;
   }
 
@@ -934,20 +1007,92 @@ function resolveRuntimeGemmaSettings(
   };
 }
 
+function shouldPinGemmaModelToVramPreset(
+  gemma: Pick<GemmaSettings, "runtimeOverrides" | "modelRepo" | "modelFile" | "modelSource" | "modelPreset">
+): boolean {
+  if (gemma.modelPreset === "custom") {
+    return false;
+  }
+  if (gemma.modelSource !== "huggingface") {
+    return false;
+  }
+  if (hasCustomGemmaRuntimeOverrides(gemma.runtimeOverrides)) {
+    return false;
+  }
+  return isBuiltInGemmaModel({ modelRepo: gemma.modelRepo, modelFile: gemma.modelFile });
+}
+
+function hasCustomGemmaRuntimeOverrides(overrides?: GemmaRuntimeOverrides): boolean {
+  if (!overrides) {
+    return false;
+  }
+  const defaults = createDefaultGemmaRuntimeOverrides();
+  return (["full", "economy"] as GemmaVramMode[]).some(
+    (mode) => JSON.stringify(overrides[mode] ?? {}) !== JSON.stringify(defaults[mode] ?? {})
+  );
+}
+
+function hasCustomGemmaRuntimeDraftSettings(
+  override: GemmaRuntimeOverrides[GemmaVramMode],
+  defaults: GemmaRuntimeOverrides[GemmaVramMode]
+): boolean {
+  if (!override) {
+    return false;
+  }
+  if (override.useDraft !== undefined && override.useDraft !== defaults?.useDraft) {
+    return true;
+  }
+  if (override.draftModelRepo !== undefined && override.draftModelRepo !== defaults?.draftModelRepo) {
+    return true;
+  }
+  if (override.draftModelFile !== undefined && override.draftModelFile !== defaults?.draftModelFile) {
+    return true;
+  }
+  return false;
+}
+
+function resolveTranslationGpuLayers(value: number | "fit" | "all" | undefined): number | "fit" | undefined {
+  if (value === "all") {
+    return undefined;
+  }
+  return value;
+}
+
 function resolveDefaultLlamaServerPathForGemma(
   paths: TranslationOptionPaths,
   gemma: AppSettings["gemma"],
-  llamaRuntimeProfile = "cuda12"
+  llamaRuntimeProfile = "cuda12",
+  llamaRuntimeChoice: GemmaLlamaRuntimeChoice = "auto"
 ): string {
+  const binaryName = process.platform === "win32" ? "llama-server.exe" : "llama-server";
+  const useCuda13 = isRtx50LlamaRuntimeProfile(llamaRuntimeProfile);
+  const forcedKind = resolveForcedLlamaRuntimeKind(llamaRuntimeChoice);
+  if (forcedKind === "mainline") {
+    const runtimeDir = useCuda13 ? MAINLINE_LLAMA_RUNTIME_DIR_CUDA13 : MAINLINE_LLAMA_RUNTIME_DIR_CUDA12;
+    return join(paths.dataRoot, "tools", runtimeDir, binaryName);
+  }
+  if (forcedKind === "beellama") {
+    const runtimeDir = useCuda13 ? BEELLAMA_LLAMA_RUNTIME_DIR_CUDA13 : BEELLAMA_LLAMA_RUNTIME_DIR_CUDA12;
+    return join(paths.dataRoot, "tools", runtimeDir, binaryName);
+  }
+
   if (gemma.modelSource !== "huggingface" || !isBuiltInGemmaModel({ modelRepo: gemma.modelRepo, modelFile: gemma.modelFile })) {
     return paths.llamaServerPath;
   }
-  const binaryName = process.platform === "win32" ? "llama-server.exe" : "llama-server";
-  const useCuda13 = isRtx50LlamaRuntimeProfile(llamaRuntimeProfile);
   const runtimeDir = is26BGemmaModel({ modelRepo: gemma.modelRepo, modelFile: gemma.modelFile })
     ? useCuda13 ? MAINLINE_LLAMA_RUNTIME_DIR_CUDA13 : MAINLINE_LLAMA_RUNTIME_DIR_CUDA12
     : useCuda13 ? BEELLAMA_LLAMA_RUNTIME_DIR_CUDA13 : BEELLAMA_LLAMA_RUNTIME_DIR_CUDA12;
   return join(paths.dataRoot, "tools", runtimeDir, binaryName);
+}
+
+function resolveForcedLlamaRuntimeKind(choice: GemmaLlamaRuntimeChoice): "mainline" | "beellama" | null {
+  if (choice === "mainline") {
+    return "mainline";
+  }
+  if (choice === "beellama") {
+    return "beellama";
+  }
+  return null;
 }
 
 function resolveLlamaRuntimeProfile(env: NodeJS.ProcessEnv, ocrGpuCudaTag: string): string {
@@ -1026,7 +1171,17 @@ function resolveStoredGemmaModel(
     };
   }
   const resolvedModel = { modelRepo, modelFile };
-  if (isBuiltInGemmaModel(resolvedModel)) {
+  const modelSource = resolveModelSource(gemma?.modelSource, defaults.gemma.modelSource);
+  const storedModelPreset = resolveGemmaModelPreset(asRecord(gemma)?.modelPreset, resolvedModel.modelRepo, resolvedModel.modelFile);
+  const runtimeOverrides = resolveGemmaRuntimeOverrides(asRecord(gemma)?.runtimeOverrides);
+  if (
+    shouldPinGemmaModelToVramPreset({
+      modelSource,
+      ...resolvedModel,
+      runtimeOverrides,
+      modelPreset: storedModelPreset
+    })
+  ) {
     const preset = getDefaultGemmaPresetForVramMode(vramMode);
     return {
       modelRepo: preset.modelRepo,

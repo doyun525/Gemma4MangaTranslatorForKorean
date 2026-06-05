@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBaseTranslationOptions,
+  DEFAULT_GEMMA_RUNTIME_PRESETS,
+  resolveGemmaRuntimePreset,
+  resolveGemmaRuntimeOverrides,
+  createDefaultGemmaRuntimeOverrides,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_OAUTH_PORT,
   DEFAULT_CODEX_REASONING_EFFORT,
   DEFAULT_GEMMA_MODEL_FILE,
+  DEFAULT_GEMMA_MODEL_FILE_IQ3_S,
   DEFAULT_GEMMA_MODEL_REPO,
   DEFAULT_INCLUDE_SOUND_EFFECTS,
   DEFAULT_MAX_TOKENS,
@@ -91,7 +96,9 @@ describe("app settings helpers", () => {
             modelFile: "env-default.gguf"
           }
         ],
-        vramMode: defaults.gemma.vramMode
+        vramMode: defaults.gemma.vramMode,
+        modelPreset: "custom",
+        runtimeOverrides: defaults.gemma.runtimeOverrides
       },
       codex: defaults.codex,
       ocr: defaults.ocr,
@@ -480,7 +487,9 @@ describe("app settings helpers", () => {
         modelFile: defaults.gemma.modelFile,
         localModelPath: "D:/models/custom-vision-model.gguf",
         localMmprojPath: "D:/models/mmproj.gguf",
-        vramMode: defaults.gemma.vramMode
+        vramMode: defaults.gemma.vramMode,
+        modelPreset: defaults.gemma.modelPreset,
+        runtimeOverrides: defaults.gemma.runtimeOverrides
       },
       codex: defaults.codex,
       ocr: defaults.ocr,
@@ -739,6 +748,181 @@ describe("app settings helpers", () => {
       ocrDevice: "cpu",
       ocrGpuCudaTag: DEFAULT_OCR_GPU_CUDA_TAG
     });
+  });
+
+  it("merges gemma.runtimeOverrides into translation runtime presets", () => {
+    const gemma: AppSettings["gemma"] = {
+      modelSource: "huggingface",
+      modelRepo: "custom/repo",
+      modelFile: "custom.gguf",
+      vramMode: "full",
+      runtimeOverrides: {
+        full: {
+          ctx: 16384,
+          batch: 2048,
+          gpuLayers: "all",
+          useDraft: true,
+          llamaRuntime: "beellama"
+        },
+        economy: {
+          fitTargetMb: 4096,
+          kvOffload: false,
+          mmprojOffload: false
+        }
+      }
+    };
+
+    expect(resolveGemmaRuntimePreset("full", gemma)).toMatchObject({
+      ctx: 16384,
+      batch: 2048,
+      ubatch: DEFAULT_GEMMA_RUNTIME_PRESETS.full.ubatch,
+      gpuLayers: "all",
+      useDraft: true,
+      llamaRuntime: "beellama"
+    });
+    expect(resolveGemmaRuntimePreset("economy", gemma)).toMatchObject({
+      ctx: DEFAULT_GEMMA_RUNTIME_PRESETS.economy.ctx,
+      fitTargetMb: 4096,
+      kvOffload: false,
+      mmprojOffload: false
+    });
+
+    const options = buildBaseTranslationOptions({
+      jobId: "job-runtime-overrides",
+      runDir: "C:/runs/job-runtime-overrides",
+      paths: {
+        dataRoot: "C:/app-data",
+        toolsDir: "C:/tools",
+        llamaServerPath: "C:/tools/llama-server.exe",
+        hfHomeDir: "C:/hf-home",
+        hfHubCacheDir: "C:/hf-home/hub"
+      },
+      settings: {
+        modelProvider: "gemma",
+        gemma,
+        codex: {
+          model: DEFAULT_CODEX_MODEL,
+          reasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+          oauthPort: DEFAULT_CODEX_OAUTH_PORT
+        },
+        ocr: {
+          device: "gpu",
+          engine: DEFAULT_OCR_ENGINE,
+          batchSize: DEFAULT_OCR_BATCH_SIZE,
+          gpuCudaTag: DEFAULT_OCR_GPU_CUDA_TAG
+        },
+        translation: {
+          mode: DEFAULT_TRANSLATION_MODE,
+          includeSoundEffects: DEFAULT_INCLUDE_SOUND_EFFECTS,
+          ocrBboxExpandXRatio: DEFAULT_OCR_BBOX_EXPAND_X_RATIO,
+          ocrBboxExpandYRatio: DEFAULT_OCR_BBOX_EXPAND_Y_RATIO,
+          textOutlineWidthPx: DEFAULT_TEXT_OUTLINE_WIDTH_PX
+        },
+        maxTokens: DEFAULT_MAX_TOKENS
+      },
+      env: {}
+    });
+
+    expect(options.ctx).toBe(16384);
+    expect(options.batch).toBe(2048);
+    expect(options.gpuLayers).toBeUndefined();
+    expect(options.serverPath).toBe(join("C:/app-data", "tools", "beellama-v0.2.0-cuda12.4", "llama-server.exe"));
+    expect(options.modelRepo).toBe("custom/repo");
+    expect(options.modelFile).toBe("custom.gguf");
+  });
+
+  it("preserves custom model preset selection when modelPreset is stored as custom", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(
+      parseStoredAppSettings(
+        JSON.stringify({
+          gemma: {
+            modelRepo: GEMMA_26B_MODEL_REPO,
+            modelFile: GEMMA_26B_MODEL_FILE_IQ3_S,
+            modelPreset: "custom",
+            vramMode: "full"
+          }
+        }),
+        defaults
+      ).gemma
+    ).toMatchObject({
+      modelRepo: GEMMA_26B_MODEL_REPO,
+      modelFile: GEMMA_26B_MODEL_FILE_IQ3_S,
+      modelPreset: "custom",
+      vramMode: "full"
+    });
+  });
+
+  it("infers modelPreset from built-in model paths when it is not stored", () => {
+    const defaults = resolveDefaultAppSettings();
+
+    expect(
+      parseStoredAppSettings(
+        JSON.stringify({
+          gemma: {
+            modelRepo: GEMMA_26B_MODEL_REPO,
+            modelFile: GEMMA_26B_MODEL_FILE_IQ3_S
+          }
+        }),
+        defaults
+      ).gemma.modelPreset
+    ).toBe("economy26b");
+  });
+
+  it("always materializes gemma.runtimeOverrides with defaults in settings.json", () => {
+    const defaults = resolveDefaultAppSettings();
+    const baseOverrides = createDefaultGemmaRuntimeOverrides();
+
+    expect(defaults.gemma.runtimeOverrides).toEqual(baseOverrides);
+
+    expect(parseStoredAppSettings("{}", defaults).gemma.runtimeOverrides).toEqual(baseOverrides);
+
+    expect(
+      parseStoredAppSettings(
+        JSON.stringify({
+          gemma: {
+            runtimeOverrides: {
+              economy: {
+                ctx: 4096,
+                gpuLayers: "fit",
+                llamaRuntime: "mainline"
+              }
+            }
+          }
+        }),
+        defaults
+      ).gemma.runtimeOverrides
+    ).toEqual({
+      ...baseOverrides,
+      economy: {
+        ...baseOverrides.economy,
+        ctx: 4096,
+        gpuLayers: "fit",
+        llamaRuntime: "mainline"
+      }
+    });
+  });
+
+  it("does not swap built-in Gemma models when runtimeOverrides are configured", () => {
+    const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40, computeCapability: 8.9 });
+    const settings = parseStoredAppSettings(
+      JSON.stringify({
+        gemma: {
+          modelRepo: DEFAULT_GEMMA_MODEL_REPO,
+          modelFile: DEFAULT_GEMMA_MODEL_FILE,
+          vramMode: "economy",
+          runtimeOverrides: {
+            economy: { ctx: 4096 }
+          }
+        }
+      }),
+      defaults
+    );
+
+    expect(settings.gemma.modelRepo).toBe(DEFAULT_GEMMA_MODEL_REPO);
+    expect(settings.gemma.modelFile).toBe(DEFAULT_GEMMA_MODEL_FILE);
+    expect(settings.gemma.vramMode).toBe("economy");
   });
 
   it("normalizes Gemma VRAM mode settings", () => {

@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { inspect } from "node:util";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import { getAppPaths } from "./appPaths";
 
 const UTF8_BOM = "\ufeff";
@@ -36,7 +37,7 @@ export function logError(message: string, detail?: unknown): void {
 
 export function writeLog(level: LogLevel, message: string, detail?: unknown): void {
   const logPath = getLogPath();
-  const timestamp = new Date().toISOString();
+  const timestamp = formatStoredTimestamp();
   const suffix = detail === undefined ? "" : ` ${serializeLogDetail(detail)}`;
   const line = `[${timestamp}] [${level.toUpperCase()}] ${message}${suffix}\n`;
   writeConsole(level, line);
@@ -113,7 +114,7 @@ function normalizeLogValue(detail: unknown, seen: WeakSet<object>, depth: number
   }
 
   if (detail instanceof Date) {
-    return Number.isNaN(detail.getTime()) ? "Invalid Date" : detail.toISOString();
+    return Number.isNaN(detail.getTime()) ? "Invalid Date" : formatStoredTimestamp(detail);
   }
 
   if (detail instanceof URL) {

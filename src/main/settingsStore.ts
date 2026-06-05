@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { AppSettings } from "../shared/types";
+import { formatStoredTimestampForPath } from "../shared/storedTimestamp";
 import { getAppPaths, type AppPaths } from "./appPaths";
 import { normalizeAppSettings, parseStoredAppSettings, resolveDefaultAppSettings } from "./appSettings";
 import { detectBestGpuInfo } from "./gpuInfo";
@@ -89,6 +90,15 @@ function mergeSettingsForSave(settings: AppSettings, existing: AppSettings | nul
   if (!hasOwn(rawGemma, "customModelPresets") && existing.gemma.customModelPresets?.length) {
     merged.gemma.customModelPresets = existing.gemma.customModelPresets;
   }
+  if (!hasOwn(rawGemma, "vramMode")) {
+    merged.gemma.vramMode = existing.gemma.vramMode;
+  }
+  if (!hasOwn(rawGemma, "runtimeOverrides") && existing.gemma.runtimeOverrides) {
+    merged.gemma.runtimeOverrides = existing.gemma.runtimeOverrides;
+  }
+  if (!hasOwn(rawGemma, "modelPreset") && existing.gemma.modelPreset) {
+    merged.gemma.modelPreset = existing.gemma.modelPreset;
+  }
   if (!hasOwn(rawOcr, "engine")) {
     merged.ocr.engine = existing.ocr.engine;
   }
@@ -165,7 +175,7 @@ function isJsonParseError(error: unknown): boolean {
 async function backupCorruptSettings(paths: AppPaths, error: unknown): Promise<void> {
   try {
     const rawText = await readFile(paths.settingsPath, "utf8");
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const timestamp = formatStoredTimestampForPath();
     const backupPath = join(dirname(paths.settingsPath), `${basename(paths.settingsPath)}.corrupt-${timestamp}.bak`);
     await mkdir(dirname(backupPath), { recursive: true });
     await writeFile(backupPath, rawText, "utf8");

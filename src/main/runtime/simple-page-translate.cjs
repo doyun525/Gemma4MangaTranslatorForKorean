@@ -5,6 +5,7 @@ const path = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 
 const { bundledServerCandidates, resolveBundledServerPath } = require("./resolve-llama-runtime.cjs");
+const { formatStoredTimestamp } = require("./stored-timestamp.cjs");
 const {
   CROP_RETRY_MARGIN_RATIO,
   CROP_RETRY_MIN_MARGIN_PX,
@@ -36,6 +37,8 @@ const {
   buildSystemPrompt,
   getOverlayPrompt,
   PROMPT_KO_BBOX_LINES_MULTIVIEW,
+  PROMPT_TRANSLATABLE_SOURCE_LANGUAGES,
+  PROMPT_TRANSLATABLE_SOURCE_LANGUAGES_SHORT,
   readOcrCandidateText,
   readPositiveInteger,
   resolveOcrBboxHintLimit,
@@ -1134,7 +1137,7 @@ async function ensureDefaultLlamaRuntimeDownloaded(options = {}) {
     dir: runtime.dir,
     archives,
     requiredFiles: runtime.requiredFiles,
-    installedAt: new Date().toISOString()
+    installedAt: formatStoredTimestamp()
   }, null, 2)}\n`, "utf8");
   emitRuntimeProgress(options, "model_downloading", "Gemma 실행 런타임 설치 완료", runtime.dir, {
     progressMode: "determinate",
@@ -2456,7 +2459,7 @@ function buildCropRetryPrompt(targets = [], options = {}) {
     "Image 1 is the full page for context only. Each following image is an expanded crop for exactly one target id.",
     "Do not detect new ids or output extra ids.",
     "For each target, ignore any previous model OCR/translation. The crop image itself is the authority.",
-    "Read all real Japanese or English text inside that crop for the same target id, then translate it naturally into Korean.",
+    `Read all real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} inside that crop for the same target id, then translate it naturally into Korean.`,
     "Every ko field must be Korean Hangul. Do not output English, Chinese, Japanese, romaji, or pinyin in ko.",
     ...(includeSoundEffects
       ? []
@@ -2490,13 +2493,13 @@ function buildCropRetryPrompt(targets = [], options = {}) {
     "confidence is 0.00 to 1.00 for the corrected OCR+translation.",
     ...(includeSoundEffects
       ? [
-          "If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real Japanese or English text and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00."
+          `If textRole is sound, use confidence 1.00 only when the complete sound effect is unquestionably real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00.`
         ]
       : [
           "If the target is standalone sound/reaction/background lettering, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text]."
         ]),
-    "If the crop is decoration, panel trim, texture, non-Japanese/non-English art, or otherwise not real Japanese or English text, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text].",
-    "If the crop still has readable Japanese or English, never output only [?]; give the best OCR and concise natural Korean.",
+    `If the crop is decoration, panel trim, texture, non-text art, or otherwise not real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}, output type: reject, textRole: nontext, confidence: 1, jp: [non-text], ko: [non-text].`,
+    `If the crop still has readable ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES_SHORT}, never output only [?]; give the best OCR and concise natural Korean.`,
     "Use type nonsolid for every accepted text target.",
     "If textRole is ordinary, keep dialogue/caption/label Korean natural, horizontally readable, and do not apply sound-effect rules.",
     "For ordinary textRole, translate the source lexical meaning. Never replace an ordinary word, noun, label, or dialogue fragment with a Korean sound effect.",
@@ -4140,8 +4143,8 @@ async function ensurePaddleOcrRuntimeUncached(options, state) {
     installBatches,
     targetDir,
     packageSignature: resolveOcrInstallSignature(options),
-    installedAt: new Date().toISOString(),
-    verifiedAt: new Date().toISOString()
+    installedAt: formatStoredTimestamp(),
+    verifiedAt: formatStoredTimestamp()
   });
 
   emitRuntimeProgress(options, "ocr_downloading", "Paddle OCR 설치 완료", packageSummary, {
@@ -5699,7 +5702,7 @@ function createServerLogStream(options, serverPath, launchArgs) {
   try {
     mkdirSync(path.dirname(logPath), { recursive: true });
     const stream = createWriteStream(logPath, { flags: "a" });
-    stream.write(`# ${new Date().toISOString()}\n`);
+    stream.write(`# ${formatStoredTimestamp()}\n`);
     stream.write(`# serverPath=${serverPath}\n`);
     stream.write(`# launchArgs=${launchArgs.join(" ")}\n`);
     return stream;
@@ -5820,7 +5823,7 @@ async function requestTranslation(server, options) {
   requestSummary.performance = {
     wallMs: Math.round(nowMs() - requestStartedAt),
     provider: resolveProviderDisplayName(promptOptions),
-    measuredAt: new Date().toISOString()
+    measuredAt: formatStoredTimestamp()
   };
 
   if (!response.ok) {
@@ -6244,7 +6247,7 @@ async function saveArtifacts(options, result) {
   const payload = {
     label: options.label,
     imagePath: options.imagePath,
-    createdAt: new Date().toISOString(),
+    createdAt: formatStoredTimestamp(),
     settings: {
       port: options.port,
       temperature: options.temperature,

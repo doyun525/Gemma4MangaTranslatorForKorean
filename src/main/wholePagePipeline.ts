@@ -4,6 +4,7 @@ import type { TranslationOptions } from "./appSettings";
 import { logError, logInfo, logWarn } from "./logger";
 import { queryBestGpuMemorySnapshot, shouldReleaseGpuResidentModel } from "./gpuVram";
 import type { MangaPage } from "../shared/types";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import { getAppPaths } from "./appPaths";
 import { getAppSettings } from "./settingsStore";
 import { maybeRetryLowConfidenceItems } from "./pipeline/cropRetry";
@@ -548,7 +549,7 @@ export async function runWholePagePipeline({
       blocks,
       analysisStatus: "completed",
       lastError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: formatStoredTimestamp()
     };
     warnings.push(...buildPageWarnings(page.name, normalizedItems));
     await onPageComplete?.(successPage);
@@ -1012,7 +1013,7 @@ export async function runWholePagePipeline({
         blocks: [],
         analysisStatus: "failed",
         lastError: lastErrorMessage,
-        updatedAt: new Date().toISOString()
+        updatedAt: formatStoredTimestamp()
       };
       completedPagesById.set(page.id, failedPage);
       await onPageFailed?.(failedPage, lastErrorMessage);

@@ -18,6 +18,7 @@ import type {
   WebOverlayRenderBlock,
   WebPageSourceMeta
 } from "../shared/types";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import {
   BLOCK_CORNER_RADIUS_SCALE,
   DEFAULT_BLOCK_CORNER_RADIUS_PX,
@@ -354,7 +355,7 @@ export class WebBrowserManager {
     }
 
     const segmentIndex = item.segmentCount;
-    const now = new Date().toISOString();
+    const now = formatStoredTimestamp();
     const finalUrl = webContents.getURL() || item.startUrl;
     const captureWidth = captureMode === "full-page" ? metrics.documentWidth || metrics.viewportWidth : metrics.viewportWidth;
     const captureHeight = captureMode === "full-page" ? metrics.documentHeight || metrics.viewportHeight : metrics.viewportHeight;
@@ -405,7 +406,7 @@ export class WebBrowserManager {
     const webContents = item.view.webContents;
     const segmentIndex = item.segmentCount;
     const finalUrl = webContents.getURL() || item.startUrl;
-    const now = new Date().toISOString();
+    const now = formatStoredTimestamp();
     const tiles = await captureFullPageTiles(webContents, metrics);
     if (tiles.length === 0) {
       throw new Error("전체 스크롤 캡처 타일이 비어 있습니다.");

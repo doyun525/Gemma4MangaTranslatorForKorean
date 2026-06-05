@@ -11,6 +11,7 @@ import {
 import { existsSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { nativeImage } from "electron";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import type {
   ChapterSnapshot,
   CreateImportFromPreviewRequest,
@@ -211,7 +212,7 @@ async function savePageBlocksUnlocked(request: SavePageBlocksRequest): Promise<C
     throw new Error("저장할 페이지를 찾지 못했습니다.");
   }
 
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   const pages = chapter.pages.map((candidate) =>
     candidate.id === request.pageId
       ? {
@@ -244,7 +245,7 @@ async function renameWorkUnlocked(workId: string, title: string): Promise<Librar
     throw new Error("작품을 찾지 못했습니다.");
   }
   work.title = sanitizeTitle(title, DEFAULT_WORK_TITLE);
-  work.updatedAt = new Date().toISOString();
+  work.updatedAt = formatStoredTimestamp();
   await writeWorkFile(work);
   return listLibrary();
 }
@@ -263,7 +264,7 @@ async function renameChapterUnlocked(chapterId: string, title: string): Promise<
     throw new Error("화를 찾지 못했습니다.");
   }
   chapter.title = await makeUniqueChapterTitle(locator.workId, sanitizeTitle(title, "제목없음"), chapter.id);
-  chapter.updatedAt = new Date().toISOString();
+  chapter.updatedAt = formatStoredTimestamp();
   await writeChapterFile(chapter);
   await touchWork(locator.workId, chapter.updatedAt);
   return listLibrary();
@@ -312,7 +313,7 @@ async function deleteChapterUnlocked(chapterId: string): Promise<LibraryIndex> {
   }
 
   work.chapterOrder = work.chapterOrder.filter((id) => id !== chapter.id);
-  work.updatedAt = new Date().toISOString();
+  work.updatedAt = formatStoredTimestamp();
   await writeWorkFile(work);
 
   const chapterDir = join(WORKS_ROOT, locator.workId, "chapters", locator.chapterId);
@@ -333,7 +334,7 @@ async function reorderChaptersUnlocked(workId: string, chapterIds: string[]): Pr
     throw new Error("작품을 찾지 못했습니다.");
   }
   work.chapterOrder = reorderIds(work.chapterOrder, chapterIds);
-  work.updatedAt = new Date().toISOString();
+  work.updatedAt = formatStoredTimestamp();
   await writeWorkFile(work);
   return listLibrary();
 }
@@ -353,7 +354,7 @@ async function reorderPagesUnlocked(chapterId: string, pageIds: string[]): Promi
   }
   chapter.pageOrder = reorderIds(chapter.pageOrder, pageIds);
   chapter.pages = reorderRecords(chapter.pages, chapter.pageOrder);
-  chapter.updatedAt = new Date().toISOString();
+  chapter.updatedAt = formatStoredTimestamp();
   chapter.status = resolveChapterStatus(chapter.pages);
   await writeChapterFile(chapter);
   await touchWork(locator.workId, chapter.updatedAt);
@@ -381,7 +382,7 @@ async function deletePageUnlocked(chapterId: string, pageId: string): Promise<Ch
 
   chapter.pageOrder = chapter.pageOrder.filter((id) => id !== pageId);
   chapter.pages = chapter.pages.filter((page) => page.id !== pageId);
-  chapter.updatedAt = new Date().toISOString();
+  chapter.updatedAt = formatStoredTimestamp();
   chapter.status = resolveChapterStatus(chapter.pages);
 
   await writeChapterFile(chapter);
@@ -570,7 +571,7 @@ export async function createWebChapter(input: {
   return withLibraryMutation(async () => {
     const target = input.target.mode === "new" ? await createWork(input.target.title || input.title || "웹 번역") : await ensureExistingWork(input.target.workId);
     const createdWorkId = input.target.mode === "new" ? target.id : null;
-    const now = new Date().toISOString();
+    const now = formatStoredTimestamp();
     const chapterId = randomUUID();
     const title = sanitizeTitle(input.title || input.startUrl, "웹 번역");
     const chapterDir = join(WORKS_ROOT, target.id, "chapters", chapterId);
@@ -639,7 +640,7 @@ export async function appendWebCapturePage(input: {
     await mkdir(pagesDir, { recursive: true });
 
     const pageId = randomUUID();
-    const now = new Date().toISOString();
+    const now = formatStoredTimestamp();
     const extension = normalizeWebCaptureExtension(input.extension);
     const outputPath = join(pagesDir, `${String(chapter.pages.length + 1).padStart(3, "0")}-${pageId}${extension}`);
     await writeFile(outputPath, input.imageBuffer);
@@ -718,7 +719,7 @@ async function createImportUnlocked(request: CreateImportFromPreviewRequest): Pr
 
     const latestWork = await ensureExistingWork(target.id);
     latestWork.chapterOrder = [...latestWork.chapterOrder, ...createdChapters.map((chapter) => chapter.id)];
-    latestWork.updatedAt = new Date().toISOString();
+    latestWork.updatedAt = formatStoredTimestamp();
     await writeWorkFile(latestWork);
 
     return {
@@ -751,7 +752,7 @@ export async function exportWorkShareToFile(
   const manifest: ShareManifest = {
     format: SHARE_FORMAT,
     version: SHARE_VERSION,
-    exportedAt: new Date().toISOString(),
+    exportedAt: formatStoredTimestamp(),
     work: {
       id: work.id,
       title: work.title
@@ -850,7 +851,7 @@ async function markChapterPagesRunningUnlocked(chapterId: string, pageIds: strin
     throw new Error("화를 찾지 못했습니다.");
   }
 
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   chapter.pages = chapter.pages.map((page) =>
     pageIds.includes(page.id)
       ? {
@@ -882,7 +883,7 @@ async function updatePageAfterAnalysisUnlocked(chapterId: string, page: MangaPag
     return;
   }
 
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   chapter.pages = chapter.pages.map((record) =>
     record.id === page.id
       ? {
@@ -924,7 +925,7 @@ async function finalizeRunningPagesUnlocked(
     return;
   }
 
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   chapter.pages = chapter.pages.map((page) =>
     pageIds.includes(page.id) && page.analysisStatus === "running"
       ? {
@@ -956,7 +957,7 @@ async function updatePagesAfterAnalysisUnlocked(chapterId: string, pages: MangaP
   }
 
   const pageMap = new Map(pages.map((page) => [page.id, page]));
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   chapter.pages = chapter.pages.map((record) => {
     const next = pageMap.get(record.id);
     if (!next) {
@@ -994,7 +995,7 @@ async function updatePagesAfterInpaintingUnlocked(chapterId: string, pages: Mang
   const chapterDir = resolve(join(WORKS_ROOT, locator.workId, "chapters", locator.chapterId));
   const replacedInpaintedPaths: string[] = [];
   const pageMap = new Map(pages.map((page) => [page.id, page]));
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   chapter.pages = chapter.pages.map((record) => {
     const next = pageMap.get(record.id);
     if (!next) {
@@ -1052,7 +1053,7 @@ async function setPageInpaintingResultUnlocked(
     target?.inpaintedImagePath && inpaintedPathChanged(target.inpaintedImagePath, resolvedInpaintedPath)
       ? [target.inpaintedImagePath]
       : [];
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   chapter.pages = chapter.pages.map((page) =>
     page.id === pageId
       ? {
@@ -1100,7 +1101,7 @@ export function getRunPaths(chapterId: string, runId: string): Promise<ChapterRu
 }
 
 async function createWork(title: string): Promise<LibraryWork> {
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   const work: LibraryWork = {
     id: randomUUID(),
     title: sanitizeTitle(title, DEFAULT_WORK_TITLE),
@@ -1129,7 +1130,7 @@ async function ensureExistingWork(workId: string): Promise<LibraryWork> {
 
 async function materializeChapterFromDraft(workId: string, draft: ImportChapterDraft, requestedTitle: string): Promise<LibraryChapter> {
   await ensureExistingWork(workId);
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   const chapterId = randomUUID();
   const title = sanitizeTitle(requestedTitle || draft.title, "제목없음");
   const chapterDir = join(WORKS_ROOT, workId, "chapters", chapterId);
@@ -1198,7 +1199,7 @@ async function materializePageRecord(pageDraft: ImportPageDraft, pagesDir: strin
   }
 
   const size = await readDecodedImportImageSize(outputPath, pageDraft.name);
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
 
   return {
     id: pageId,
@@ -1246,7 +1247,7 @@ async function importWorkShareAsNewWork(sharePackage: SharePackage, request: Wor
 
     const chapterIds = createdChapters.map((chapter) => chapter.id);
     work.chapterOrder = chapterIds;
-    work.updatedAt = new Date().toISOString();
+    work.updatedAt = formatStoredTimestamp();
     await writeWorkFile(work);
 
     return {
@@ -1288,7 +1289,7 @@ async function importWorkShareIntoExistingWork(sharePackage: SharePackage, reque
   const finalChapterIds: string[] = [];
   const updatedExistingChapters: ChapterFile[] = [];
   const createdPackageChapters: ChapterFile[] = [];
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
 
   try {
     for (const entry of request.entries) {
@@ -1385,7 +1386,7 @@ async function materializeSharedChapter({
   entries: Map<string, ZipEntryLike>;
   requestedTitle: string;
 }): Promise<ChapterFile> {
-  const now = new Date().toISOString();
+  const now = formatStoredTimestamp();
   const chapterId = randomUUID();
   const chapterDir = join(WORKS_ROOT, workId, "chapters", chapterId);
   const pagesDir = join(chapterDir, "pages");
@@ -2085,7 +2086,7 @@ async function cleanupLibraryOrphansUnlocked(): Promise<LibraryCleanupResult> {
       await writeWorkFile({
         ...work,
         chapterOrder: retainedChapterIds,
-        updatedAt: new Date().toISOString()
+        updatedAt: formatStoredTimestamp()
       });
     }
 

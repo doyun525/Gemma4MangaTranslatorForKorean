@@ -2,6 +2,7 @@ import { app } from "electron";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { formatStoredTimestamp } from "../shared/storedTimestamp";
 
 configureDevelopmentElectronStorage();
 
@@ -25,7 +26,7 @@ function writeBootstrapLog(message: string, detail?: unknown): void {
   try {
     const logPath = bootstrapLogPath();
     mkdirSync(dirname(logPath), { recursive: true });
-    const line = `[${new Date().toISOString()}] ${message}${detail === undefined ? "" : ` ${serialize(detail)}`}\n`;
+    const line = `[${formatStoredTimestamp()}] ${message}${detail === undefined ? "" : ` ${serialize(detail)}`}\n`;
     appendFileSync(logPath, line, "utf8");
   } catch {
     // Ignore bootstrap logging failures so the app can continue trying to start.

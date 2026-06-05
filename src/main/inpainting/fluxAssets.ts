@@ -3,6 +3,7 @@ import { createWriteStream, existsSync, readdirSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { AdmZip } from "../libraryStore/zipSafety";
+import { formatStoredTimestamp } from "../../shared/storedTimestamp";
 
 export const FLUX_RUNTIME_EXECUTABLE = "mgt-flux-klein.exe";
 export const FLUX_MODEL_REPO = "unsloth/FLUX.2-klein-4B-GGUF";
@@ -162,7 +163,7 @@ async function ensureFluxCudaRuntime(options: {
   await writeFile(runtimeMarkerPath(cudaDir), `${JSON.stringify({
     cudaManifest: CUDA_REDIST_MANIFEST_URL,
     cudnnManifest: CUDNN_REDIST_MANIFEST_URL,
-    installedAt: new Date().toISOString()
+    installedAt: formatStoredTimestamp()
   }, null, 2)}\n`, "utf8");
   options.onProgress?.({
     progressText: "Flux CUDA 런타임 설치 완료",
@@ -419,7 +420,7 @@ async function downloadToFile(options: {
     await writeRemoteFileMetadata(options.outputPath, {
       url: options.url,
       bytes: receivedBytes,
-      downloadedAt: new Date().toISOString()
+      downloadedAt: formatStoredTimestamp()
     });
     emitDownloadProgress(options, responseTotalBytes > 0 ? responseTotalBytes : receivedBytes, responseTotalBytes || receivedBytes, true);
   } catch (error) {

@@ -1,4 +1,5 @@
 import type { MangaPage } from "../../shared/types";
+import { formatStoredTimestamp } from "../../shared/storedTimestamp";
 import type { OcrBboxResult, RequestSummary, TranslationResult } from "./types";
 
 export function isOcrResultNoTextDetected(result: OcrBboxResult | null | undefined): boolean {
@@ -15,6 +16,6 @@ export function buildNoTextCompletedPage(page: MangaPage): MangaPage {
     blocks: [],
     analysisStatus: "completed",
     lastError: undefined,
-    updatedAt: new Date().toISOString()
+    updatedAt: formatStoredTimestamp()
   };
 }

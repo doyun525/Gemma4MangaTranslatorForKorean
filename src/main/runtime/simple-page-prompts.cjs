@@ -9,6 +9,42 @@ function truncateText(value, maxLength) {
 const DEFAULT_OCR_BBOX_HINT_LIMIT = 80;
 const MAX_OCR_BBOX_HINT_LIMIT = 600;
 
+const PROMPT_TRANSLATABLE_SOURCE_LANGUAGES =
+  "Japanese, English, Chinese (Simplified or Traditional), or other readable source-language text";
+const PROMPT_TRANSLATABLE_SOURCE_LANGUAGES_SHORT =
+  "Japanese, English, Chinese, or mixed source-language text";
+const PROMPT_SOURCE_PAGE_INTRO = `Source text may be ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES_SHORT}.`;
+const PROMPT_IMAGE_CONTEXT_MULTIVIEW = `You are given the same manga page in multiple full-page renderings. ${PROMPT_SOURCE_PAGE_INTRO}`;
+const PROMPT_IMAGE_CONTEXT_FULL_PAGE = `You are given one full-page manga image. ${PROMPT_SOURCE_PAGE_INTRO}`;
+const PROMPT_IMAGE_CONTEXT_REGION_CROP = `You are given one user-selected crop from a manga page. ${PROMPT_SOURCE_PAGE_INTRO}`;
+const PROMPT_DETECT_TRANSLATABLE_TEXT = `Detect every visible text group written in ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} and translate it into concise Korean.`;
+const PROMPT_ONLY_REAL_SOURCE_TEXT = `Only output real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text.`;
+const PROMPT_ONLY_REAL_SOURCE_TEXT_OCR = `Only output real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}. Skip decorative marks, unreadable scraps, and non-text OCR noise.`;
+const PROMPT_CONFIDENCE_TRANSLATABLE_TEXT = `confidence is your confidence from 0.00 to 1.00 that the item is real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}, correctly read, correctly typed, and correctly translated.`;
+const PROMPT_SFX_CONFIDENCE_TRANSLATABLE_TEXT = `For textRole sound, use confidence 1.00 only when the whole sound effect is unquestionably real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00; the app will discard uncertain sound-effect records.`;
+const PROMPT_JP_FIELD_SOURCE_NOTE =
+  "The jp field stores the original source text regardless of source language (Japanese, English, Chinese, etc.). If jp has multiple visible source lines, put every readable source line in jp. Continuation lines after jp: belong to jp until the ko: key.";
+const PROMPT_KO_HANGUL_ONLY =
+  "The ko field MUST be Korean written in Hangul. Never write English, Chinese, romaji, pinyin, or source-language text in ko except unavoidable names, numbers, or short symbols.";
+const PROMPT_TRANSLATE_INTO_KOREAN_ONLY =
+  `Every ko field must be Korean Hangul. Translate ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES_SHORT} into Korean only.`;
+const PROMPT_OCR_RECORD_TRANSLATE_INTO_KOREAN =
+  "For every translatable record, ko must be Korean Hangul. If the source text is Japanese, English, Chinese, or mixed, translate it into Korean only.";
+const PROMPT_SYSTEM_TRANSLATE_ALL = `Translate all ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} into natural Korean.`;
+const PROMPT_INCOMPLETE_SOURCE_TEXT =
+  `Do not add records for isolated symbol fragments, stray decorative marks, page numbers, or clipped scraps that are not complete ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}.`;
+const PROMPT_26B_PHYSICAL_TEXT_AREA =
+  "Never output duplicate or overlapping records for the same physical source-language text area. One glyph cluster/container must become one record, not stacked blocks.";
+const PROMPT_OCR_HINT_IMAGE_AUTHORITY = `OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} and Korean translation.`;
+const PROMPT_OCR_CANDIDATE_TEXT_SLOT = `Treat each candidate as a locked text slot. For every candidate that contains ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}, output one record with that same id and no geometry fields.`;
+const PROMPT_OCR_CANDIDATE_GEOMETRY_SLOT = `Treat each candidate as a locked geometry slot. For every candidate that contains readable source-language glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.`;
+const PROMPT_OCR_CANDIDATE_LINES_TEXT = "For each candidate, include every readable source-language line supported by ocrText. A candidate record is incomplete if jp or ko omits a clearly present line from the same candidate.";
+const PROMPT_OCR_CANDIDATE_LINES_IMAGE = "For each candidate, read every visible source-language line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.";
+const PROMPT_OCR_MISSING_TEXT_SCAN = `OCR candidates are a floor, not a ceiling. After processing candidates, inspect the whole Image 1 again for missing ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}.`;
+const PROMPT_OCR_MISSING_TEXT_ADD = (maxCandidateId) =>
+  `If the detector missed visible ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES}, add a new record with id greater than ${maxCandidateId}. Never reuse a candidate id for missing text outside that candidate rectangle.`;
+const PROMPT_OCR_NEW_RECORD_GLYPHS = "New records are allowed only for clear readable source-language glyphs that are not covered by any candidate.";
+
 function isOpenAICodexProvider(options = {}) {
   return String(options.modelProvider ?? "").trim() === "openai-codex";
 }
@@ -26,7 +62,7 @@ function shouldUse26BDuplicatePromptProfile(options = {}) {
 }
 
 const GEMMA_26B_DUPLICATE_OUTPUT_LINES = [
-  "One physical Japanese text area may appear only once in the output. Never output multiple records whose boxes sit on the same glyph cluster, same speech bubble text, same caption text, or same SFX group.",
+  "One physical source-language text area may appear only once in the output. Never output multiple records whose boxes sit on the same glyph cluster, same speech bubble text, same caption text, or same SFX group.",
   "If two possible records would occupy the same place or mostly cover the same visible glyphs, keep one record only. Put all readable source lines for that same area into that one jp field and one Korean translation.",
   "Never stack several records at the same x/y position to represent separate lines, columns, words, or fragments inside one visual text area.",
   "Never output a later correction record that repeats, contains, or is contained by the jp text of an earlier record from the same visual area. Correct the original record instead of adding another one."
@@ -52,7 +88,7 @@ const GEMMA_26B_OCR_DUPLICATE_LINES = [
   "Each candidate id is single-use. A candidate rectangle can produce at most one output record, even when the text has several vertical columns or several visible lines.",
   "Do not create another record whose bbox sits on the same place as an accepted candidate. If the text is inside or mostly inside a candidate rectangle, it belongs to that candidate id.",
   "Before adding any new record, compare it against every candidate bbox. If the new bbox would cover the same glyph cluster or the same visual text area as a candidate, keep the candidate record only.",
-  "If one OCR candidate covers several Japanese lines or columns inside the same visual container, keep them as one record for that candidate; do not split them into multiple overlapping records.",
+  "If one OCR candidate covers several source-language lines or columns inside the same visual container, keep them as one record for that candidate; do not split them into multiple overlapping records.",
   "New ids are for genuinely missed text only, not for correcting, enlarging, summarizing, or re-reading an existing candidate. If a candidate needs a better jp/ko, fix that candidate record with the same id.",
   "A new id is invalid if its jp repeats, partially repeats, or summarizes text already assigned to a candidate or earlier record in the same speech bubble/caption/SFX area."
 ];
@@ -88,13 +124,13 @@ const OCR_TEXT_OUTPUT_SCHEMA = [
 const OVERLAY_PROMPT_SECTIONS = [
   [
     "Task",
-    "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English.",
+    PROMPT_IMAGE_CONTEXT_MULTIVIEW,
     "Image 1 is the coordinate-authority full page. Assist images are only for reading the same page.",
-    "Detect every visible Japanese or English text group and translate it into concise Korean.",
+    PROMPT_DETECT_TRANSLATABLE_TEXT,
     "Scan the entire page before writing records; do not stop after the first obvious text.",
     "First identify the exact source glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
     "Before reading dialogue text, segment the visible speech balloons themselves. Each distinct balloon lobe and each separated dialogue text cluster becomes a separate dialogue record.",
-    "Only output real Japanese or English text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
+    PROMPT_ONLY_REAL_SOURCE_TEXT
   ],
   [
     "Output",
@@ -103,11 +139,11 @@ const OVERLAY_PROMPT_SECTIONS = [
     "Do not copy placeholder text. Estimate every value from the actual glyphs in Image 1.",
     "textRole is ordinary for speech bubbles, captions, narration, labels, signs, and notes. textRole is sound only for standalone printed sound/reaction lettering.",
     "A word or phrase inside a speech bubble, caption, note, sign, or label remains ordinary even when it is short, vertical, handwritten, or visually casual.",
-    "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese or English text, correctly read, correctly typed, and correctly translated.",
+    PROMPT_CONFIDENCE_TRANSLATABLE_TEXT,
     "Use confidence below 0.72 when the crop is hard to read, partly clipped, possibly decorative, or the translation may be uncertain.",
-    "For textRole sound, use confidence 1.00 only when the whole sound effect is unquestionably real Japanese or English text and every glyph, including final/trailing kana or letters, is read correctly. If there is any doubt, use confidence below 1.00; the app will discard uncertain sound-effect records.",
-    "The jp field stores the original source text even when the source language is English. If jp has multiple visible source lines, put every readable source line in jp. Continuation lines after jp: belong to jp until the ko: key.",
-    "The ko field MUST be Korean written in Hangul. Never write English, Chinese, romaji, pinyin, or source-language text in ko except unavoidable names, numbers, or short symbols.",
+    PROMPT_SFX_CONFIDENCE_TRANSLATABLE_TEXT,
+    PROMPT_JP_FIELD_SOURCE_NOTE,
+    PROMPT_KO_HANGUL_ONLY,
     "If you are unsure, still write the best concise Korean translation in ko. Do not copy jp into ko and do not translate ko into English.",
     "Preserve Arabic numerals, slashes, decimal points, counters, issue numbers, chapter/page fractions, and UI pagination patterns. Do not spell numbers out in Korean unless the original source itself writes the number as words.",
     "Preserve sentence-ending intent in ko. If the source is a question, the Korean ko should normally end with ?. If the source is an exclamation or emphatic shout, keep ! when it preserves the tone. Do not drop ? or ! from dialogue, captions, or labels when it changes the reading.",
@@ -161,7 +197,7 @@ const OVERLAY_PROMPT_SECTIONS = [
     "For outlined SFX, the bbox follows the outermost visible contour of the outline, not only the dark center stroke.",
     "SFX is often gray, slanted, outlined, partly behind characters, or outside OCR candidates. Do a separate SFX pass after dialogue/captions and add every clear kana sound effect.",
     "Do not invent SFX from sweat drops, vertical panel trim, furniture lines, wall patterns, texture, impact lines, or isolated non-character strokes.",
-    "Do not add records for isolated symbol fragments, stray decorative marks, page numbers, or clipped scraps that are not complete Japanese or English text.",
+    PROMPT_INCOMPLETE_SOURCE_TEXT,
     "Include meaningful short interjections, names, captions, and SFX."
   ],
   [
@@ -206,7 +242,7 @@ function buildSystemPrompt(options = {}) {
   const includeSoundEffects = shouldIncludeSoundEffects(options);
   const lines = [
     "You are an OCR and manga-translation engine.",
-    "Translate all Japanese and English source text into natural Korean.",
+    PROMPT_SYSTEM_TRANSLATE_ALL,
     "Every ko field must be Korean Hangul. Never answer ko in English, Chinese, Japanese, romaji, or pinyin.",
     "Return only the machine-readable record format requested by the user prompt.",
     isOcrTextOnlyTranslationMode(options)
@@ -220,7 +256,7 @@ function buildSystemPrompt(options = {}) {
     lines.push(
       "For SFX records, output bare Korean effect lettering only; do not wrap it in parentheses/brackets/quotes or turn it into a stage direction.",
       "For SFX records, choose compact Korean effect lettering that fits the scene and rhythm. Do not mechanically transliterate Japanese kana, and do not force ambient sounds into dialogue words or action descriptions.",
-      "For SFX records, confidence must be 1.00 only when the complete sound effect is unquestionably real Japanese or English text and fully read; otherwise use confidence below 1.00."
+      `For SFX records, confidence must be 1.00 only when the complete sound effect is unquestionably real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} and fully read; otherwise use confidence below 1.00.`
     );
   } else {
     lines.push(
@@ -232,11 +268,7 @@ function buildSystemPrompt(options = {}) {
   }
 
   if (shouldUse26BDuplicatePromptProfile(options)) {
-    lines.splice(
-      4,
-      0,
-      "Never output duplicate or overlapping records for the same physical Japanese text area. One glyph cluster/container must become one record, not stacked blocks."
-    );
+    lines.splice(4, 0, PROMPT_26B_PHYSICAL_TEXT_AREA);
   }
 
   if (options.regionCropMode) {
@@ -258,9 +290,9 @@ function buildOcrTextTaskSection(options = {}) {
     multiPageTextBatch
       ? "Use the OCR text candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
       : "Use the OCR text candidates as the only source of evidence.",
-    "Translate every listed candidate that contains real Japanese or English text into concise Korean.",
+    `Translate every listed candidate that contains real ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} into concise Korean.`,
     "Do not add records beyond the listed candidate ids, and do not invent text that is not supported by a candidate's ocrText or label.",
-    "Only output real Japanese or English text. Skip decorative marks, unreadable scraps, and non-text OCR noise."
+    PROMPT_ONLY_REAL_SOURCE_TEXT_OCR
   ];
 }
 
@@ -276,10 +308,10 @@ function buildOcrTextOutputSection(options = {}) {
     includeSoundEffects
       ? "textRole is sound only for standalone printed sound/reaction lettering supported by the candidate text."
       : "Never output textRole sound. Every accepted record must use textRole ordinary.",
-    "confidence is your confidence from 0.00 to 1.00 that the item is real Japanese or English text, correctly read, correctly typed, and correctly translated.",
+    PROMPT_CONFIDENCE_TRANSLATABLE_TEXT,
     "Use confidence below 0.72 when ocrText is empty, garbled, possibly decorative, or the translation may be uncertain.",
-    "The jp field stores the original source text even when the source language is English. If jp has multiple readable source lines, put every readable source line in jp.",
-    "The ko field MUST be Korean written in Hangul. Never write English, Chinese, romaji, pinyin, or source-language text in ko except unavoidable names, numbers, or short symbols.",
+    PROMPT_JP_FIELD_SOURCE_NOTE.replace("If jp has multiple visible source lines", "If jp has multiple readable source lines"),
+    PROMPT_KO_HANGUL_ONLY,
     "If you are unsure, still write the best concise Korean translation in ko. Do not copy jp into ko and do not translate ko into English.",
     "Preserve Arabic numerals, slashes, decimal points, counters, issue numbers, chapter/page fractions, and UI pagination patterns.",
     "Preserve sentence-ending intent in ko. If the source is a question, the Korean ko should normally end with ?. If the source is an exclamation or emphatic shout, keep ! when it preserves the tone.",
@@ -392,7 +424,7 @@ function applyModelSpecificPromptProfile(sections, options = {}) {
   }
 
   insertSectionLinesBefore(sections, "Output", "Do not copy placeholder text. Estimate every value from the actual glyphs in Image 1.", GEMMA_26B_DUPLICATE_OUTPUT_LINES);
-  insertSectionLinesAfter(sections, "Segmentation", "Inside one speech bubble, group all Japanese glyph lines from that same bubble into one item.", GEMMA_26B_DUPLICATE_SEGMENTATION_LINES);
+  insertSectionLinesAfter(sections, "Segmentation", "Inside one speech bubble, group all source glyph lines from that same bubble into one item.", GEMMA_26B_DUPLICATE_SEGMENTATION_LINES);
 }
 
 function insertSectionLinesBefore(sections, title, anchorLine, lines) {
@@ -469,10 +501,10 @@ function buildTaskSection(options = {}, imageVariants = []) {
       : textOnlyMode
       ? "You are given OCR candidate records from a manga page. No image is included in this request."
       : hasAssistImages
-        ? "You are given the same manga page in multiple full-page renderings. Source text may be Japanese, English, or mixed Japanese/English."
+        ? PROMPT_IMAGE_CONTEXT_MULTIVIEW
         : regionCropMode
-          ? "You are given one user-selected crop from a manga page. Source text may be Japanese, English, or mixed Japanese/English."
-          : "You are given one full-page manga image. Source text may be Japanese, English, or mixed Japanese/English.",
+          ? PROMPT_IMAGE_CONTEXT_REGION_CROP
+          : PROMPT_IMAGE_CONTEXT_FULL_PAGE,
     textOnlyMode
       ? multiPageTextBatch
         ? "Use the OCR text candidates as the only source of evidence. Candidate labels contain page_N so records can be routed back to the correct page."
@@ -482,12 +514,12 @@ function buildTaskSection(options = {}, imageVariants = []) {
         : regionCropMode
           ? "Image 1 is the coordinate-authority selected crop."
           : "Image 1 is the coordinate-authority full page.",
-    "Detect every visible Japanese or English text group and translate it into concise Korean.",
-    "Every ko field must be Korean Hangul. Translate Japanese, English, or mixed source text into Korean only.",
+    PROMPT_DETECT_TRANSLATABLE_TEXT,
+    PROMPT_TRANSLATE_INTO_KOREAN_ONLY,
     "Scan the entire page before writing records; do not stop after the first obvious text.",
     "First identify the exact source glyph strokes for each item, then write the record. Do not estimate from the speech bubble or panel shape.",
     "Before reading dialogue text, segment the visible speech balloons themselves. Each distinct balloon lobe and each separated dialogue text cluster becomes a separate dialogue record.",
-    "Only output real Japanese or English text. Do not output decorative line art, background marks, panel ornaments, texture, or unreadable marks as text."
+    PROMPT_ONLY_REAL_SOURCE_TEXT
   ];
 }
 
@@ -505,9 +537,9 @@ function buildRegionCropSection(options = {}) {
     includeSoundEffects
       ? "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate containers: separate speech bubbles/lobes, separate caption plates, or separate SFX glyph groups."
       : "Do not treat the whole crop as one text item. Create multiple records only for multiple visually separate ordinary text containers: separate speech bubbles/lobes or separate caption plates. Ignore SFX glyph groups.",
-    "If the crop contains one speech bubble or one caption plate, output exactly one record for all readable Japanese or English text in that container.",
+    `If the crop contains one speech bubble or one caption plate, output exactly one record for all readable ${PROMPT_TRANSLATABLE_SOURCE_LANGUAGES} in that container.`,
     "Inside one speech bubble, never split by source text column, text line, word, sentence fragment, punctuation gap, or line break.",
-    "For vertical dialogue in one bubble, jp must include all columns in natural Japanese reading order, and ko must be one coherent Korean translation for that bubble.",
+    "For vertical dialogue in one bubble, jp must include all columns in natural source-language reading order, and ko must be one coherent Korean translation for that bubble.",
     "Only split a dialogue item when there is a visible separate speech bubble/lobe or clearly separate dialogue container, not merely because columns are separated by blank paper.",
     "The bbox for that one record should tightly cover the union of all visible source glyph ink belonging to the same bubble/caption, not the whole bubble paper."
   ];
@@ -598,12 +630,10 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
             "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
           ]
         : [
-            "OCR text hints may be wrong, incomplete, or split strangely. Use Image 1 as the authority for the actual Japanese or English source text and Korean translation.",
+            PROMPT_OCR_HINT_IMAGE_AUTHORITY,
             "Use the OCR text hint to keep each translated record attached to the correct candidate id, especially when nearby candidates are close together."
           ]),
-    textOnlyMode
-      ? "Treat each candidate as a locked text slot. For every candidate that contains Japanese or English text, output one record with that same id and no geometry fields."
-      : "Treat each candidate as a locked geometry slot. For every candidate that contains Japanese or English glyphs, output one record with that same id and the exact x1, y1, x2, y2 numbers shown below.",
+    textOnlyMode ? PROMPT_OCR_CANDIDATE_TEXT_SLOT : PROMPT_OCR_CANDIDATE_GEOMETRY_SLOT,
     ...(use26bDuplicateProfile ? [GEMMA_26B_OCR_DUPLICATE_LINES[0]] : []),
     ...(multiPageTextBatch
       ? [
@@ -611,16 +641,14 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
           "Never merge candidates across different page labels. Return each accepted record with the same numeric candidate id shown below."
         ]
       : []),
-    "For every translatable record, ko must be Korean Hangul. If the source text is Japanese, English, or mixed, translate it into Korean only.",
+    PROMPT_OCR_RECORD_TRANSLATE_INTO_KOREAN,
     "Keep Arabic numerals and compact UI numbering exactly as digits and separators in ko. Examples: 2/22 stays 2/22, 104/104 stays 104/104, Chapter 104/104 Page 2/22 may become 챕터 104/104 페이지 2/22.",
     `Required candidate ids: ${candidateIds.join(", ")}.`,
     textOnlyMode
       ? "Translate only the text supported by that candidate's ocrText and label; do not move the rectangle to a different nearby text group."
       : "Read and translate only the text inside that candidate rectangle plus a tiny visual margin; do not move the rectangle to a different nearby text group.",
     ...(use26bDuplicateProfile ? GEMMA_26B_OCR_DUPLICATE_LINES.slice(1) : []),
-    textOnlyMode
-      ? "For each candidate, include every readable Japanese or English line supported by ocrText. A candidate record is incomplete if jp or ko omits a clearly present line from the same candidate."
-      : "For each candidate, read every visible Japanese or English line inside the rectangle. A candidate record is incomplete if jp or ko contains only the first line while lower or side lines remain readable.",
+    textOnlyMode ? PROMPT_OCR_CANDIDATE_LINES_TEXT : PROMPT_OCR_CANDIDATE_LINES_IMAGE,
     textOnlyMode
       ? "Write concise ko. Do not output forced line breaks just because OCR split the source text."
       : "Use the candidate rectangle size to choose natural line breaks for ko. Put continuation lines directly after ko: and before the next record.",
@@ -643,9 +671,9 @@ function buildOcrBboxHintSection(options = {}, imageVariants = []) {
           "Do not invent records for text that is not present in the OCR candidate list."
         ]
       : [
-          "OCR candidates are a floor, not a ceiling. After processing candidates, inspect the whole Image 1 again for missing Japanese or English text.",
-          `If the detector missed visible Japanese or English text, add a new record with id greater than ${maxCandidateId}. Never reuse a candidate id for missing text outside that candidate rectangle.`,
-          "New records are allowed only for clear Japanese or English glyphs that are not covered by any candidate.",
+          PROMPT_OCR_MISSING_TEXT_SCAN,
+          PROMPT_OCR_MISSING_TEXT_ADD(maxCandidateId),
+          PROMPT_OCR_NEW_RECORD_GLYPHS,
           ...(includeSoundEffects
             ? [
                 "For new missing SFX records, search especially near character bodies, panel edges, and lower panels where OCR often misses gray or outlined kana. The bbox must visibly cover kana/SFX glyph strokes.",
@@ -792,6 +820,8 @@ function resolveOcrBboxHintLimit(options = {}) {
 
 module.exports = {
   PROMPT_KO_BBOX_LINES_MULTIVIEW,
+  PROMPT_TRANSLATABLE_SOURCE_LANGUAGES,
+  PROMPT_TRANSLATABLE_SOURCE_LANGUAGES_SHORT,
   buildSystemPrompt,
   getOverlayPrompt,
   readOcrCandidateText,
