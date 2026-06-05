@@ -378,7 +378,7 @@ function normalizeItem(item, index) {
     return null;
   }
 
-  if (isPlaceholderOnly(normalizedKo) && (!normalizedJp || isPlaceholderOnly(normalizedJp))) {
+  if (isPlaceholderOnly(normalizedJp) || isPlaceholderOnly(normalizedKo)) {
     return null;
   }
 
