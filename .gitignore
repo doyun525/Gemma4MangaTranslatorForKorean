@@ -31,3 +31,4 @@ settings.json
 window-state.json
 tools/.downloads/cudart-llama-bin-win-cuda-12.4-x64.zip
 tools/.downloads/llama-b8833-bin-win-cuda-12.4-x64.zip
+llm-vram-projections.json
