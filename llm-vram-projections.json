@@ -43,6 +43,10 @@
     "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|full|8192|1024|1024|1024|kv1|mm1|draft0|": {
       "updatedAt": "2026-06-05T18:03:09.045+09:00",
       "modelBufferMb": 12770
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|economy|8192|512|256|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T21:07:19.343+09:00",
+      "modelBufferMb": 12770
     }
   }
 }

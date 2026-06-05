@@ -23,6 +23,7 @@ import { buildNoTextCompletedPage, isOcrResultNoTextDetected, isRequestNoTextDet
 import { prepareOcrHintsForPages } from "./pipeline/ocrHints";
 import { applySampledBackgroundColors } from "./pipeline/blockBackground";
 import {
+  applyOcrCandidateSourceTextLocks,
   applyOcrCandidateGeometryLocks,
   buildPageWarnings,
   filterRejectedOrUncertainSoundItems,
@@ -417,6 +418,24 @@ export async function runWholePagePipeline({
 
     const result = await runtime.requestTranslation(server, pageOptions);
     await runtime.saveArtifacts(pageOptions, result);
+    if (String(pageOptions.translationMode ?? "") === "ocr-text") {
+      const parsedRecords = parseOcrTextResponseRecords(result.outputText);
+      const recordById = new Map(ocrHints.map((hint, hintIndex) => {
+        const fallbackId = hintIndex + 1;
+        const id = readHintId(hint, fallbackId) ?? fallbackId;
+        return [id, { hint, id }] as const;
+      }));
+      const items = parsedRecords.flatMap((item) => {
+        const record = recordById.get(item.id);
+        return record ? [buildOverlayItemFromOcrTextRecord(item, record.hint, page, record.id)] : [];
+      });
+      return {
+        items,
+        requestBody: result.requestBody,
+        outputText: result.outputText,
+        noTextDetected: items.length === 0 && isRequestNoTextDetected(result.requestBody)
+      };
+    }
     const items = parseTranslationOverlayItems(result.outputText, page, pageOptions);
     return {
       items,
@@ -594,14 +613,16 @@ export async function runWholePagePipeline({
       throw bboxError;
     }
 
+    const ocrBboxHints = getOcrBboxHints(translation.requestBody);
+    const sourceLockedItems = applyOcrCandidateSourceTextLocks(items, ocrBboxHints);
     const overlayItemsPath = join(pageOptions.outputDir, "overlay-items.json");
     await mkdir(pageOptions.outputDir, { recursive: true });
-    await writeFile(overlayItemsPath, `${JSON.stringify({ items }, null, 2)}\n`, "utf8");
+    await writeFile(overlayItemsPath, `${JSON.stringify({ items: sourceLockedItems }, null, 2)}\n`, "utf8");
 
     let normalizedItems = applyOcrCandidateGeometryLocks(
-      normalizeOverlayItemBboxes(items, page, getBboxNormalizationOptions(translation.requestBody)),
+      normalizeOverlayItemBboxes(sourceLockedItems, page, getBboxNormalizationOptions(translation.requestBody)),
       page,
-      getOcrBboxHints(translation.requestBody),
+      ocrBboxHints,
       pageOptions
     );
     normalizedItems = await maybeRetryLowConfidenceItems({
@@ -1163,6 +1184,11 @@ type OcrTextResponseRecord = {
 };
 
 function parseOcrTextResponseRecords(outputText: string): OcrTextResponseRecord[] {
+  const inlineRecords = parseInlineOcrTextResponseRecords(outputText);
+  if (inlineRecords.length > 0) {
+    return inlineRecords;
+  }
+
   const records: OcrTextResponseRecord[] = [];
   let current: Partial<OcrTextResponseRecord> | null = null;
   let currentTextKey: "jp" | "ko" | null = null;
@@ -1242,6 +1268,73 @@ function parseOcrTextResponseRecords(outputText: string): OcrTextResponseRecord[
   return records;
 }
 
+function parseInlineOcrTextResponseRecords(outputText: string): OcrTextResponseRecord[] {
+  const text = String(outputText ?? "")
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+  if (!text) {
+    return [];
+  }
+
+  const idMatches = [...text.matchAll(/(?:^|\s)id\s*:\s*(\d+)\b/gi)];
+  if (idMatches.length === 0) {
+    return [];
+  }
+
+  const records: OcrTextResponseRecord[] = [];
+  for (const [index, idMatch] of idMatches.entries()) {
+    const id = Number(idMatch[1]);
+    if (!Number.isInteger(id) || id <= 0 || idMatch.index === undefined) {
+      continue;
+    }
+    const segmentStart = idMatch.index + idMatch[0].length;
+    const segmentEnd = idMatches[index + 1]?.index ?? text.length;
+    const segment = text.slice(segmentStart, segmentEnd);
+    const fields = parseInlineOcrTextFields(segment);
+    const ko = String(fields.ko ?? "").trim();
+    if (!ko) {
+      continue;
+    }
+    records.push({
+      id,
+      type: typeof fields.type === "string" ? fields.type : undefined,
+      textRole: typeof fields.textRole === "string" ? fields.textRole : undefined,
+      direction: typeof fields.direction === "string" ? fields.direction : undefined,
+      angle: readFiniteNumber(fields.angle),
+      fontSize: readFiniteNumber(fields.fontSize),
+      confidence: readFiniteNumber(fields.confidence),
+      jp: String(fields.jp ?? "").trim(),
+      ko
+    });
+  }
+  return records;
+}
+
+function parseInlineOcrTextFields(segment: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  const keyPattern = /\b(type|textRole|text_role|role|direction|angle|fontSize|font_size|font|confidence|jp|ko)\s*:\s*/gi;
+  const matches = [...segment.matchAll(keyPattern)];
+  for (const [index, match] of matches.entries()) {
+    if (match.index === undefined) {
+      continue;
+    }
+    const key = normalizeOcrTextRecordKey(match[1]);
+    const valueStart = match.index + match[0].length;
+    const valueEnd = matches[index + 1]?.index ?? segment.length;
+    const value = segment.slice(valueStart, valueEnd).trim().replace(/[,]$/g, "").trim();
+    if (value) {
+      fields[key] = value;
+    }
+  }
+  return fields;
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function parseDelimitedOcrTextResponseRecord(line: string): OcrTextResponseRecord | null {
   const fields = line.split("\t").map((value) => value.trim()).filter(Boolean);
   if (fields.length >= 8) {
@@ -1315,18 +1408,55 @@ function normalizeOcrTextRecordKey(key: string): string {
 }
 
 function buildOverlayItemFromOcrTextRecord(record: OcrTextResponseRecord, hint: unknown, page: MangaPage, id: number): OverlayItem {
+  const ocrSourceText = readHintOcrText(hint);
+  const modelSourceText = String(record.jp ?? "").trim();
+  const sourceTextMismatch = isLikelyOcrTextSourceMismatch(ocrSourceText, modelSourceText);
+  const confidence = Number.isFinite(record.confidence) ? Number(record.confidence) : 0.9;
   return {
     id,
     type: String(record.type ?? "nonsolid").trim().toLowerCase() === "reject" ? "reject" : "nonsolid",
     textRole: normalizeOverlayTextRole(record.textRole),
     bbox: buildNormalizedBboxFromOcrHint(hint, page),
-    jp: String(record.jp ?? "").trim(),
+    jp: ocrSourceText || modelSourceText,
     ko: record.ko.trim(),
     direction: normalizeOverlayDirection(record.direction),
-    angle: Number.isFinite(record.angle) ? Number(record.angle) : 0,
+    angle: 0,
     fontSize: Number.isFinite(record.fontSize) ? Number(record.fontSize) : undefined,
-    confidence: Number.isFinite(record.confidence) ? Number(record.confidence) : 0.9
+    confidence: sourceTextMismatch ? Math.min(confidence, 0.69) : confidence,
+    sourceTextLocked: Boolean(ocrSourceText),
+    sourceTextMismatch
   };
+}
+
+function readHintOcrText(hint: unknown): string {
+  if (!hint || typeof hint !== "object") {
+    return "";
+  }
+  const record = hint as Record<string, unknown>;
+  return String(record.ocrText ?? record.text ?? record.sourceText ?? "").trim();
+}
+
+function isLikelyOcrTextSourceMismatch(ocrSourceText: string, modelSourceText: string): boolean {
+  const ocrText = normalizeSourceTextForComparison(ocrSourceText);
+  const modelText = normalizeSourceTextForComparison(modelSourceText);
+  if (!ocrText || !modelText || ocrText === modelText || modelText.includes(ocrText)) {
+    return false;
+  }
+
+  if (ocrText.includes(modelText) && modelText.length < Math.ceil(ocrText.length * 0.75)) {
+    return true;
+  }
+
+  const shorter = Math.min(ocrText.length, modelText.length);
+  const longer = Math.max(ocrText.length, modelText.length);
+  return longer >= 8 && shorter / longer < 0.6;
+}
+
+function normalizeSourceTextForComparison(value: string): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s"'`.,、。:：;；!?！？()[\]{}「」『』〈〉《》…・·~～\-_=＝]/g, "");
 }
 
 function buildNormalizedBboxFromOcrHint(hint: unknown, page: MangaPage) {

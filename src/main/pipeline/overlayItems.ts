@@ -127,6 +127,43 @@ export function getOcrBboxHints(requestBody: TranslationResult["requestBody"]): 
   return Array.isArray(hints) ? hints : [];
 }
 
+export function applyOcrCandidateSourceTextLocks(
+  items: OverlayItem[],
+  hints: NonNullable<RequestSummary["ocrBboxHints"]>
+): OverlayItem[] {
+  if (hints.length === 0) {
+    return items;
+  }
+
+  const textById = new Map<number, string>();
+  for (const hint of hints) {
+    const id = Number(hint.id);
+    const ocrText = String(hint.ocrText ?? "").trim();
+    if (Number.isInteger(id) && id > 0 && ocrText) {
+      textById.set(id, ocrText);
+    }
+  }
+
+  if (textById.size === 0) {
+    return items;
+  }
+
+  return items.map((item) => {
+    const lockedSourceText = textById.get(item.id);
+    if (!lockedSourceText) {
+      return item;
+    }
+    const sourceTextMismatch = item.sourceTextMismatch === true || hasMeaningfulSourceTextDifference(item.jp, lockedSourceText);
+    return {
+      ...item,
+      jp: lockedSourceText,
+      confidence: sourceTextMismatch ? Math.min(normalizeConfidence(item.confidence, 0.9), 0.69) : item.confidence,
+      sourceTextLocked: true,
+      sourceTextMismatch
+    };
+  });
+}
+
 export function applyOcrCandidateGeometryLocks(
   items: OverlayItem[],
   page: MangaPage,
@@ -337,6 +374,19 @@ function fitsPagePixels(bbox: BBox, page: Pick<MangaPage, "width" | "height">): 
 
 function mapOverlayType(value: string): BlockType {
   return normalizeBlockType(value);
+}
+
+function hasMeaningfulSourceTextDifference(a: string, b: string): boolean {
+  const left = normalizeSourceTextForLockComparison(a);
+  const right = normalizeSourceTextForLockComparison(b);
+  return Boolean(left && right && left !== right);
+}
+
+function normalizeSourceTextForLockComparison(value: string): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s"'`.,、。:：;；!?！？()[\]{}「」『』〈〉《》…・·~～\-_=＝]/g, "");
 }
 
 function expandLockedOcrBbox(

@@ -15,6 +15,7 @@ import { getAppSettings } from "../settingsStore";
 import { queryBestGpuMemorySnapshot, shouldReleaseGpuResidentModel } from "../gpuVram";
 import { createRegionCropPage, mapRegionBlocksToPageBlocks } from "../regionCrop";
 import { runWholePagePipeline } from "../wholePagePipeline";
+import { inspectOcrHintCacheCoverage } from "../pipeline/ocrHints";
 import type { IpcContext } from "./context";
 import { emitJobEvent, isAbortError } from "./jobEvents";
 
@@ -51,7 +52,18 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       if (resolved.chapter.sourceKind !== "web") {
         await context.translationWarmup.stop();
       } else {
-        await releaseWarmupEndpointForGpuOcrIfNeeded(context, id, emit, resolved.pages.length);
+        const ocrCache = await inspectOcrHintCacheCoverage(runPaths, resolved.pages);
+        if (ocrCache.allCached) {
+          logInfo("Skipping web OCR VRAM guard because all OCR hints are cached", {
+            jobId: id,
+            chapterId: request.chapterId,
+            runMode: request.runMode,
+            pageCount: resolved.pages.length,
+            ocrCache
+          });
+        } else {
+          await releaseWarmupEndpointForGpuOcrIfNeeded(context, id, emit, resolved.pages.length, ocrCache);
+        }
       }
       await waitForEndpointWarmupIfNeeded(context, id, emit, resolved.pages.length);
       const result = await runWholePagePipeline({
@@ -207,8 +219,6 @@ export function registerTranslationJobIpc(context: IpcContext): void {
       chapter = await openChapter(request.chapterId);
       if (chapter.sourceKind !== "web") {
         await context.translationWarmup.stop();
-      } else {
-        await releaseWarmupEndpointForGpuOcrIfNeeded(context, id, emit, 1);
       }
       const page = chapter.pages.find((candidate) => candidate.id === request.pageId);
       if (!page) {
@@ -373,7 +383,8 @@ async function releaseWarmupEndpointForGpuOcrIfNeeded(
   context: IpcContext,
   jobId: string,
   emit: (event: JobEvent) => void,
-  pageTotal: number
+  pageTotal: number,
+  ocrCache?: { cachedCount: number; pendingCount: number; totalCount: number; allCached: boolean }
 ): Promise<void> {
   const settings = await getAppSettings();
   if (settings.modelProvider !== "gemma" || settings.ocr.device !== "gpu") {
@@ -385,7 +396,8 @@ async function releaseWarmupEndpointForGpuOcrIfNeeded(
     jobId,
     minFreeMb,
     snapshot,
-    warmup: context.translationWarmup.getSnapshot()
+    warmup: context.translationWarmup.getSnapshot(),
+    ocrCache
   });
   if (!shouldReleaseGpuResidentModel(snapshot, minFreeMb)) {
     return;

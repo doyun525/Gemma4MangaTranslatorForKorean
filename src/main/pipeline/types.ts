@@ -49,6 +49,8 @@ export type OverlayItem = {
   angle?: number;
   fontSize?: number | null;
   confidence?: number | null;
+  sourceTextLocked?: boolean;
+  sourceTextMismatch?: boolean;
 };
 
 export type CropRetryTarget = {
@@ -57,7 +59,7 @@ export type CropRetryTarget = {
   textRole?: "sound" | "ordinary" | "nontext" | string;
   bbox: BBox;
   cropBox: BBox;
-  reason?: "low-confidence";
+  reason?: "low-confidence" | "source-mismatch";
   jp: string;
   ko: string;
   direction?: SourceTextDirection;

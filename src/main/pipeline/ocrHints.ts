@@ -344,6 +344,32 @@ export async function prepareOcrHintsForPages({
   return results;
 }
 
+export async function inspectOcrHintCacheCoverage(
+  runPaths: ChapterRunPaths,
+  pages: MangaPage[]
+): Promise<{
+  cachedCount: number;
+  pendingCount: number;
+  totalCount: number;
+  allCached: boolean;
+}> {
+  let cachedCount = 0;
+  for (const page of pages) {
+    const cached = await readCachedOcrHints(getOcrHintsCachePath(runPaths, page), page);
+    if (cached) {
+      cachedCount += 1;
+    }
+  }
+  const totalCount = pages.length;
+  const pendingCount = totalCount - cachedCount;
+  return {
+    cachedCount,
+    pendingCount,
+    totalCount,
+    allCached: totalCount > 0 && pendingCount === 0
+  };
+}
+
 function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) {
     return "0ms";

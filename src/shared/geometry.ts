@@ -12,10 +12,6 @@ type RenderBboxBlock = Pick<TranslationBlock, "bbox" | "renderBbox"> &
 export const MIN_READABLE_FONT_SIZE_PX = 10;
 export const MIN_NORMALIZED_BBOX_SIZE = 0.01;
 
-const READABLE_AVERAGE_CHAR_WIDTH_RATIO = 0.95;
-const READABLE_VERTICAL_COLUMN_WIDTH_RATIO = 1.15;
-const READABLE_MAX_VERTICAL_COLUMNS = 2;
-
 export function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -94,21 +90,8 @@ export function resolveBlockRenderBbox(
 }
 
 export function resolveEffectiveRenderBbox(block: RenderBboxBlock, pageSize: PageSize, text: string): BBox {
-  const base = resolveBlockRenderBbox(block, pageSize);
-  if (block.renderBbox || block.renderDirection === "hidden" || !text.trim()) {
-    return base;
-  }
-
-  const basePx = bboxToPixels(base, pageSize.width, pageSize.height);
-  const requiredSize = estimateReadableTextBoxSizePx(text, block, basePx);
-  const nextWidth = Math.max(basePx.w, requiredSize.width);
-  const nextHeight = Math.max(basePx.h, requiredSize.height);
-
-  if (nextWidth <= basePx.w && nextHeight <= basePx.h) {
-    return base;
-  }
-
-  return expandBboxAroundCenter(base, pageSize, nextWidth, nextHeight);
+  void text;
+  return resolveBlockRenderBbox(block, pageSize);
 }
 
 export function estimateBlockFontSizePx(
@@ -210,52 +193,3 @@ function offsetBbox(bbox: BBox, dx: number, dy: number): BBox {
   });
 }
 
-function estimateReadableTextBoxSizePx(text: string, block: RenderBboxBlock, basePx: BBox): { width: number; height: number } {
-  const compactLength = Math.max(1, [...text.replace(/\s+/g, "")].length);
-  const fontSizePx = MIN_READABLE_FONT_SIZE_PX;
-  const lineHeightPx = fontSizePx * Math.max(1, block.lineHeight ?? 1.18);
-
-  if (block.renderDirection === "vertical") {
-    const availableHeight = Math.max(1, basePx.h);
-    const charsPerColumn = Math.max(1, Math.floor(availableHeight / lineHeightPx));
-    const columnCount = Math.min(READABLE_MAX_VERTICAL_COLUMNS, Math.max(1, Math.ceil(compactLength / charsPerColumn)));
-    return {
-      width: columnCount * fontSizePx * READABLE_VERTICAL_COLUMN_WIDTH_RATIO,
-      height: Math.min(compactLength, charsPerColumn) * lineHeightPx
-    };
-  }
-
-  const availableWidth = Math.max(1, basePx.w);
-  const naturalCharsPerLine = resolveNaturalHorizontalCharsPerLine(compactLength);
-  const widthLimitedCharsPerLine = Math.max(1, Math.floor(availableWidth / (fontSizePx * READABLE_AVERAGE_CHAR_WIDTH_RATIO)));
-  const charsPerLine = Math.max(
-    Math.min(compactLength, naturalCharsPerLine),
-    Math.min(compactLength, widthLimitedCharsPerLine)
-  );
-  const lineCount = Math.max(1, Math.ceil(compactLength / charsPerLine));
-  return {
-    width: charsPerLine * fontSizePx * READABLE_AVERAGE_CHAR_WIDTH_RATIO,
-    height: lineCount * lineHeightPx
-  };
-}
-
-function resolveNaturalHorizontalCharsPerLine(compactLength: number): number {
-  if (compactLength <= 4) {
-    return compactLength;
-  }
-  if (compactLength <= 10) {
-    return Math.min(compactLength, 5);
-  }
-  return Math.min(compactLength, Math.max(6, Math.min(14, Math.ceil(Math.sqrt(compactLength * 5)))));
-}
-
-function expandBboxAroundCenter(bbox: BBox, pageSize: PageSize, targetWidthPx: number, targetHeightPx: number): BBox {
-  const px = bboxToPixels(bbox, pageSize.width, pageSize.height);
-  const width = Math.min(pageSize.width, Math.max(px.w, targetWidthPx));
-  const height = Math.min(pageSize.height, Math.max(px.h, targetHeightPx));
-  const centerX = px.x + px.w / 2;
-  const centerY = px.y + px.h / 2;
-  const x = clamp(centerX - width / 2, 0, Math.max(0, pageSize.width - width));
-  const y = clamp(centerY - height / 2, 0, Math.max(0, pageSize.height - height));
-  return pixelsToBbox({ x, y, w: width, h: height }, pageSize.width, pageSize.height);
-}

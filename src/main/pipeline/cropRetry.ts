@@ -104,15 +104,26 @@ export function selectCropRetryTargets(
   }
 
   for (const item of items) {
+    if (isSourceTextMismatchItem(item)) {
+      addCandidate(item, "source-mismatch", 60);
+    }
     if (shouldRetryCropItem(item)) {
       addCandidate(item, "low-confidence", 40);
     }
   }
 
-  return [...candidates.values()]
-    .sort((a, b) => b.priority - a.priority || a.item.id - b.item.id)
-    .slice(0, CROP_RETRY_MAX_ITEMS_PER_PAGE)
-    .map(({ item, reason }) => ({
+  const sortedCandidates = [...candidates.values()]
+    .sort((a, b) => b.priority - a.priority || a.item.id - b.item.id);
+  const selectedCandidates = sortedCandidates.slice(0, CROP_RETRY_MAX_ITEMS_PER_PAGE);
+  const selectedIds = new Set(selectedCandidates.map(({ item }) => item.id));
+  for (const candidate of sortedCandidates) {
+    if (candidate.reason === "source-mismatch" && !selectedIds.has(candidate.item.id)) {
+      selectedCandidates.push(candidate);
+      selectedIds.add(candidate.item.id);
+    }
+  }
+
+  return selectedCandidates.map(({ item, reason }) => ({
       id: item.id,
       type: item.type,
       textRole: item.textRole,
@@ -164,15 +175,16 @@ export function mergeCropRetryItems(
     }
 
     const retryBbox = retry.bbox && target ? cropRetryBboxToPageBbox(retry.bbox, target, page) : null;
+    const preserveSourceText = isSourceTextLockedItem(item) || target?.reason === "source-mismatch";
     merged.push({
       ...item,
       type: retry.type || item.type,
       textRole: retry.textRole || item.textRole,
       bbox: retryBbox ?? item.bbox,
-      jp: retry.jp || item.jp,
+      jp: preserveSourceText ? item.jp : retry.jp || item.jp,
       ko: retry.ko || item.ko,
       direction: retry.direction ?? item.direction,
-      angle: retry.angle ?? item.angle,
+      angle: preserveSourceText ? item.angle : retry.angle ?? item.angle,
       fontSize: retry.fontSize ?? item.fontSize,
       confidence: Number.isFinite(retryConfidence) ? retryConfidence : item.confidence
     });
@@ -191,6 +203,14 @@ function shouldRetryCropItem(item: OverlayItem): boolean {
   }
 
   return false;
+}
+
+function isSourceTextLockedItem(item: OverlayItem): boolean {
+  return item.sourceTextLocked === true;
+}
+
+function isSourceTextMismatchItem(item: OverlayItem): boolean {
+  return item.sourceTextMismatch === true;
 }
 
 function buildExpandedCropBox(bbox: BBox, page: MangaPage): BBox {
