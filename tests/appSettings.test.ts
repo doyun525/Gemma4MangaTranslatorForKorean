@@ -3,11 +3,15 @@ import {
   buildBaseTranslationOptions,
   DEFAULT_GEMMA_RUNTIME_PRESETS,
   resolveGemmaRuntimePreset,
+  MIN_VISION_TRANSLATION_CTX,
+  resolveEffectiveTranslationCtx,
   resolveGemmaRuntimeOverrides,
   createDefaultGemmaRuntimeOverrides,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_OAUTH_PORT,
   DEFAULT_CODEX_REASONING_EFFORT,
+  DEFAULT_GEMMA_DRAFT_MODEL_FILE,
+  DEFAULT_GEMMA_DRAFT_MODEL_REPO,
   DEFAULT_GEMMA_MODEL_FILE,
   DEFAULT_GEMMA_MODEL_FILE_IQ3_S,
   DEFAULT_GEMMA_MODEL_REPO,
@@ -230,6 +234,10 @@ describe("app settings helpers", () => {
     const settings: AppSettings = {
       ...defaults,
       modelProvider: "gemma",
+      translation: {
+        ...defaults.translation,
+        mode: "ocr-text"
+      },
       gemma: {
         modelSource: "huggingface",
         modelRepo: "saved/repo",
@@ -325,6 +333,47 @@ describe("app settings helpers", () => {
     expect(options.serverPath).toBe(join("C:/app-data", "tools", "llama-b8833-cuda12.4", "llama-server.exe"));
   });
 
+  it("raises ctx for image translation when economy ctx is too small", () => {
+    expect(resolveEffectiveTranslationCtx(4096, "ocr-text", 1024)).toBe(4096);
+    expect(resolveEffectiveTranslationCtx(4096, "image", 1024)).toBe(MIN_VISION_TRANSLATION_CTX);
+    expect(resolveEffectiveTranslationCtx(4096, "ocr-text-with-image-retry", 1024)).toBe(MIN_VISION_TRANSLATION_CTX);
+
+    const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40, computeCapability: 8.9 });
+    const options = buildBaseTranslationOptions({
+      jobId: "job-image-low-ctx",
+      runDir: "C:/runs/job-image-low-ctx",
+      paths: {
+        dataRoot: "C:/app-data",
+        toolsDir: "C:/tools",
+        llamaServerPath: "C:/tools/llama-server.exe",
+        hfHomeDir: "C:/hf-home",
+        hfHubCacheDir: "C:/hf-home/hub"
+      },
+      settings: {
+        ...defaults,
+        translation: {
+          ...defaults.translation,
+          mode: "image"
+        },
+        gemma: {
+          ...defaults.gemma,
+          vramMode: "economy",
+          runtimeOverrides: {
+            ...createDefaultGemmaRuntimeOverrides(),
+            economy: {
+              ...createDefaultGemmaRuntimeOverrides().economy,
+              ctx: 4096
+            }
+          }
+        }
+      },
+      env: {}
+    });
+
+    expect(options.translationMode).toBe("image");
+    expect(options.ctx).toBe(MIN_VISION_TRANSLATION_CTX);
+  });
+
   it("uses the full VRAM smoke preset with DFlash draft enabled", () => {
     const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40, computeCapability: 8.9 });
     const options = buildBaseTranslationOptions({
@@ -405,7 +454,7 @@ describe("app settings helpers", () => {
     expect(fullOptions.serverPath).toBe(join("C:/app-data", "tools", "beellama-v0.2.0-cuda13.1", "llama-server.exe"));
   });
 
-  it("disables the default DFlash draft for custom full VRAM models", () => {
+  it("honors runtimeOverrides.useDraft for custom Gemma models in full VRAM mode", () => {
     const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40, computeCapability: 8.9 });
     const options = buildBaseTranslationOptions({
       jobId: "job-full-custom",
@@ -421,6 +470,7 @@ describe("app settings helpers", () => {
         ...defaults,
         gemma: {
           ...defaults.gemma,
+          modelPreset: "custom",
           modelRepo: "mradermacher/gemma-4-E4B-it-The-DECKARD-V2-Strong-HERETIC-UNCENSORED-Thinking-i1-GGUF",
           modelFile: "gemma-4-E4B-it-The-DECKARD-V2-Strong-HERETIC-UNCENSORED-Thinking.i1-Q4_K_M.gguf",
           vramMode: "full"
@@ -430,10 +480,49 @@ describe("app settings helpers", () => {
     });
 
     expect(options.gemmaVramMode).toBe("full");
-    expect(options.useDraft).toBe(false);
+    expect(options.useDraft).toBe(true);
+    expect(options.draftModelRepo).toBe(DEFAULT_GEMMA_DRAFT_MODEL_REPO);
+    expect(options.draftModelFile).toBe(DEFAULT_GEMMA_DRAFT_MODEL_FILE);
     expect(options.ctx).toBe(8192);
     expect(options.batch).toBe(1024);
     expect(options.ubatch).toBe(1024);
+  });
+
+  it("routes custom 26B economy runs with useDraft to the beellama runtime", () => {
+    const defaults = resolveDefaultAppSettings({}, { name: "NVIDIA GeForce RTX 4090", memoryMb: 24564, rtxGeneration: 40, computeCapability: 8.9 });
+    const options = buildBaseTranslationOptions({
+      jobId: "job-economy-custom-draft",
+      runDir: "C:/runs/job-economy-custom-draft",
+      paths: {
+        dataRoot: "C:/app-data",
+        toolsDir: "C:/tools",
+        llamaServerPath: "C:/tools/llama-b8833-cuda12.4/llama-server.exe",
+        hfHomeDir: "C:/hf-home",
+        hfHubCacheDir: "C:/hf-home/hub"
+      },
+      settings: {
+        ...defaults,
+        gemma: {
+          ...defaults.gemma,
+          modelPreset: "custom",
+          modelRepo: GEMMA_26B_MODEL_REPO,
+          modelFile: GEMMA_26B_MODEL_FILE_IQ3_S,
+          vramMode: "economy",
+          runtimeOverrides: {
+            ...createDefaultGemmaRuntimeOverrides(),
+            economy: {
+              ...createDefaultGemmaRuntimeOverrides().economy,
+              useDraft: true
+            }
+          }
+        }
+      },
+      env: {}
+    });
+
+    expect(options.gemmaVramMode).toBe("economy");
+    expect(options.useDraft).toBe(true);
+    expect(options.serverPath).toBe(join("C:/app-data", "tools", "beellama-v0.2.0-cuda12.4", "llama-server.exe"));
   });
 
   it("allows explicitly forcing DFlash draft through the environment", () => {

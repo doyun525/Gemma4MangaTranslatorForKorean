@@ -4,10 +4,10 @@ import { resolveBlockFontFamily } from "./fonts";
 
 const MIN_FONT_SIZE_PX = 1;
 const MAX_AUTOFIT_FONT_SIZE_PX = 256;
-const AUTOFIT_ROOM_RATIO = 0.9;
+const AUTOFIT_ROOM_RATIO = 0.95;
 const MIN_BLOCK_PADDING_PX = 0;
 const MIN_INNER_SIZE_PX = 1;
-const BLOCK_BORDER_PX = 1;
+const BLOCK_BORDER_PX = 0.5;
 const MAX_VERTICAL_COLUMNS = 2;
 
 let measureCanvas: HTMLCanvasElement | null = null;

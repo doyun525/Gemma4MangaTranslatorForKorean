@@ -1061,6 +1061,28 @@ describe("runtime model launch helpers", () => {
     expect(args).not.toContain("--chat-template-kwargs");
   });
 
+  it("does not pass DFlash draft flags to mainline llama-server builds", () => {
+    const args = buildLaunchArgs({
+      port: 18180,
+      fitTargetMb: 1024,
+      ctx: 4096,
+      batch: 512,
+      ubatch: 512,
+      useDraft: true,
+      serverPath: join("C:/tools", "llama-b8833-cuda12.4", "llama-server.exe"),
+      draftModelRepo: DEFAULT_DRAFT_REPO,
+      draftModelFile: DEFAULT_DRAFT_FILE,
+      modelRepo: DEFAULT_26B_REPO,
+      modelFile: DEFAULT_26B_FILE,
+      mmprojRepo: DEFAULT_26B_MMPROJ_REPO,
+      mmprojFile: DEFAULT_26B_MMPROJ_FILE
+    });
+
+    expect(args).not.toContain("--spec-draft-model");
+    expect(args).not.toContain("--spec-draft-hf");
+    expect(args).not.toContain("--spec-type");
+  });
+
   it("launches from app-managed HF cache files after direct download", () => {
     const hubCacheDir = createTempDir("hf-managed-cache-");
     const options = {

@@ -76,11 +76,40 @@ export function registerTranslationJobIpc(context: IpcContext): void {
         throw new DOMException("Aborted", "AbortError");
       }
 
+      const succeededPages = result.pages.filter((page) => page.analysisStatus === "completed");
+      const failedPages = result.pages.filter((page) => page.analysisStatus === "failed");
+      if (failedPages.length === result.pages.length) {
+        const message =
+          failedPages.map((page) => page.lastError).find((error) => Boolean(error?.trim())) ??
+          result.warnings.at(-1) ??
+          "모든 페이지 번역에 실패했습니다.";
+        emit({
+          id,
+          kind: "gemma-analysis",
+          status: "failed",
+          progressText: "번역 작업 실패",
+          phase: "failed",
+          progressCurrent: resolved.pages.length,
+          progressTotal: resolved.pages.length,
+          pageTotal: resolved.pages.length,
+          detail: message
+        });
+        return {
+          status: "failed",
+          error: message,
+          chapter: await openChapter(request.chapterId),
+          warnings: result.warnings
+        };
+      }
+
       emit({
         id,
         kind: "gemma-analysis",
         status: "completed",
-        progressText: `번역 작업 완료 (${formatTimingSummary(result.timings, jobStartedAt)})`,
+        progressText:
+          failedPages.length > 0
+            ? `번역 일부 완료 (${succeededPages.length}/${result.pages.length}, ${formatTimingSummary(result.timings, jobStartedAt)})`
+            : `번역 작업 완료 (${formatTimingSummary(result.timings, jobStartedAt)})`,
         phase: "done",
         progressCurrent: resolved.pages.length,
         progressTotal: resolved.pages.length,

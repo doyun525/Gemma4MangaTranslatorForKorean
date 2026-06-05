@@ -34,6 +34,23 @@ export function formatGemmaVramMode(mode: TranslationOptions["gemmaVramMode"]): 
   return mode === "economy" ? "VRAM 절약 모드" : "VRAM 풀로드 모드";
 }
 
+export const OCR_TEXT_TRANSLATION_CHUNK_SIZE_CODEX = 80;
+export const OCR_TEXT_TRANSLATION_CHUNK_SIZE_GEMMA_FULL = 50;
+export const OCR_TEXT_TRANSLATION_CHUNK_SIZE_GEMMA_ECONOMY = 20;
+
+export function resolveOcrTextTranslationChunkSize(
+  options: Pick<TranslationOptions, "modelProvider" | "gemmaVramMode">
+): number {
+  const provider = String(options.modelProvider ?? "").trim();
+  if (provider === "openai-codex") {
+    return OCR_TEXT_TRANSLATION_CHUNK_SIZE_CODEX;
+  }
+  if (options.gemmaVramMode === "economy") {
+    return OCR_TEXT_TRANSLATION_CHUNK_SIZE_GEMMA_ECONOMY;
+  }
+  return OCR_TEXT_TRANSLATION_CHUNK_SIZE_GEMMA_FULL;
+}
+
 export function summarizeTranslationOptions(options: TranslationOptions): Record<string, unknown> {
   return {
     label: options.label,

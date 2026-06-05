@@ -18,8 +18,6 @@ export type GemmaRuntimePresetOverride = {
   fitTargetMb?: number;
   gpuLayers?: GemmaGpuLayersSetting;
   useDraft?: boolean;
-  draftModelRepo?: string;
-  draftModelFile?: string;
   kvOffload?: boolean;
   mmprojOffload?: boolean;
   llamaRuntime?: GemmaLlamaRuntimeChoice;

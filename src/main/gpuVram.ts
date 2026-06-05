@@ -34,6 +34,13 @@ export function shouldReleaseGpuResidentModel(snapshot: GpuMemorySnapshot | null
   return snapshot.freeMb < minFreeMb;
 }
 
+export type { GpuVramSnapshotLike } from "../shared/llmVramBudget";
+export {
+  shouldReleaseOcrBeforeLlm,
+  resolveRequiredFreeVramMb,
+  resolveEstimatedLlmVramMb
+} from "../shared/llmVramBudget";
+
 function parseGpuMemoryLine(line: string): GpuMemorySnapshot | null {
   const parts = line.split(",").map((part) => part.trim());
   if (parts.length < 5) {

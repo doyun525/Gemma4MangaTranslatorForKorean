@@ -12,8 +12,6 @@ export const DEFAULT_GEMMA_RUNTIME_OVERRIDE_PRESETS: Record<GemmaVramMode, Gemma
     fitTargetMb: 1024,
     gpuLayers: "all",
     useDraft: true,
-    draftModelRepo: GEMMA_DRAFT_MODEL_REPO,
-    draftModelFile: GEMMA_DRAFT_MODEL_FILE,
     kvOffload: true,
     mmprojOffload: true,
     llamaRuntime: "auto"
@@ -73,8 +71,6 @@ function parseModeOverride(raw: unknown): GemmaRuntimePresetOverride | undefined
   const fitTargetMb = readOptionalPositiveInt(record.fitTargetMb);
   const gpuLayers = resolveGpuLayersSetting(record.gpuLayers);
   const useDraft = readOptionalBooleanValue(record.useDraft);
-  const draftModelRepo = resolveOptionalString(record.draftModelRepo);
-  const draftModelFile = resolveOptionalString(record.draftModelFile);
   const kvOffload = readOptionalBooleanValue(record.kvOffload);
   const mmprojOffload = readOptionalBooleanValue(record.mmprojOffload);
   const llamaRuntime = resolveLlamaRuntimeChoice(record.llamaRuntime);
@@ -86,8 +82,6 @@ function parseModeOverride(raw: unknown): GemmaRuntimePresetOverride | undefined
     fitTargetMb === undefined &&
     gpuLayers === undefined &&
     useDraft === undefined &&
-    !draftModelRepo &&
-    !draftModelFile &&
     kvOffload === undefined &&
     mmprojOffload === undefined &&
     !llamaRuntime
@@ -102,8 +96,6 @@ function parseModeOverride(raw: unknown): GemmaRuntimePresetOverride | undefined
     ...(fitTargetMb !== undefined ? { fitTargetMb } : {}),
     ...(gpuLayers !== undefined ? { gpuLayers } : {}),
     ...(useDraft !== undefined ? { useDraft } : {}),
-    ...(draftModelRepo ? { draftModelRepo } : {}),
-    ...(draftModelFile ? { draftModelFile } : {}),
     ...(kvOffload !== undefined ? { kvOffload } : {}),
     ...(mmprojOffload !== undefined ? { mmprojOffload } : {}),
     ...(llamaRuntime ? { llamaRuntime } : {})

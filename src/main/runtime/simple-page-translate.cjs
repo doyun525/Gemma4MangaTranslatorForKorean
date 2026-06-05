@@ -5231,7 +5231,7 @@ function buildLaunchArgs(options) {
           String(options.gpuLayers ?? "all")
         ];
   const draftArgs =
-    options.useDraft && (launchTarget.draftModelPath || launchTarget.draftModelUrl)
+    shouldUseDflashDraftLaunch(options) && (launchTarget.draftModelPath || launchTarget.draftModelUrl)
       ? [
           launchTarget.draftModelPath ? "--spec-draft-model" : "--spec-draft-hf",
           launchTarget.draftModelPath || resolveDraftModelRepoArg(options),
@@ -5398,6 +5398,17 @@ function resolveDraftModelRepoArg(options = {}) {
   return quant ? `${repo}:${quant}` : repo;
 }
 
+function resolveConfiguredServerPath(options = {}) {
+  return String(options.serverPath || runtimeOverrideEnv("LLAMA_SERVER_PATH", options) || defaultServerPath(options) || "");
+}
+
+function shouldUseDflashDraftLaunch(options = {}) {
+  if (!options.useDraft) {
+    return false;
+  }
+  return /beellama/i.test(resolveConfiguredServerPath(options));
+}
+
 function shouldUseBeellamaGemmaLaunch(options = {}) {
   if (isGemma26BModel(options)) {
     return false;
@@ -5406,7 +5417,7 @@ function shouldUseBeellamaGemmaLaunch(options = {}) {
     const localModelPath = resolveConfiguredLocalModelPath(options);
     return path.basename(localModelPath || "") === DEFAULT_HF_FILE;
   }
-  const serverPath = String(options.serverPath || runtimeOverrideEnv("LLAMA_SERVER_PATH", options) || defaultServerPath(options) || "");
+  const serverPath = resolveConfiguredServerPath(options);
   const isBeellamaRuntime = /beellama/i.test(serverPath);
   const isGemma4Model = looksLikeGemma4Model(options);
   if (isBeellamaRuntime && isGemma4Model) {

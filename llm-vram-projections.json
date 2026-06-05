@@ -1,0 +1,48 @@
+{
+  "entries": {
+    "mradermacher/gemma-4-26B-A4B-it-ultra-uncensored-heretic-i1-GGUF|gemma-4-26B-A4B-it-ultra-uncensored-heretic.i1-IQ3_S.gguf|economy|8192|1024|1024|2048|kv1|mm1|draft1|fit": {
+      "updatedAt": "2026-06-05T11:27:41.642+09:00",
+      "modelBufferMb": 11642
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|economy|4096|512|512|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T17:03:01.556+09:00",
+      "modelBufferMb": 12770
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|full|8192|1024|1024|2048|kv1|mm1|draft0|": {
+      "updatedAt": "2026-06-05T16:59:08.809+09:00",
+      "modelBufferMb": 12770
+    },
+    "mradermacher/gemma-4-26B-A4B-it-ultra-uncensored-heretic-i1-GGUF|gemma-4-26B-A4B-it-ultra-uncensored-heretic.i1-IQ3_S.gguf|economy|4096|512|512|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T16:48:30.441+09:00",
+      "modelBufferMb": 11642
+    },
+    "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive|Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf|economy|4096|512|512|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T16:51:34.228+09:00",
+      "modelBufferMb": 4886
+    },
+    "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive|Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf|full|8192|1024|1024|2048|kv1|mm1|draft0|": {
+      "updatedAt": "2026-06-05T16:52:34.238+09:00",
+      "modelBufferMb": 4886
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|economy|8192|512|512|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T17:36:38.946+09:00",
+      "modelBufferMb": 12770
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|economy|8192|1024|512|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T17:12:57.180+09:00",
+      "modelBufferMb": 12770
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|economy|8192|1024|1024|1024|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T17:14:22.984+09:00",
+      "modelBufferMb": 12770
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|economy|8192|1024|1024|2048|kv1|mm1|draft0|fit": {
+      "updatedAt": "2026-06-05T17:15:39.575+09:00",
+      "modelBufferMb": 11638
+    },
+    "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced|Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf|full|8192|1024|1024|1024|kv1|mm1|draft0|": {
+      "updatedAt": "2026-06-05T18:03:09.045+09:00",
+      "modelBufferMb": 12770
+    }
+  }
+}

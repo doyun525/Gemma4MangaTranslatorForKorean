@@ -501,8 +501,6 @@ export const AppSettingsSchema = z
                 fitTargetMb: z.number().int().positive().optional(),
                 gpuLayers: z.union([z.number().int().nonnegative(), z.enum(["fit", "all"])]).optional(),
                 useDraft: z.boolean().optional(),
-                draftModelRepo: z.string().min(1).max(300).optional(),
-                draftModelFile: z.string().min(1).max(300).optional(),
                 kvOffload: z.boolean().optional(),
                 mmprojOffload: z.boolean().optional(),
                 llamaRuntime: z.enum(["auto", "mainline", "beellama"]).optional()
@@ -517,8 +515,6 @@ export const AppSettingsSchema = z
                 fitTargetMb: z.number().int().positive().optional(),
                 gpuLayers: z.union([z.number().int().nonnegative(), z.enum(["fit", "all"])]).optional(),
                 useDraft: z.boolean().optional(),
-                draftModelRepo: z.string().min(1).max(300).optional(),
-                draftModelFile: z.string().min(1).max(300).optional(),
                 kvOffload: z.boolean().optional(),
                 mmprojOffload: z.boolean().optional(),
                 llamaRuntime: z.enum(["auto", "mainline", "beellama"]).optional()

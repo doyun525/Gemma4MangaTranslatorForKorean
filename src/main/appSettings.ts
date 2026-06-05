@@ -81,6 +81,18 @@ export const DEFAULT_OCR_GPU_CUDA_TAG = "cu126";
 export const RTX_50_OCR_GPU_CUDA_TAG = "cu129";
 
 const DEFAULT_IMAGE_TOKENS = 1024;
+export const MIN_VISION_TRANSLATION_CTX = 8192;
+
+export function resolveEffectiveTranslationCtx(
+  ctx: number,
+  translationMode: TranslationMode,
+  imageMaxTokens: number
+): number {
+  if (translationMode === "ocr-text") {
+    return ctx;
+  }
+  return Math.max(ctx, MIN_VISION_TRANSLATION_CTX, imageMaxTokens + 4096);
+}
 
 export type GemmaRuntimePreset = {
   ctx: number;
@@ -158,8 +170,6 @@ export function resolveGemmaRuntimePreset(vramMode: GemmaVramMode, gemma?: Pick<
     ...(override.fitTargetMb !== undefined ? { fitTargetMb: override.fitTargetMb } : {}),
     ...(override.gpuLayers !== undefined ? { gpuLayers: override.gpuLayers } : {}),
     ...(override.useDraft !== undefined ? { useDraft: override.useDraft } : {}),
-    ...(override.draftModelRepo !== undefined ? { draftModelRepo: override.draftModelRepo } : {}),
-    ...(override.draftModelFile !== undefined ? { draftModelFile: override.draftModelFile } : {}),
     ...(override.kvOffload !== undefined ? { kvOffload: override.kvOffload } : {}),
     ...(override.mmprojOffload !== undefined ? { mmprojOffload: override.mmprojOffload } : {}),
     ...(override.llamaRuntime !== undefined ? { llamaRuntime: override.llamaRuntime } : {})
@@ -518,15 +528,18 @@ export function buildBaseTranslationOptions({
   const runtimeGemma = resolveRuntimeGemmaSettings(settings.gemma, gemmaVramMode);
   const runtimeOverride = resolveGemmaRuntimeOverrides(settings.gemma.runtimeOverrides)[gemmaVramMode];
   const defaultRuntimeOverride = createDefaultGemmaRuntimeOverrides()[gemmaVramMode];
-  const hasCustomDraftSettings = hasCustomGemmaRuntimeDraftSettings(runtimeOverride, defaultRuntimeOverride);
-  const useDraft =
-    envUseDraft ??
-    Boolean(
-      gemmaRuntimePreset.useDraft &&
-        (hasCustomDraftSettings
-          ? runtimeOverride?.useDraft !== false
-          : isDefaultDflashDraftCompatible(runtimeGemma.modelSource, runtimeGemma.modelRepo, runtimeGemma.modelFile))
-    );
+  const llamaRuntimeChoice = gemmaRuntimePreset.llamaRuntime ?? "auto";
+  const translationMode = resolveTranslationMode(runtimeEnv.MANGA_TRANSLATOR_TRANSLATION_MODE, settings.translation.mode);
+  const imageMaxTokens = readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_IMAGE_MAX_TOKENS", DEFAULT_IMAGE_TOKENS);
+  const useDraft = resolveTranslationUseDraft({
+    envUseDraft,
+    gemma: settings.gemma,
+    gemmaRuntimePreset,
+    runtimeOverride,
+    defaultRuntimeOverride,
+    runtimeGemma,
+    llamaRuntimeChoice
+  });
   const ocrGpuCudaTag = resolveOcrGpuCudaTag(
     runtimeEnv.MANGA_TRANSLATOR_OCR_GPU_CUDA_TAG ??
       runtimeEnv.MANGA_TRANSLATOR_PADDLEOCR_CUDA_TAG ??
@@ -544,7 +557,11 @@ export function buildBaseTranslationOptions({
     topP: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_TOP_P", 0.95),
     topK: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_TOP_K", 64),
     maxTokens: resolveMaxTokens(runtimeEnv.MANGA_TRANSLATOR_MAX_TOKENS, settings.maxTokens),
-    ctx: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_CTX", gemmaRuntimePreset.ctx),
+    ctx: resolveEffectiveTranslationCtx(
+      readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_CTX", gemmaRuntimePreset.ctx),
+      translationMode,
+      imageMaxTokens
+    ),
     batch: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_BATCH", gemmaRuntimePreset.batch),
     ubatch: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_UBATCH", gemmaRuntimePreset.ubatch),
     gemmaVramMode,
@@ -603,13 +620,15 @@ export function buildBaseTranslationOptions({
       readOptionalBooleanEnv(runtimeEnv, "MANGA_TRANSLATOR_GEMMA_PERF") ??
       readOptionalBooleanEnv(runtimeEnv, "MANGA_TRANSLATOR_PERF") ??
       gemmaRuntimePreset.enablePerf,
-    draftModelRepo:
-      resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_DRAFT_MODEL_HF) ?? gemmaRuntimePreset.draftModelRepo,
-    draftModelFile:
-      resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_DRAFT_MODEL_FILE) ?? gemmaRuntimePreset.draftModelFile,
+    draftModelRepo: useDraft
+      ? resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_DRAFT_MODEL_HF) ?? GEMMA_DRAFT_MODEL_REPO
+      : undefined,
+    draftModelFile: useDraft
+      ? resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_DRAFT_MODEL_FILE) ?? GEMMA_DRAFT_MODEL_FILE
+      : undefined,
     useDraft,
     imageMinTokens: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_IMAGE_MIN_TOKENS", DEFAULT_IMAGE_TOKENS),
-    imageMaxTokens: readNumberEnv(runtimeEnv, "MANGA_TRANSLATOR_IMAGE_MAX_TOKENS", DEFAULT_IMAGE_TOKENS),
+    imageMaxTokens,
     includeEnhancedVariant: false,
     enhancedMaxLongSide: 1900,
     enhancedContrast: 1.35,
@@ -618,10 +637,14 @@ export function buildBaseTranslationOptions({
     llamaRuntimeProfile,
     workingDir: paths.dataRoot,
     toolsDir: paths.toolsDir,
-    serverPath:
-      resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_LLAMA_SERVER_PATH) ??
-      resolveOptionalString(runtimeEnv.LLAMA_SERVER_PATH) ??
-      resolveDefaultLlamaServerPathForGemma(paths, runtimeGemma, llamaRuntimeProfile, gemmaRuntimePreset.llamaRuntime),
+    serverPath: resolveTranslationServerPath({
+      paths,
+      runtimeGemma,
+      llamaRuntimeProfile,
+      llamaRuntimeChoice: gemmaRuntimePreset.llamaRuntime ?? "auto",
+      useDraft,
+      runtimeEnv
+    }),
     modelSource: runtimeGemma.modelSource,
     modelRepo: resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_MODEL_HF) ?? runtimeGemma.modelRepo,
     modelFile: resolveOptionalString(runtimeEnv.LLAMA_ARG_HF_FILE) ?? runtimeGemma.modelFile,
@@ -642,7 +665,7 @@ export function buildBaseTranslationOptions({
     codexModel: settings.codex.model,
     codexReasoningEffort: resolveCodexReasoningEffort(runtimeEnv.MANGA_TRANSLATOR_CODEX_REASONING_EFFORT, settings.codex.reasoningEffort),
     codexOauthPort: settings.codex.oauthPort,
-    translationMode: resolveTranslationMode(runtimeEnv.MANGA_TRANSLATOR_TRANSLATION_MODE, settings.translation.mode),
+    translationMode,
     includeSoundEffects:
       readOptionalBooleanEnv(runtimeEnv, "MANGA_TRANSLATOR_INCLUDE_SOUND_EFFECTS") ??
       settings.translation.includeSoundEffects,
@@ -1036,19 +1059,71 @@ function hasCustomGemmaRuntimeDraftSettings(
   override: GemmaRuntimeOverrides[GemmaVramMode],
   defaults: GemmaRuntimeOverrides[GemmaVramMode]
 ): boolean {
-  if (!override) {
+  return override?.useDraft !== undefined && override.useDraft !== defaults?.useDraft;
+}
+
+function usesCustomGemmaRuntimeSettings(gemma: Pick<GemmaSettings, "modelPreset" | "modelSource" | "modelRepo" | "modelFile">): boolean {
+  if (gemma.modelSource === "local") {
+    return true;
+  }
+  return resolveGemmaModelPreset(gemma.modelPreset, gemma.modelRepo, gemma.modelFile) === "custom";
+}
+
+function resolveTranslationUseDraft({
+  envUseDraft,
+  gemma,
+  gemmaRuntimePreset,
+  runtimeOverride,
+  defaultRuntimeOverride,
+  runtimeGemma,
+  llamaRuntimeChoice = "auto"
+}: {
+  envUseDraft: boolean | undefined;
+  gemma: GemmaSettings;
+  gemmaRuntimePreset: GemmaRuntimePreset;
+  runtimeOverride: GemmaRuntimeOverrides[GemmaVramMode];
+  defaultRuntimeOverride: GemmaRuntimeOverrides[GemmaVramMode];
+  runtimeGemma: GemmaSettings;
+  llamaRuntimeChoice?: GemmaLlamaRuntimeChoice;
+}): boolean {
+  if (envUseDraft !== undefined) {
+    return envUseDraft;
+  }
+  const requested =
+    usesCustomGemmaRuntimeSettings(gemma)
+      ? Boolean(gemmaRuntimePreset.useDraft)
+      : Boolean(
+          gemmaRuntimePreset.useDraft &&
+            (hasCustomGemmaRuntimeDraftSettings(runtimeOverride, defaultRuntimeOverride)
+              ? runtimeOverride?.useDraft !== false
+              : isDefaultDflashDraftCompatible(runtimeGemma.modelSource, runtimeGemma.modelRepo, runtimeGemma.modelFile))
+        );
+  if (requested && llamaRuntimeChoice === "mainline") {
     return false;
   }
-  if (override.useDraft !== undefined && override.useDraft !== defaults?.useDraft) {
-    return true;
-  }
-  if (override.draftModelRepo !== undefined && override.draftModelRepo !== defaults?.draftModelRepo) {
-    return true;
-  }
-  if (override.draftModelFile !== undefined && override.draftModelFile !== defaults?.draftModelFile) {
-    return true;
-  }
-  return false;
+  return requested;
+}
+
+function resolveTranslationServerPath({
+  paths,
+  runtimeGemma,
+  llamaRuntimeProfile,
+  llamaRuntimeChoice,
+  useDraft,
+  runtimeEnv
+}: {
+  paths: TranslationOptionPaths;
+  runtimeGemma: GemmaSettings;
+  llamaRuntimeProfile: string;
+  llamaRuntimeChoice: GemmaLlamaRuntimeChoice;
+  useDraft: boolean;
+  runtimeEnv: NodeJS.ProcessEnv;
+}): string {
+  return (
+    resolveOptionalString(runtimeEnv.MANGA_TRANSLATOR_LLAMA_SERVER_PATH) ??
+    resolveOptionalString(runtimeEnv.LLAMA_SERVER_PATH) ??
+    resolveDefaultLlamaServerPathForGemma(paths, runtimeGemma, llamaRuntimeProfile, llamaRuntimeChoice, useDraft)
+  );
 }
 
 function resolveTranslationGpuLayers(value: number | "fit" | "all" | undefined): number | "fit" | undefined {
@@ -1062,7 +1137,8 @@ function resolveDefaultLlamaServerPathForGemma(
   paths: TranslationOptionPaths,
   gemma: AppSettings["gemma"],
   llamaRuntimeProfile = "cuda12",
-  llamaRuntimeChoice: GemmaLlamaRuntimeChoice = "auto"
+  llamaRuntimeChoice: GemmaLlamaRuntimeChoice = "auto",
+  useDraft = false
 ): string {
   const binaryName = process.platform === "win32" ? "llama-server.exe" : "llama-server";
   const useCuda13 = isRtx50LlamaRuntimeProfile(llamaRuntimeProfile);
@@ -1071,7 +1147,7 @@ function resolveDefaultLlamaServerPathForGemma(
     const runtimeDir = useCuda13 ? MAINLINE_LLAMA_RUNTIME_DIR_CUDA13 : MAINLINE_LLAMA_RUNTIME_DIR_CUDA12;
     return join(paths.dataRoot, "tools", runtimeDir, binaryName);
   }
-  if (forcedKind === "beellama") {
+  if (forcedKind === "beellama" || useDraft) {
     const runtimeDir = useCuda13 ? BEELLAMA_LLAMA_RUNTIME_DIR_CUDA13 : BEELLAMA_LLAMA_RUNTIME_DIR_CUDA12;
     return join(paths.dataRoot, "tools", runtimeDir, binaryName);
   }

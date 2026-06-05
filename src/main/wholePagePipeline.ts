@@ -2,7 +2,17 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TranslationOptions } from "./appSettings";
 import { logError, logInfo, logWarn } from "./logger";
-import { queryBestGpuMemorySnapshot, shouldReleaseGpuResidentModel } from "./gpuVram";
+import { queryBestGpuMemorySnapshot } from "./gpuVram";
+import {
+  captureLlmVramLogLine,
+  persistLlmVramProjection,
+  resolveLlmVramBudgetForOptions,
+  shouldReleaseOcrForLlmBudget,
+  waitForGpuMemoryRelease,
+  type LlmVramBudget,
+  type LlmVramLogCapture
+} from "./llmVramGuard";
+import { resolveRequiredFreeVramMb } from "../shared/llmVramBudget";
 import type { MangaPage } from "../shared/types";
 import { formatStoredTimestamp } from "../shared/storedTimestamp";
 import { getAppPaths } from "./appPaths";
@@ -21,16 +31,21 @@ import {
   normalizeOverlayItemBboxes,
   overlayItemToBlock
 } from "./pipeline/overlayItems";
-import { buildBaseOptions, buildPageOptions, formatGemmaVramMode, readNumberEnv, summarizePreview, summarizeTranslationOptions } from "./pipeline/options";
+import {
+  buildBaseOptions,
+  buildPageOptions,
+  formatGemmaVramMode,
+  readNumberEnv,
+  resolveOcrTextTranslationChunkSize,
+  summarizePreview,
+  summarizeTranslationOptions
+} from "./pipeline/options";
 import { loadTranslationRuntimePort } from "./pipeline/translationRuntimePort";
 import type {
   OcrBboxResult,
   OverlayItem,
   PipelineOptions,
 } from "./pipeline/types";
-
-const OCR_TEXT_TRANSLATION_CHUNK_SIZE = 80;
-const LOCAL_OCR_TEXT_TRANSLATION_CHUNK_SIZE = 50;
 
 export type PipelineTimingSummary = {
   totalMs: number;
@@ -121,7 +136,12 @@ export async function runWholePagePipeline({
     });
   }
 
+  const llmVramCapture: LlmVramLogCapture = { projectedMb: null, modelBufferMb: null };
+  let llmVramBudget: LlmVramBudget | null = null;
+  let ocrReleasedForLlm = false;
+
   baseOptions.onProgress = (progress) => {
+    captureLlmVramLogLine(progress.installLogLine, llmVramCapture);
     emit({
       id: jobId,
       kind: "gemma-analysis",
@@ -237,9 +257,70 @@ export async function runWholePagePipeline({
           : "로컬 모델 자산이 없거나 부족해 다운로드/갱신이 필요할 수 있습니다."
   });
 
-  await releaseOcrWorkerForLocalLlmIfNeeded();
+  if (!codexSelected && baseOptions.modelProvider === "gemma" && baseOptions.ocrDevice === "gpu") {
+    llmVramBudget = await resolveLlmVramBudgetForOptions(baseOptions);
+  }
+  ocrReleasedForLlm = await releaseOcrWorkerForLocalLlmIfNeeded();
 
-  const endpointSession = await runtime.startEndpointSession(baseOptions);
+  let endpointSession = await runtime.startEndpointSession(baseOptions);
+  const activeLlmVramBudget = llmVramBudget;
+  if (
+    !ocrReleasedForLlm &&
+    baseOptions.modelProvider === "gemma" &&
+    baseOptions.ocrDevice === "gpu" &&
+    activeLlmVramBudget &&
+    llmVramCapture.projectedMb !== null
+  ) {
+    const snapshot = await queryBestGpuMemorySnapshot();
+    const retryBudget: LlmVramBudget = {
+      ...activeLlmVramBudget,
+      estimatedLlmMb: llmVramCapture.projectedMb,
+      requiredFreeMb: resolveRequiredFreeVramMb(
+        llmVramCapture.projectedMb,
+        activeLlmVramBudget.headroomMb,
+        activeLlmVramBudget.legacyMinFreeMb
+      )
+    };
+    if (shouldReleaseOcrForLlmBudget(snapshot, retryBudget)) {
+      logWarn("LLM projected VRAM exceeds free budget after boot; retrying after OCR worker release", {
+        jobId,
+        snapshot,
+        projectedMb: llmVramCapture.projectedMb,
+        requiredFreeMb: retryBudget.requiredFreeMb
+      });
+      await endpointSession.dispose();
+      emit({
+        id: jobId,
+        kind: "gemma-analysis",
+        status: "starting",
+        progressText: "GPU 메모리 확보 중",
+        phase: "booting",
+        progressCurrent: 0,
+        progressTotal,
+        pageTotal: pages.length,
+        detail: `LLM projected ${llmVramCapture.projectedMb}MB, 여유 ${snapshot?.freeMb ?? 0}MB — OCR 워커를 종료한 뒤 LLM을 다시 시작합니다.`
+      });
+      await runtime.stopOcrWorker?.();
+      await waitForGpuMemoryRelease();
+      ocrReleasedForLlm = true;
+      llmVramCapture.projectedMb = null;
+      llmVramCapture.modelBufferMb = null;
+      endpointSession = await runtime.startEndpointSession(baseOptions);
+    }
+  }
+
+  if (activeLlmVramBudget) {
+    await persistLlmVramProjection(activeLlmVramBudget.fingerprint, llmVramCapture);
+    if (llmVramCapture.projectedMb !== null || llmVramCapture.modelBufferMb !== null) {
+      logInfo("LLM VRAM projection cached", {
+        jobId,
+        fingerprint: activeLlmVramBudget.fingerprint,
+        projectedMb: llmVramCapture.projectedMb,
+        modelBufferMb: llmVramCapture.modelBufferMb
+      });
+    }
+  }
+
   const server = endpointSession.handle;
   onCleanupReady?.(() => endpointSession.dispose());
   const maxAttempts = Math.max(1, readNumberEnv("MANGA_TRANSLATOR_PAGE_RETRIES", 5));
@@ -857,21 +938,24 @@ export async function runWholePagePipeline({
     await translationChain;
   };
 
-  async function releaseOcrWorkerForLocalLlmIfNeeded(): Promise<void> {
+  async function releaseOcrWorkerForLocalLlmIfNeeded(): Promise<boolean> {
     if (codexSelected || baseOptions.modelProvider !== "gemma" || baseOptions.ocrDevice !== "gpu") {
-      return;
+      return false;
     }
-    const minFreeMb = readNumberEnv("MANGA_TRANSLATOR_GPU_KEEP_BOTH_MIN_FREE_MB", 1024);
+    const budget = llmVramBudget ?? (await resolveLlmVramBudgetForOptions(baseOptions));
+    llmVramBudget = budget;
     const snapshot = await queryBestGpuMemorySnapshot();
-    logInfo("GPU VRAM check before local LLM", {
+    const shouldRelease = shouldReleaseOcrForLlmBudget(snapshot, budget);
+    logInfo("GPU VRAM budget check before local LLM", {
       jobId,
-      minFreeMb,
+      budget,
       snapshot,
+      shouldReleaseOcrWorker: shouldRelease,
       ocrDevice: baseOptions.ocrDevice,
       modelProvider: baseOptions.modelProvider
     });
-    if (!shouldReleaseGpuResidentModel(snapshot, minFreeMb)) {
-      return;
+    if (!shouldRelease) {
+      return false;
     }
 
     emit({
@@ -883,9 +967,17 @@ export async function runWholePagePipeline({
       progressCurrent: 0,
       progressTotal,
       pageTotal: pages.length,
-      detail: `LLM 실행을 위해 OCR 워커를 일시 종료합니다. VRAM 여유 ${snapshot?.freeMb ?? 0}MB / 기준 ${minFreeMb}MB`
+      detail: `LLM 예상 ${budget.estimatedLlmMb}MB + 여유 ${budget.headroomMb}MB 필요 — OCR 워커 종료 (현재 여유 ${snapshot?.freeMb ?? 0}MB)`
     });
     await runtime.stopOcrWorker?.();
+    await waitForGpuMemoryRelease();
+    const afterSnapshot = await queryBestGpuMemorySnapshot();
+    logInfo("GPU VRAM check after OCR worker release", {
+      jobId,
+      budget,
+      snapshot: afterSnapshot
+    });
+    return true;
   }
 
   try {
@@ -1031,6 +1123,9 @@ export async function runWholePagePipeline({
       });
     }
 
+    const succeededCount = pages.filter((page) => completedPagesById.get(page.id)?.analysisStatus === "completed").length;
+    const failedCount = pages.filter((page) => completedPagesById.get(page.id)?.analysisStatus === "failed").length;
+
     emit({
       id: jobId,
       kind: "gemma-analysis",
@@ -1040,7 +1135,7 @@ export async function runWholePagePipeline({
       progressCurrent: progressTotal,
       progressTotal,
       pageTotal: pages.length,
-      detail: `${pages.length} pages ready`
+      detail: `${succeededCount}/${pages.length} pages translated${failedCount > 0 ? `, ${failedCount} failed` : ""}`
     });
 
     translationMs = Date.now() - translationStartedAt;
@@ -1053,14 +1148,6 @@ export async function runWholePagePipeline({
 
 function shouldChunkOcrTextTranslation(options: TranslationOptions, ocrHints: unknown[]): boolean {
   return String(options.translationMode ?? "") === "ocr-text" && ocrHints.length > resolveOcrTextTranslationChunkSize(options);
-}
-
-function resolveOcrTextTranslationChunkSize(options: TranslationOptions): number {
-  const provider = String(options.modelProvider ?? "").trim();
-  if (provider && provider !== "openai-codex") {
-    return LOCAL_OCR_TEXT_TRANSLATION_CHUNK_SIZE;
-  }
-  return OCR_TEXT_TRANSLATION_CHUNK_SIZE;
 }
 
 type OcrTextResponseRecord = {
@@ -1335,7 +1422,7 @@ function buildMergedChunkRequestBody(firstRequestBody: unknown, ocrHints: unknow
       height: page.height
     },
     ocrBboxHintCount: ocrHints.length,
-    ocrBboxHintLimit: OCR_TEXT_TRANSLATION_CHUNK_SIZE,
+    ocrBboxHintLimit: ocrHints.length,
     ocrBboxHints: ocrHints
   };
 }
