@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+﻿import { ipcMain } from "electron";
 import { randomUUID } from "node:crypto";
 import { StartAnalysisRequestSchema, RegionAnalysisRequestSchema, parseIpcPayload } from "../../shared/ipcSchemas";
 import type { JobEvent, MangaPage, RegionAnalysisResult, StartAnalysisResult } from "../../shared/types";

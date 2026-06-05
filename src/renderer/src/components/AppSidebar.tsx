@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import type { ChapterSnapshot, LibraryIndex } from "../../../shared/types";
 import { LibraryTree } from "./LibraryTree";
 import { PageList } from "./PageList";

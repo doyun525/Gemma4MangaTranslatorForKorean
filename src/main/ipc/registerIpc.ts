@@ -1,4 +1,4 @@
-import type { IpcContext } from "./context";
+﻿import type { IpcContext } from "./context";
 import { registerFontsIpc } from "./fontsIpc";
 import { registerImportShareIpc } from "./importShareIpc";
 import { registerInpaintingIpc } from "./inpaintingIpc";

@@ -1,4 +1,4 @@
-import { dialog, ipcMain } from "electron";
+﻿import { dialog, ipcMain } from "electron";
 import type { CustomFont } from "../../shared/types";
 import { listCustomFonts, registerCustomFontFromFile, removeCustomFont } from "../customFonts";
 import type { IpcContext } from "./context";

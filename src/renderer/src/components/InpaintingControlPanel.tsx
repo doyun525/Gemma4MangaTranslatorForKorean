@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import type { JobState } from "../../../shared/types";
 import type { ProgressSnapshot } from "../lib/jobProgress";
 import { useInpainting } from "../inpainting/InpaintingContext";

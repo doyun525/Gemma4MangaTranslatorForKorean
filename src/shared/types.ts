@@ -1,4 +1,4 @@
-export type BlockType = "nonsolid";
+﻿export type BlockType = "nonsolid";
 
 export type SourceTextDirection = "horizontal" | "vertical";
 export type RenderTextDirection = "horizontal" | "vertical" | "rotated" | "hidden";

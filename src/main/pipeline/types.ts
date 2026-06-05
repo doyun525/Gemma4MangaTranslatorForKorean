@@ -1,4 +1,4 @@
-import type { TranslationOptions } from "../appSettings";
+﻿import type { TranslationOptions } from "../appSettings";
 import type { OpenAIOAuthEndpoint } from "../openaiOauthEndpoint";
 import type { ImageDecodeFallback } from "../regionCrop";
 import type { AppSettings, BBox, JobEvent, MangaPage, SourceTextDirection } from "../../shared/types";

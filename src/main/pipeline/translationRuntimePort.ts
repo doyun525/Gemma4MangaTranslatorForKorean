@@ -1,4 +1,4 @@
-import type { TranslationOptions } from "../appSettings";
+﻿import type { TranslationOptions } from "../appSettings";
 import type { CropRetryItem, CropRetryTarget, ModelEndpointHandle, OcrBboxResult, OverlayItem, TranslationResult } from "./types";
 import { loadRuntimeModules, startModelEndpointSession, type ModelEndpointSession } from "./runtimeModules";
 

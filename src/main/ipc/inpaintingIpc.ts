@@ -1,4 +1,4 @@
-import { ipcMain, shell } from "electron";
+﻿import { ipcMain, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

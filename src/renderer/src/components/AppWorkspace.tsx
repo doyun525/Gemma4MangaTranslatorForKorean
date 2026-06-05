@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import type { JobState, MangaPage } from "../../../shared/types";
 import type { ProgressSnapshot } from "../lib/jobProgress";
 import { ImageStage, type ImageStageProps } from "./ImageStage";

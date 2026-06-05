@@ -1,4 +1,4 @@
-import { ipcMain, type IpcMainInvokeEvent } from "electron";
+﻿import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import type { IpcContext } from "./context";
 
 let guardInstalled = false;

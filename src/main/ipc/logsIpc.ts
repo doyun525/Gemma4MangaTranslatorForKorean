@@ -1,4 +1,4 @@
-import { ipcMain, shell } from "electron";
+﻿import { ipcMain, shell } from "electron";
 import { RendererLogRequestSchema, parseIpcPayload } from "../../shared/ipcSchemas";
 import { getLogPath, writeLog } from "../logger";
 

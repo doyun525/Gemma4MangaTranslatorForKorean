@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+﻿import { ipcMain } from "electron";
 import type { JobEvent } from "../../shared/types";
 import type { IpcContext } from "./context";
 

@@ -25,7 +25,7 @@ function extractJsonCandidate(rawText) {
 }
 
 function parseJsonLenient(rawText) {
-  let candidate = "";
+  let candidate;
   try {
     candidate = extractJsonCandidate(rawText);
   } catch {
@@ -77,7 +77,7 @@ function repairBrokenJson(candidate) {
   repaired = repaired.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, (_, prefix, key) => `${prefix}"${key}":`);
   repaired = repaired.replace(/:\s*'([^']*)'/g, ': "$1"');
   repaired = repaired.replace(/("id"\s*:\s*)([A-Za-z]+)(\s*[,\n}])/g, '$1"$2"$3');
-  repaired = repaired.replace(/("(?:jp|ko|type)"\s*:\s*)([^"{\[\n][^,\n}]*)/g, (_match, prefix, value) => {
+  repaired = repaired.replace(/("(?:jp|ko|type)"\s*:\s*)([^"{[\n][^,\n}]*)/g, (_match, prefix, value) => {
     const trimmed = String(value).trim();
     if (!trimmed || /^"/.test(trimmed)) {
       return `${prefix}${trimmed}`;
@@ -367,35 +367,6 @@ function normalizeBBox(item) {
   });
 }
 
-function normalizePixelBBox(item) {
-  const box = item;
-  if (!box || typeof box !== "object") {
-    return null;
-  }
-
-  const cornerBbox = bboxFromPartial({
-    x1: toNumber(box.x1),
-    y1: toNumber(box.y1),
-    x2: toNumber(box.x2),
-    y2: toNumber(box.y2)
-  });
-  const x = toNumber(cornerBbox?.x);
-  const y = toNumber(cornerBbox?.y);
-  const w = toNumber(cornerBbox?.w);
-  const h = toNumber(cornerBbox?.h);
-
-  if (![x, y, w, h].every((value) => value !== null)) {
-    return null;
-  }
-
-  return {
-    x: Math.max(0, roundCoordinate(x)),
-    y: Math.max(0, roundCoordinate(y)),
-    w: Math.max(1, roundCoordinate(w)),
-    h: Math.max(1, roundCoordinate(h))
-  };
-}
-
 function normalizeItem(item, index) {
   const ko = [item?.ko, item?.korean, item?.translation, item?.translated, item?.text_ko].find((value) => typeof value === "string" && value.trim());
   const jp = [item?.jp, item?.japanese, item?.source, item?.ocr, item?.text_jp].find((value) => typeof value === "string" && value.trim()) || "";
@@ -416,31 +387,6 @@ function normalizeItem(item, index) {
     type: normalizeParsedType(item?.type),
     ...(normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) ? { textRole: normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) } : {}),
     bbox,
-    jp: normalizedJp,
-    ko: normalizedKo,
-    direction: normalizeDirection(item?.direction ?? item?.sourceDirection ?? item?.writingDirection),
-    angle: normalizeAngle(item?.angle ?? item?.rotation ?? item?.rotationDeg),
-    fontSize: normalizeFontSize(item?.fontSize ?? item?.font_size ?? item?.font),
-    confidence: normalizeConfidence(item?.confidence ?? item?.score)
-  };
-}
-
-function normalizeRetryItem(item, index) {
-  const ko = [item?.ko, item?.korean, item?.translation, item?.translated, item?.text_ko].find((value) => typeof value === "string" && value.trim());
-  const jp = [item?.jp, item?.japanese, item?.source, item?.ocr, item?.text_jp].find((value) => typeof value === "string" && value.trim()) || "";
-  const normalizedKo = normalizeTextField(ko);
-  const normalizedJp = normalizeTextField(jp);
-  const bbox = normalizePixelBBox(item);
-
-  if (!normalizedKo) {
-    return null;
-  }
-
-  return {
-    id: toNumber(item?.id) ?? index + 1,
-    type: normalizeParsedType(item?.type),
-    ...(bbox ? { bbox } : {}),
-    ...(normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) ? { textRole: normalizeTextRole(item?.textRole ?? item?.text_role ?? item?.role) } : {}),
     jp: normalizedJp,
     ko: normalizedKo,
     direction: normalizeDirection(item?.direction ?? item?.sourceDirection ?? item?.writingDirection),
@@ -479,35 +425,9 @@ function normalizeItems(parsed) {
     .filter(Boolean);
 }
 
-function normalizeRetryItems(parsed) {
-  const items = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed?.items)
-      ? parsed.items
-      : Array.isArray(parsed?.blocks)
-        ? parsed.blocks
-        : [];
-
-  return items
-    .map((item, index) => normalizeRetryItem(item, index))
-    .filter(Boolean);
-}
-
-function parseRetryItems(rawText) {
-  const looseItems = normalizeRetryItems({ items: parseLooseItemList(rawText, { requireBbox: false }) });
-  try {
-    const parsedItems = normalizeRetryItems(parseJsonLenient(rawText));
-    return looseItems.length > parsedItems.length ? looseItems : parsedItems;
-  } catch {
-    return looseItems;
-  }
-}
-
 module.exports = {
   extractJsonCandidate,
   normalizeItems,
-  normalizeRetryItems,
-  parseRetryItems,
   parseJsonLenient,
   repairBrokenJson
 };

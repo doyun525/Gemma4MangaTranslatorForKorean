@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import type { RenderTextDirection, TranslationBlock } from "../../../shared/types";
 import { DEFAULT_SMART_KO_LINE_BREAKS, DEFAULT_SMART_KO_LINE_BREAKS_PERSIST } from "../lib/koreanLineBreaks";
 import { FontSelect } from "./FontSelect";

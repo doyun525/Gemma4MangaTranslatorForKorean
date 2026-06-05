@@ -1,4 +1,4 @@
-import { resolveBlockVisualStyle } from "../../shared/blockVisuals";
+﻿import { resolveBlockVisualStyle } from "../../shared/blockVisuals";
 import {
   estimateBlockFontSizePx,
   clamp,

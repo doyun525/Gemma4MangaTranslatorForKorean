@@ -1,4 +1,4 @@
-import { nativeImage } from "electron";
+﻿import { nativeImage } from "electron";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { clamp } from "../shared/geometry";

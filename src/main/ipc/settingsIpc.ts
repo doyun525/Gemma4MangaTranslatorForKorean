@@ -1,4 +1,4 @@
-import { dialog, ipcMain } from "electron";
+﻿import { dialog, ipcMain } from "electron";
 import { randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { existsSync } from "node:fs";

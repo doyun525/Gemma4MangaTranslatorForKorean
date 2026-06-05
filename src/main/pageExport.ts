@@ -1,4 +1,4 @@
-import { BrowserWindow, nativeImage } from "electron";
+﻿import { BrowserWindow, nativeImage } from "electron";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";

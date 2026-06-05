@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import type { ChapterSnapshot, JobState, MangaPage, TranslationBlock } from "../../../shared/types";
 import type { ProgressSnapshot } from "../lib/jobProgress";
 import { EditorPanel } from "./EditorPanel";

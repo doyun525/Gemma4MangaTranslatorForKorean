@@ -1,4 +1,4 @@
-import type { TranslationBlock } from "../../../shared/types";
+﻿import type { TranslationBlock } from "../../../shared/types";
 import { bboxToPixels, clamp, resolveEffectiveRenderBbox } from "../../../shared/geometry";
 import { BLOCK_TEXT_LAYOUT_CONFIG } from "../../../shared/blockTextLayoutConfig";
 import {

@@ -1,4 +1,4 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 
 const MAX_TITLE_LENGTH = 240;
 const MAX_TEXT_LENGTH = 20000;
