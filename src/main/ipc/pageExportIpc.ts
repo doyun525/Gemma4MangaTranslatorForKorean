@@ -32,7 +32,7 @@ export function registerPageExportIpc(context: IpcContext): void {
           }
         : {
             title: "번역 이미지 ZIP 저장",
-            defaultPath: `${sanitizeOutputBaseName(chapter.title)}-translated-pages.zip`,
+            defaultPath: `${sanitizeOutputBaseName(chapter.title)} (korean_ai).zip`,
             filters: [{ name: "ZIP 압축 파일", extensions: ["zip"] }]
           };
     const mainWindow = context.getMainWindow();
