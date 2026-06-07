@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { formatStoredTimestamp } from "../shared/storedTimestamp";
 
+configureElectronGpuMode();
 configureDevelopmentElectronStorage();
 
 function bootstrapLogPath(): string {
@@ -51,6 +52,25 @@ function serialize(detail: unknown): string {
   } catch {
     return String(detail);
   }
+}
+
+function configureElectronGpuMode(): void {
+  const explicitEnable = /^(1|true|yes|y|on|enabled)$/i.test(process.env.MANGA_TRANSLATOR_ELECTRON_GPU?.trim() || "");
+  const explicitDisable = /^(1|true|yes|y|on)$/i.test(process.env.MANGA_TRANSLATOR_DISABLE_ELECTRON_GPU?.trim() || "");
+  const shouldDisable = explicitDisable && !explicitEnable;
+  if (!shouldDisable) {
+    writeBootstrapLog("bootstrap:electron-gpu-enabled", {
+      reason: explicitEnable ? "MANGA_TRANSLATOR_ELECTRON_GPU" : "default"
+    });
+    return;
+  }
+
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
+  writeBootstrapLog("bootstrap:electron-gpu-disabled", {
+    reason: "MANGA_TRANSLATOR_DISABLE_ELECTRON_GPU",
+    note: "Electron UI uses software rendering to avoid CUDA model-load stalls in the app window."
+  });
 }
 
 function configureDevelopmentElectronStorage(): void {

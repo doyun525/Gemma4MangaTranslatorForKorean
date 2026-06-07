@@ -27,7 +27,7 @@ import {
 } from "../shared/blockVisuals";
 import { appendWebCapturePage, createWebChapter, openChapter, saveChapterSnapshot } from "./library";
 import { getBlockTextLayoutRuntimeScript } from "./blockTextLayoutRuntime";
-import { logInfo } from "./logger";
+import { logInfo, logWarn } from "./logger";
 
 type WebBrowseSession = {
   sessionId: string;
@@ -179,23 +179,10 @@ export class WebBrowserManager {
     mainWindow.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
 
-    let finalUrl = startUrl;
-    let pageTitle = openedChapter.webOrigin.title || openedChapter.title;
-    try {
-      await view.webContents.loadURL(startUrl);
-      finalUrl = view.webContents.getURL() || startUrl;
-      pageTitle = view.webContents.getTitle() || pageTitle;
-    } catch (error) {
-      try {
-        mainWindow.contentView.removeChildView(view);
-        view.webContents.close();
-      } catch {
-        // Ignore cleanup failures after a partial WebContentsView initialization.
-      }
-      throw error;
-    }
+    const finalUrl = startUrl;
+    const pageTitle = openedChapter.webOrigin.title || openedChapter.title;
 
-    this.sessions.set(sessionId, {
+    const sessionItem: WebBrowseSession = {
       sessionId,
       chapterId: openedChapter.id,
       view,
@@ -206,7 +193,9 @@ export class WebBrowserManager {
       segmentCount: openedChapter.pages.length,
       title: pageTitle,
       lastBounds: { x: 0, y: 0, width: 0, height: 0 }
-    });
+    };
+    this.sessions.set(sessionId, sessionItem);
+    this.loadReopenedUrlInBackground(sessionItem, startUrl);
 
     return {
       sessionId,
@@ -215,6 +204,33 @@ export class WebBrowserManager {
       url: finalUrl,
       title: pageTitle
     };
+  }
+
+  private loadReopenedUrlInBackground(item: WebBrowseSession, url: string): void {
+    logInfo("Web browser reopen load started in background", {
+      sessionId: item.sessionId,
+      chapterId: item.chapterId,
+      url
+    });
+    void item.view.webContents.loadURL(url).then(() => {
+      if (!this.sessions.has(item.sessionId)) {
+        return;
+      }
+      item.title = item.view.webContents.getTitle() || item.title;
+      logInfo("Web browser reopen load completed", {
+        sessionId: item.sessionId,
+        chapterId: item.chapterId,
+        url: item.view.webContents.getURL() || url,
+        title: item.title
+      });
+    }).catch((error: unknown) => {
+      logWarn("Web browser reopen load failed", {
+        sessionId: item.sessionId,
+        chapterId: item.chapterId,
+        url,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
   }
 
   close(sessionId: string): void {
@@ -870,7 +886,7 @@ async function primeLazyContentForFullPageCapture(webContents: WebContents): Pro
       scrollToRoot(startX, Math.max(0, height - viewportHeight));
       await sleep(80);
       const nextHeight = Math.max(scrollRoot?.scrollHeight || 0, document.documentElement.scrollHeight || 0, document.body?.scrollHeight || 0, viewportHeight);
-      if (pass > 0 && Math.abs(nextHeight - previousHeight) < 4) {
+      if (Math.abs(nextHeight - height) < 4 || (pass > 0 && Math.abs(nextHeight - previousHeight) < 4)) {
         break;
       }
       previousHeight = nextHeight;

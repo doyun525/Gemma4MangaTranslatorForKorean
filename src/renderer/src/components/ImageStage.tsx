@@ -1,6 +1,6 @@
 import React from "react";
 import type { BBox, InpaintingMaskStroke, MangaPage, TranslationBlock } from "../../../shared/types";
-import type { ViewportSize } from "../lib/overlayLayout";
+import { resolveBlockRectPx, type PixelRect, type ViewportSize } from "../lib/overlayLayout";
 import { OverlayBlock } from "./OverlayBlock";
 
 export type ImageStageProps = {
@@ -64,6 +64,7 @@ export function ImageStage({
   onToggleBlockExcluded
 }: ImageStageProps): React.JSX.Element {
   const clipId = React.useId();
+  const visibleStageRect = useVisibleStageRect(stageRef, stageSize, `${page.id}:${page.width}x${page.height}:${page.blocks.length}`);
   const cursorVisible = Boolean(retouchCursor?.point && stageSize);
   const cursorScaleX = stageSize ? stageSize.width / Math.max(1, page.width) : 1;
   const cursorScaleY = stageSize ? stageSize.height / Math.max(1, page.height) : 1;
@@ -76,6 +77,37 @@ export function ImageStage({
       width: Math.max(1, stroke.radiusPx * 2)
     }))
     .filter((stroke) => stroke.path);
+  const pageSize = React.useMemo(() => ({ width: page.width, height: page.height }), [page.height, page.width]);
+  const shouldVirtualizeBlocks = Boolean(
+    stageSize &&
+      visibleStageRect &&
+      showTextBlocks &&
+      !inpaintingMode &&
+      page.blocks.length > 320
+  );
+  const visibleBlocks = React.useMemo(() => {
+    if (!stageSize || !shouldVirtualizeBlocks || !visibleStageRect) {
+      return page.blocks;
+    }
+    const padding = Math.max(800, visibleStageRect.height * 1.5);
+    const paddedRect: PixelRect = {
+      left: visibleStageRect.left - 200,
+      top: visibleStageRect.top - padding,
+      width: visibleStageRect.width + 400,
+      height: visibleStageRect.height + padding * 2
+    };
+    return page.blocks.filter((block) => {
+      if (block.id === selectedBlockId) {
+        return true;
+      }
+      if (block.renderDirection === "hidden") {
+        return false;
+      }
+      const text = block.translatedText || block.sourceText || "";
+      const rect = resolveBlockRectPx(block, pageSize, stageSize, text);
+      return rectsIntersect(rect, paddedRect);
+    });
+  }, [page.blocks, pageSize, selectedBlockId, shouldVirtualizeBlocks, stageSize, visibleStageRect]);
 
   return (
     <div className="stage-wrap">
@@ -105,11 +137,11 @@ export function ImageStage({
           </div>
         )}
         {imageDataUrl && stageSize && showTextBlocks
-          ? page.blocks.map((block) => (
+          ? visibleBlocks.map((block) => (
               <OverlayBlock
                 key={block.id}
                 block={block}
-                pageSize={{ width: page.width, height: page.height }}
+                pageSize={pageSize}
                 stageSize={stageSize}
                 selected={block.id === selectedBlockId}
                 showChrome={showBlockChrome}
@@ -188,6 +220,91 @@ export function ImageStage({
       </div>
     </div>
   );
+}
+
+function useVisibleStageRect(
+  stageRef: React.RefObject<HTMLDivElement | null>,
+  stageSize: ViewportSize | null,
+  revision: string
+): PixelRect | null {
+  const [rect, setRect] = React.useState<PixelRect | null>(null);
+
+  React.useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !stageSize) {
+      setRect(null);
+      return;
+    }
+
+    let frame = 0;
+    const scrollContainer = findScrollContainer(stage);
+    const sync = () => {
+      if (frame) {
+        cancelAnimationFrame(frame);
+      }
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const stageRect = stage.getBoundingClientRect();
+        const viewportRect = scrollContainer
+          ? scrollContainer.getBoundingClientRect()
+          : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+        const nextRect = {
+          left: Math.max(0, viewportRect.left - stageRect.left),
+          top: Math.max(0, viewportRect.top - stageRect.top),
+          width: Math.max(1, Math.min(stageRect.width, viewportRect.width)),
+          height: Math.max(1, Math.min(stageRect.height, viewportRect.height))
+        };
+        setRect((current) => {
+          if (
+            current &&
+            Math.abs(current.left - nextRect.left) < 1 &&
+            Math.abs(current.top - nextRect.top) < 1 &&
+            Math.abs(current.width - nextRect.width) < 1 &&
+            Math.abs(current.height - nextRect.height) < 1
+          ) {
+            return current;
+          }
+          return nextRect;
+        });
+      });
+    };
+
+    sync();
+    scrollContainer?.addEventListener("scroll", sync, { passive: true });
+    window.addEventListener("resize", sync);
+    const observer = new ResizeObserver(sync);
+    observer.observe(stage);
+    if (scrollContainer) {
+      observer.observe(scrollContainer);
+    }
+    return () => {
+      if (frame) {
+        cancelAnimationFrame(frame);
+      }
+      scrollContainer?.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+      observer.disconnect();
+    };
+  }, [revision, stageRef, stageSize?.height, stageSize?.width]);
+
+  return rect;
+}
+
+function findScrollContainer(element: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = element.parentElement;
+  while (current) {
+    const style = window.getComputedStyle(current);
+    const overflowY = style.overflowY || style.overflow;
+    if (/(auto|scroll|overlay)/.test(overflowY) && current.scrollHeight > current.clientHeight + 2) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function rectsIntersect(a: PixelRect, b: PixelRect): boolean {
+  return a.left + a.width >= b.left && b.left + b.width >= a.left && a.top + a.height >= b.top && b.top + b.height >= a.top;
 }
 
 function pointsToPath(points: Array<{ x: number; y: number }>): string {

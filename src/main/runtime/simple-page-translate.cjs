@@ -5533,13 +5533,13 @@ async function startServer(options) {
     recentStdout = shrinkBuffer(recentStdout, chunk);
     serverLogStream?.write(`[stdout] ${chunk}`);
     emitServerProgressLog(chunk);
-    process.stdout.write(`[llama:${options.label}:stdout] ${chunk}`);
+    writeServerTerminalLog(options, "stdout", chunk);
   });
   child.stderr?.on("data", (chunk) => {
     recentStderr = shrinkBuffer(recentStderr, chunk);
     serverLogStream?.write(`[stderr] ${chunk}`);
     emitServerProgressLog(chunk);
-    process.stderr.write(`[llama:${options.label}:stderr] ${chunk}`);
+    writeServerTerminalLog(options, "stderr", chunk);
   });
   child.once("exit", () => serverLogStream?.end());
   child.once("error", () => serverLogStream?.end());
@@ -5735,19 +5735,72 @@ function resolveLlamaServerProgressLogMode(options = {}) {
   const raw = String(
     runtimeOverrideEnv("MANGA_TRANSLATOR_LLAMA_SERVER_PROGRESS_LOG", options) ??
     runtimeOverrideEnv("MGT_LLAMA_SERVER_PROGRESS_LOG", options) ??
-    "dedupe"
+    "summary"
   ).trim().toLowerCase();
   if (["all", "raw", "verbose"].includes(raw)) {
     return "all";
   }
+  if (["dedupe", "unique"].includes(raw)) {
+    return "dedupe";
+  }
   if (["off", "none", "disabled", "false", "0"].includes(raw)) {
     return "off";
   }
-  return "dedupe";
+  return "summary";
+}
+
+function resolveLlamaServerTerminalLogMode(options = {}) {
+  const raw = String(
+    runtimeOverrideEnv("MANGA_TRANSLATOR_LLAMA_SERVER_TERMINAL_LOG", options) ??
+    runtimeOverrideEnv("MGT_LLAMA_SERVER_TERMINAL_LOG", options) ??
+    "off"
+  ).trim().toLowerCase();
+  if (["all", "raw", "verbose", "true", "1", "yes", "on"].includes(raw)) {
+    return "all";
+  }
+  if (["summary", "important"].includes(raw)) {
+    return "summary";
+  }
+  return "off";
+}
+
+function writeServerTerminalLog(options = {}, streamName, chunk) {
+  const mode = resolveLlamaServerTerminalLogMode(options);
+  if (mode === "off") {
+    return;
+  }
+  const write = streamName === "stderr" ? process.stderr.write.bind(process.stderr) : process.stdout.write.bind(process.stdout);
+  if (mode === "summary") {
+    const lines = String(chunk ?? "")
+      .split(/[\r\n]+/)
+      .map((line) => sanitizeInstallLogLine(line))
+      .filter((line) => line && isImportantServerProgressLine(line));
+    if (lines.length === 0) {
+      return;
+    }
+    write(`[llama:${options.label}:${streamName}] ${lines.join("\n")}\n`);
+    return;
+  }
+  write(`[llama:${options.label}:${streamName}] ${chunk}`);
 }
 
 function normalizeServerProgressLogLine(line) {
   return String(line ?? "").replace(/\s+/g, " ").trim();
+}
+
+function isImportantServerProgressLine(line) {
+  const text = String(line ?? "").toLowerCase();
+  return (
+    text.includes("loading model tensors") ||
+    text.includes("offloaded") ||
+    text.includes("model buffer size") ||
+    text.includes("kv buffer size") ||
+    text.includes("server is listening") ||
+    text.includes("listening") ||
+    text.includes("error") ||
+    text.includes("failed") ||
+    text.includes("exiting")
+  );
 }
 
 function emitServerInstallLog(options = {}, chunk, state = {}) {
@@ -5757,6 +5810,9 @@ function emitServerInstallLog(options = {}, chunk, state = {}) {
   for (const part of String(chunk ?? "").split(/[\r\n]+/)) {
     const line = sanitizeInstallLogLine(part);
     if (!line) {
+      continue;
+    }
+    if (state.mode === "summary" && !isImportantServerProgressLine(line)) {
       continue;
     }
     if (state.mode !== "all" && state.seenLines instanceof Set) {
